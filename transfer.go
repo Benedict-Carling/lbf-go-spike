@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ const (
 	parallelFiles = 8
 	blockSize     = 8 << 20
 	blockWorkers  = 4
+	crateName     = "ro-crate-metadata.json"
 )
 
 type publication struct {
@@ -122,8 +124,8 @@ func upload(ctx context.Context, t target, pub publication) error {
 			return "", err
 		}
 		defer fh.Close()
+		// Left to the SDK, the block size grows with the file so it stays within 50,000 blocks.
 		_, err = cc.NewBlockBlobClient(id+"/"+f.Rel).UploadFile(ctx, fh, &blockblob.UploadFileOptions{
-			BlockSize:   blockSize,
 			Concurrency: blockWorkers,
 			AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 				IfNoneMatch: to.Ptr(azcore.ETagAny),
@@ -141,9 +143,15 @@ func upload(ctx context.Context, t target, pub publication) error {
 		return err
 	}
 
-	_, err = cc.NewBlockBlobClient(id+"/ro-crate-metadata.json").UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
+	_, err = cc.NewBlockBlobClient(id+"/"+crateName).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
 		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: to.Ptr("application/json")},
+		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+			IfNoneMatch: to.Ptr(azcore.ETagAny),
+		}},
 	})
+	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
+		return fmt.Errorf("%s/%s already exists in the container; refusing to overwrite", id, crateName)
+	}
 	if err != nil {
 		return fmt.Errorf("uploading ro-crate-metadata.json: %w", err)
 	}
@@ -176,6 +184,9 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	}
 	if len(blobs) == 0 {
 		return "", fmt.Errorf("no dataset %s in %s", id, t.containerURL())
+	}
+	if !slices.ContainsFunc(blobs, func(b *container.BlobItem) bool { return *b.Name == prefix+crateName }) {
+		return "", fmt.Errorf("dataset %s has no %s, so its upload never finished; nothing was downloaded", id, crateName)
 	}
 
 	root, err := filepath.Abs(filepath.Join(outDir, id))
@@ -230,6 +241,9 @@ func transferAll[T any](ctx context.Context, items []T, each func(context.Contex
 	g.SetLimit(parallelFiles)
 	for _, it := range items {
 		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
 			name, err := each(gctx, it)
 			if err != nil {
 				return err
@@ -249,7 +263,7 @@ func logDone(started time.Time, total int64) {
 // An uncommitted block proves write access without creating a visible blob; the crate upload discards it.
 func checkWrite(ctx context.Context, cc *container.Client, t target, id string) error {
 	blockID := base64.StdEncoding.EncodeToString([]byte("lbf-write-check"))
-	_, err := cc.NewBlockBlobClient(id+"/ro-crate-metadata.json").StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader([]byte{0})), nil)
+	_, err := cc.NewBlockBlobClient(id+"/"+crateName).StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader([]byte{0})), nil)
 	if bloberror.HasCode(err, bloberror.AuthorizationPermissionMismatch, bloberror.AuthorizationFailure, bloberror.InsufficientAccountPermissions) {
 		return fmt.Errorf("you cannot write to %s/%s, so nothing was uploaded; your login needs 'Storage Blob Data Contributor' there", t.Account, t.Container)
 	}
