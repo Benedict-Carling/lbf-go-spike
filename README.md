@@ -77,8 +77,8 @@ resolves locally, including to lbf's built-in bronze profile. It validates this 
 
 `--dry-run` validates and prints the crate without signing in. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). `--tag KEY=VALUE` picks
-the storage account (default `tag=storage-test`, the test account; production is
-`tag=storage`), `--container` defaults to `bronze`, and `--sas-env FILE`
+the storage account (default `tag=storage`, production; the test account is
+`tag=storage-test`), `--container` defaults to `bronze`, and `--sas-env FILE`
 uses a pre-minted credential instead of `az login`.
 
 Blob layout, RO-Crate sidecar and `azure_sas.env` format match the Nextflow

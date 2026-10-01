@@ -27,8 +27,8 @@ Usage:
 
 Common options:
   --container NAME     blob container (default bronze)
-  --tag KEY=VALUE      tag identifying the storage account (default tag=storage-test;
-                       production is tag=storage)
+  --tag KEY=VALUE      tag identifying the storage account (default tag=storage, production;
+                       the test account is tag=storage-test)
   --tenant ID          Entra tenant to sign in to (default Imperial College London)
   --sas-env FILE       pre-minted credential instead of 'az login'
 
@@ -69,7 +69,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	tag := fs.String("tag", "tag=storage-test", "tag identifying the storage account")
+	tag := fs.String("tag", "tag=storage", "tag identifying the storage account")
 	tenant := fs.String("tenant", imperialTenant, "Entra tenant to sign in to")
 	containerName := fs.String("container", "bronze", "blob container")
 	sasEnv := fs.String("sas-env", "", "pre-minted credential file from 'lbf mint-sas'")
