@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"slices"
@@ -140,6 +141,25 @@ func TestProfileCannotReplaceBronze(t *testing.T) {
 		`{"$id": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0"}`)
 	if _, err := loadProfile(filepath.Join(root, "fake")); err == nil || !strings.Contains(err.Error(), "bronze") {
 		t.Fatalf("profile reusing bronze's $id accepted: %v", err)
+	}
+}
+
+func TestCommandsRejectOtherCommandsFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"fetch", "20260101-x-y-0000", "--dry-run"},
+		{"fetch", "20260101-x-y-0000", "--provenance", "p.json"},
+		{"mint-sas", "--mode", "upload", "--profile", "p"},
+		{"logout", "--tag", "tag=x"},
+	} {
+		if _, _, err := parseArgs(args[0], args[1:]); err == nil || !strings.Contains(err.Error(), "not defined") {
+			t.Errorf("%v: got %v", args, err)
+		}
+	}
+	if _, _, err := parseArgs("publish", []string{"data", "--dry-run", "--profile", "p"}); err != nil {
+		t.Errorf("publish flags: %v", err)
+	}
+	if _, _, err := parseArgs("publish", []string{"-h"}); !errors.Is(err, flag.ErrHelp) {
+		t.Errorf("publish -h: %v", err)
 	}
 }
 
