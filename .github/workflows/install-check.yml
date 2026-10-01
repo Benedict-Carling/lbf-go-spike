@@ -10,9 +10,11 @@ jobs:
         # powershell is Windows PowerShell 5.1, what the Start menu opens; pwsh is PowerShell 7.
         shell: [powershell, pwsh]
     runs-on: windows-latest
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
     steps:
-      - shell: ${{ matrix.shell }}
-        run: |
+      - run: |
           $PSVersionTable.PSVersion.ToString()
           irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
           lbf version
