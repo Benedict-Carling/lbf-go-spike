@@ -6,11 +6,21 @@ Linux and Windows.
 
 ## Install
 
-Windows (PowerShell, no admin):
+Windows: open PowerShell (Start menu, type "PowerShell") and paste:
 
 ```powershell
 irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
 ```
+
+Nothing needs installing first: `irm` and `iex` are built into PowerShell
+(short for `Invoke-RestMethod` and `Invoke-Expression`), and both Windows
+PowerShell 5.1 and PowerShell 7 work. No admin rights are needed. The script
+puts `lbf.exe` in `%LOCALAPPDATA%\lbf` and adds it to your PATH, so `lbf` works
+straight away in that window and in new ones. Then run `lbf login`.
+
+If your organisation blocks scripts this way, download `lbf-windows-amd64.exe`
+(or `-arm64.exe` on Arm laptops) from the releases page, rename it to `lbf.exe`
+and run it from its folder as `.\lbf.exe`.
 
 macOS / Linux:
 
