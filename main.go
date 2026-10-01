@@ -88,7 +88,7 @@ func run(ctx context.Context, args []string) error {
 			fmt.Println(string(crate))
 			return nil
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.container)
+		t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.account, o.container)
 		if err != nil {
 			return err
 		}
@@ -103,7 +103,7 @@ func run(ctx context.Context, args []string) error {
 		if !validID.MatchString(id) {
 			return fmt.Errorf("%q is not a dataset ID", id)
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.container)
+		t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.account, o.container)
 		if err != nil {
 			return err
 		}
@@ -146,7 +146,7 @@ func run(ctx context.Context, args []string) error {
 		if o.mode != "upload" && o.mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
-		t, err := mintTarget(ctx, o.tenant, o.tag, o.container, o.mode)
+		t, err := mintTarget(ctx, o.tenant, o.tag, o.account, o.container, o.mode)
 		if err != nil {
 			return err
 		}
@@ -162,10 +162,10 @@ func run(ctx context.Context, args []string) error {
 }
 
 type options struct {
-	tag, tenant, container, sasEnv string
-	out, mode                      string
-	provenance, profile            string
-	dryRun                         bool
+	tag, account, tenant, container, sasEnv string
+	out, mode                               string
+	provenance, profile                     string
+	dryRun                                  bool
 }
 
 func parseArgs(cmd string, args []string) (options, []string, error) {
@@ -204,6 +204,7 @@ func newCommand(cmd string, o *options) (*command, error) {
 	storage := func() {
 		str(&o.container, "container", "NAME", "bronze", "blob container")
 		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
+		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
 		tenant()
 	}
 	sasEnv := func() { str(&o.sasEnv, "sas-env", "FILE", "", "pre-minted credential file from 'lbf mint-sas'") }
@@ -316,11 +317,11 @@ func logf(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format, a...)
 }
 
-func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, containerName string) (target, error) {
+func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, accountName, containerName string) (target, error) {
 	if sasEnv != "" {
 		return readSASEnv(sasEnv, mode, containerName)
 	}
-	return mintTarget(ctx, tenant, tag, containerName, mode)
+	return mintTarget(ctx, tenant, tag, accountName, containerName, mode)
 }
 
 // PowerShell 5.1 passes 'C:\My Folder\' -x as `C:\My Folder" -x`; a quote cannot appear in a Windows path.

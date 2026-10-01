@@ -86,7 +86,8 @@ File paths are relative to `<path>`. `crate` uses the RO-Crate's own names.
 `--dry-run` validates and prints the crate without signing in, as uploader `dry-run`. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). `--tag KEY=VALUE` picks
 the storage account (default `tag=storage`, production; the test account is
-`tag=storage-test`), `--container` defaults to `bronze`, and `--sas-env FILE`
+`tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and
+otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
 uses a pre-minted credential instead of `az login`.
 
 Blob layout, RO-Crate sidecar and `azure_sas.env` format match the Nextflow
