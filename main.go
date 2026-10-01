@@ -34,7 +34,7 @@ Common options:
 
 --provenance is a JSON file: {"derived_from": "<id>", "instruments": [{"name", "version", "url"}],
 "properties": {"name": "value"}}. --profile is a directory holding a JSON Schema profile.json;
-publish validates against it before signing in or uploading anything.
+publish validates against it, and lbf's bronze profile, before uploading anything.
 `
 
 const sasLifetime = 144 * time.Hour

@@ -98,7 +98,7 @@ func TestRepairWindowsArgs(t *testing.T) {
 func TestCrateMatchesPythonShape(t *testing.T) {
 	files := []localFile{{Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, "", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,67 +136,117 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-const minimalProfile = `{
+const minimalSilverProfile = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.org/profiles/minimal-silver",
-  "type": "object",
-  "required": ["derived_from", "properties", "files"],
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0",
   "properties": {
-    "derived_from": {"type": "string"},
-    "properties": {"type": "object", "required": ["sample_id"]},
-    "files": {"type": "array", "minItems": 1}
+    "crate": {
+      "required": ["wasDerivedFrom", "instrument"],
+      "properties": {"additionalProperty": {"required": ["sample_id"]}}
+    }
   }
 }`
 
-const extendedProfile = `{
+const cellPaintingProfile = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.org/profiles/extended-silver",
+  "$id": "https://example.org/profiles/cell-painting",
   "$ref": "https://example.org/profiles/minimal-silver",
   "properties": {
-    "properties": {"required": ["experiment_type"]},
-    "instruments": {"contains": {"properties": {"name": {"const": "CellProfiler"}}, "required": ["name"]}}
+    "data": {"properties": {"files": {"allOf": [
+      {"contains": {"properties": {"path": {"const": "plate_map.csv"}}}},
+      {"contains": {"properties": {"path": {"pattern": "^features/.+\\.parquet$"}}}},
+      {"items": {"properties": {"path": {"pattern": "^(plate_map\\.csv|features/.+|qc/.+)$"}}}}
+    ]}}},
+    "crate": {"properties": {
+      "instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}},
+      "additionalProperty": {"required": ["plate_id"]}
+    }}
   }
 }`
 
-func TestProfileValidationWithRefToSibling(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "minimal-silver", "profile.json"), minimalProfile)
-	writeFile(t, filepath.Join(root, "extended-silver", "profile.json"), extendedProfile)
+func cellPaintingRun() publication {
+	return publication{
+		ID:     newID(),
+		Source: "/data/run1",
+		Files: []localFile{
+			{Rel: "run1/plate_map.csv", Size: 10},
+			{Rel: "run1/features/P001.parquet", Size: 100},
+		},
+		Provenance: provenance{
+			DerivedFrom: "20260101-x-y-0000",
+			Instruments: []instrument{{"CellProfiler", "4.2.6", "https://cellprofiler.org"}},
+			Properties:  map[string]string{"sample_id": "S1", "plate_id": "P001"},
+		},
+	}
+}
 
-	prof, err := loadProfile(filepath.Join(root, "extended-silver"))
+func TestProfileChecksDataAndCrate(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "minimal-silver", "profile.json"), minimalSilverProfile)
+	writeFile(t, filepath.Join(root, "cell-painting", "profile.json"), cellPaintingProfile)
+	prof, err := loadProfile(filepath.Join(root, "cell-painting"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prof.ID != "https://example.org/profiles/extended-silver" {
-		t.Fatalf("id %s", prof.ID)
-	}
-	files := []localFile{{Rel: "run1/a.txt", Size: 1}}
+	tgt := target{Account: "acct", Container: "silver", User: "u@example.org"}
 
-	good := provenance{
-		DerivedFrom: "20260101-x-y-0000",
-		Instruments: []instrument{{"CellProfiler", "4.2.6", "https://cellprofiler.org"}},
-		Properties:  map[string]string{"sample_id": "S1", "experiment_type": "paint"},
-	}
-	if err := prof.validate(profileView("id", good, files)); err != nil {
+	good := cellPaintingRun()
+	good.Profile = prof
+	crate, err := good.crate(tgt)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	missingParent := good
-	missingParent.Properties = map[string]string{"experiment_type": "paint"}
-	err = prof.validate(profileView("id", missingParent, files))
-	if err == nil || !strings.Contains(err.Error(), "sample_id") {
-		t.Fatalf("parent profile's requirement not enforced: %v", err)
+	for _, want := range []string{
+		"/profiles/bronze/0.4.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
+		`"wasDerivedFrom": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
+	} {
+		if !strings.Contains(string(crate), want) {
+			t.Errorf("crate missing %s", want)
+		}
 	}
 
-	wrongTool := good
-	wrongTool.Instruments = []instrument{{"Fiji", "2", "https://fiji.sc"}}
-	if err := prof.validate(profileView("id", wrongTool, files)); err == nil {
-		t.Fatal("instrument rule not enforced")
+	cases := map[string]func(*publication, *target){
+		"stray file":   func(p *publication, _ *target) { p.Files = append(p.Files, localFile{Rel: "run1/notes.txt", Size: 1}) },
+		"no plate map": func(p *publication, _ *target) { p.Files = p.Files[1:] },
+		"no plate_id":  func(p *publication, _ *target) { p.Provenance.Properties = map[string]string{"sample_id": "S1"} },
+		"no sample_id": func(p *publication, _ *target) { p.Provenance.Properties = map[string]string{"plate_id": "P001"} },
+		"wrong instrument": func(p *publication, _ *target) {
+			p.Provenance.Instruments = []instrument{{"Fiji", "2", "https://fiji.sc"}}
+		},
+		"no parent":        func(p *publication, _ *target) { p.Provenance.DerivedFrom, p.Provenance.Instruments = "", nil },
+		"unknown uploader": func(_ *publication, t *target) { t.User = "" },
+	}
+	for name, change := range cases {
+		pub, tg := cellPaintingRun(), tgt
+		pub.Profile = prof
+		change(&pub, &tg)
+		if _, err := pub.crate(tg); err == nil {
+			t.Errorf("%s: accepted", name)
+		} else {
+			t.Logf("%s:\n%v", name, err)
+		}
+	}
+}
+
+func TestBronzeAppliesUnderAnyProfile(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "loose", "profile.json"), `{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://example.org/loose"}`)
+	prof, err := loadProfile(filepath.Join(root, "loose"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := publication{ID: newID(), Source: "/data/a", Files: []localFile{{Rel: "a", Size: 1}}, Profile: prof}
+	_, err = pub.crate(target{Container: "bronze"})
+	if err == nil || !strings.Contains(err.Error(), "/profiles/bronze/") || !strings.Contains(err.Error(), "creator") {
+		t.Fatalf("bronze rules skipped: %v", err)
 	}
 }
 
 func TestProvenanceRules(t *testing.T) {
 	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	writeFile(t, filepath.Join(data, "a.txt"), "a")
 	cases := map[string]string{
 		"unknown field":         `{"properties": {}, "instrumentz": []}`,
 		"parent without tools":  `{"derived_from": "20260101-x-y-0000"}`,
@@ -205,12 +255,13 @@ func TestProvenanceRules(t *testing.T) {
 		"bad parent id":         `{"derived_from": "../x", "instruments": [{"name": "a", "version": "1", "url": "https://a"}], "properties": {}}`,
 		"reserved property":     `{"properties": {"source_path": "/elsewhere"}}`,
 		"non-string property":   `{"properties": {"n": 1}}`,
+		"trailing content":      `{"properties": {}} {"derived_from": "x"}`,
 		"url not a uri":         `{"derived_from": "20260101-x-y-0000", "instruments": [{"name": "a", "version": "1", "url": "not a url"}], "properties": {}}`,
 	}
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		_, err := readProvenance(path)
+		_, err := preparePublication(data, path, "")
 		if err == nil {
 			t.Errorf("%s: accepted", name)
 			continue
@@ -219,26 +270,16 @@ func TestProvenanceRules(t *testing.T) {
 	}
 }
 
-func TestCrateRecordsDerivation(t *testing.T) {
-	prov := provenance{
-		DerivedFrom: "20260101-x-y-0000",
-		Instruments: []instrument{{"pipe", "1.0", "https://example.org/pipe"}},
-		Properties:  map[string]string{"sample_id": "S1"},
-	}
-	tgt := target{Account: "acct", Container: "silver", User: "u"}
-	raw, err := buildCrate("20260102-a-b-1111", "/data/out", []localFile{{Rel: "out/x", Size: 1}}, tgt, prov, "https://example.org/p", time.Now())
+func TestProvenanceAccepted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "p.json")
+	writeFile(t, path, `{"derived_from": "20260101-x-y-0000",
+  "instruments": [{"name": "CellProfiler", "version": "4.2.6", "url": "https://cellprofiler.org"}]}`)
+	p, err := readProvenance(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(raw)
-	for _, want := range []string{
-		`"wasDerivedFrom": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`,
-		`"https://w3id.org/ro/wfrun/process/0.5"`, `"https://example.org/p"`, `"name": "sample_id"`,
-		`"description": "Dataset 20260102-a-b-1111"`,
-	} {
-		if !strings.Contains(s, want) {
-			t.Errorf("crate missing %s", want)
-		}
+	if p.DerivedFrom != "20260101-x-y-0000" || len(p.Instruments) != 1 || p.Properties == nil {
+		t.Fatalf("%+v", p)
 	}
 }
 
@@ -251,32 +292,20 @@ func TestDefaultsAreBronze(t *testing.T) {
 	if err != nil || !strings.Contains(prof.ID, "/profiles/bronze/") {
 		t.Fatalf("default profile: %v %v", prof, err)
 	}
-	files := []localFile{{Rel: "a", Size: 1}}
-	if err := prof.validate(profileView(newID(), prov, files)); err != nil {
-		t.Fatal(err)
-	}
-	if err := prof.validate(profileView(newID(), prov, nil)); err == nil {
-		t.Fatal("bronze accepted a dataset with no files")
-	}
-	if err := prof.validate(profileView("not-an-id", prov, files)); err == nil {
-		t.Fatal("bronze accepted a malformed identifier")
-	}
-}
-
-func TestProfileCanRefBuiltInBronze(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "my", "profile.json"), `{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.org/my",
-  "$ref": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.2.0",
-  "properties": {"properties": {"required": ["sample_id"]}}
-}`)
-	prof, err := loadProfile(filepath.Join(root, "my"))
+	tgt := target{Container: "bronze", User: "u"}
+	pub := publication{ID: newID(), Source: "/data/a", Files: []localFile{{Rel: "a", Size: 1}}, Provenance: prov, Profile: prof}
+	crate, err := pub.crate(tgt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prov := provenance{Properties: map[string]string{"sample_id": "S1"}}
-	if err := prof.validate(profileView(newID(), prov, nil)); err == nil || !strings.Contains(err.Error(), "minItems") && !strings.Contains(err.Error(), "files") {
-		t.Fatalf("bronze rules not inherited: %v", err)
+	if !strings.Contains(string(crate), prof.ID) {
+		t.Fatalf("crate does not record %s", prof.ID)
+	}
+	if strings.Contains(string(crate), processRunCrate) {
+		t.Fatal("bronze crate claims a process run")
+	}
+	pub.Files = nil
+	if _, err := pub.crate(tgt); err == nil {
+		t.Fatal("bronze accepted a dataset with no files")
 	}
 }

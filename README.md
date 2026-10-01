@@ -47,11 +47,10 @@ logins need the OS credential store, so the static Linux build uses `az` or
 `--sas-env` instead. Before uploading, lbf checks it can write to the target and
 stops with nothing uploaded if not.
 
-Every publish is validated before anything is signed in or uploaded. Without
-flags lbf uses its own minimal provenance (`provenance/bronze.json`) and its
-bronze profile (`profiles/bronze/profile.json`), both compiled into the binary.
-`provenance.json` itself must match `provenance/schema.json`. Derived datasets
-record what they came from:
+Every publish is validated before anything is uploaded. Every dataset must meet
+the bronze profile (`profiles/bronze/profile.json`, compiled into the binary),
+plus the one given with `--profile`. Without flags a dataset has no parent and
+no properties. Derived datasets record what they came from:
 
 ```
 lbf publish results/ --container silver \
@@ -66,16 +65,25 @@ lbf publish results/ --container silver \
  "properties": {"sample_id": "SAM-0001"}}
 ```
 
-A profile is a directory holding a JSON Schema `profile.json`. Its `$id` is
-recorded as the crate's `conformsTo`, and `$ref` to a sibling profile's `$id`
-resolves locally, including to lbf's built-in bronze profile. It validates this view of the dataset:
+Every field is optional, but `derived_from` and `instruments` come together.
+Property values are strings and unknown fields are rejected.
+
+A profile is a directory holding a JSON Schema `profile.json`, describing both
+the data given as `<path>` and the crate lbf writes for it. Its `$id` is
+recorded in the crate's `conformsTo`, along with every profile it builds on
+through `$ref`; sibling profiles and lbf's bronze profile resolve locally. It
+validates this view of the dataset, once the uploader is known:
 
 ```json
-{"identifier": "...", "derived_from": "...", "instruments": [...],
- "properties": {...}, "files": [{"path": "results/x.csv", "size": 12}]}
+{"data": {"name": "results", "files": [{"path": "features/plate1.parquet", "size": 12}]},
+ "crate": {"identifier": "...", "creator": "...", "datePublished": "...",
+           "conformsTo": ["..."], "additionalProperty": {"sample_id": "..."},
+           "wasDerivedFrom": "...", "instrument": [{"name": "...", "version": "...", "url": "..."}]}}
 ```
 
-`--dry-run` validates and prints the crate without signing in. Progress goes to
+File paths are relative to `<path>`. `crate` uses the RO-Crate's own names.
+
+`--dry-run` validates and prints the crate without signing in, as uploader `dry-run`. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). `--tag KEY=VALUE` picks
 the storage account (default `tag=storage`, production; the test account is
 `tag=storage-test`), `--container` defaults to `bronze`, and `--sas-env FILE`

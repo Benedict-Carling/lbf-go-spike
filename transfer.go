@@ -56,16 +56,47 @@ func preparePublication(input, provenancePath, profileDir string) (publication, 
 	if len(files) == 0 {
 		return publication{}, fmt.Errorf("%s contains no files to upload", input)
 	}
-	pub := publication{ID: newID(), Source: source, Files: files, Provenance: prov, Profile: prof}
-	if err := prof.validate(profileView(pub.ID, prov, files)); err != nil {
-		return publication{}, err
-	}
-	logf("[profile] meets %s\n", prof.ID)
-	return pub, nil
+	return publication{ID: newID(), Source: source, Files: files, Provenance: prov, Profile: prof}, nil
 }
 
+// Checked here rather than in preparePublication because the uploader is only known once signed in.
 func (p publication) crate(t target) ([]byte, error) {
-	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, p.Profile.ID, time.Now())
+	published := time.Now()
+	conformsTo := p.Profile.ids()
+	if p.Provenance.DerivedFrom != "" {
+		conformsTo = append([]string{processRunCrate}, conformsTo...)
+	}
+	if err := p.Profile.validate(p.view(t, published, conformsTo)); err != nil {
+		return nil, err
+	}
+	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
+	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, conformsTo, published)
+}
+
+// What a profile checks: the files under the published path, and what the crate will record.
+func (p publication) view(t target, published time.Time, conformsTo []string) map[string]any {
+	name := filepath.Base(p.Source)
+	files := make([]map[string]any, len(p.Files))
+	for i, f := range p.Files {
+		files[i] = map[string]any{"path": strings.TrimPrefix(f.Rel, name+"/"), "size": f.Size}
+	}
+	crate := map[string]any{
+		"identifier":         p.ID,
+		"datePublished":      timestamp(published),
+		"conformsTo":         conformsTo,
+		"additionalProperty": p.Provenance.Properties,
+	}
+	if user := strings.TrimSpace(t.User); user != "" {
+		crate["creator"] = user
+	}
+	if p.Provenance.DerivedFrom != "" {
+		crate["wasDerivedFrom"] = p.Provenance.DerivedFrom
+		crate["instrument"] = p.Provenance.Instruments
+	}
+	return map[string]any{
+		"data":  map[string]any{"name": name, "files": files},
+		"crate": crate,
+	}
 }
 
 func upload(ctx context.Context, t target, pub publication) error {
