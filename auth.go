@@ -21,7 +21,6 @@ const (
 
 var armScope = policy.TokenRequestOptions{Scopes: []string{"https://management.azure.com/.default"}}
 
-// Tries, in order: a login saved by `lbf login`, an existing `az login`, then the browser.
 func credential(ctx context.Context, tenant string) (azcore.TokenCredential, string, error) {
 	if rec, ok := loadRecord(); ok {
 		if probe, err := browserCredential(tenant, rec, true); err == nil {

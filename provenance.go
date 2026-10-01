@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -36,7 +35,6 @@ type provenance struct {
 	Properties  map[string]string `json:"properties"`
 }
 
-// Without a path, the dataset has no parent and no properties.
 func readProvenance(path string) (provenance, error) {
 	var p provenance
 	if path != "" {
@@ -96,8 +94,7 @@ type profile struct {
 	rules []rule
 }
 
-// Loads <dir>/profile.json, or just lbf's bronze profile when dir is empty. Sibling profiles and the
-// bronze profile are registered by $id, so `$ref` between them resolves without the network.
+// Profiles are registered by $id so `$ref` between siblings and bronze resolves without the network.
 func loadProfile(dir string) (*profile, error) {
 	bronzeID, _, err := schemaHead(bronzeProfileJSON)
 	if err != nil {
@@ -170,39 +167,38 @@ func (p *profile) validate(view map[string]any) error {
 	if err != nil {
 		return err
 	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
 	for _, r := range p.rules {
-		if err := validateJSON(r.schema, raw); err != nil {
+		if err := validateJSON(r.schema, inst); err != nil {
 			return fmt.Errorf("dataset does not meet profile %s:\n%w", r.id, err)
 		}
 	}
 	return nil
 }
 
-func validateJSON(sch *jsonschema.Schema, raw []byte) error {
-	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
-	if err != nil {
+func validateJSON(sch *jsonschema.Schema, inst any) error {
+	err := sch.Validate(inst)
+	verr, ok := errors.AsType[*jsonschema.ValidationError](err)
+	if !ok {
 		return err
 	}
-	err = sch.Validate(inst)
-	var verr *jsonschema.ValidationError
-	if !errors.As(err, &verr) {
-		return err
-	}
-	var problems []string
-	collectLeaves(verr, &problems)
-	sort.Strings(problems)
+	problems := collectLeaves(verr, message.NewPrinter(language.English))
+	slices.Sort(problems)
 	return errors.New(strings.Join(problems, "\n"))
 }
 
-func collectLeaves(e *jsonschema.ValidationError, out *[]string) {
+func collectLeaves(e *jsonschema.ValidationError, p *message.Printer) []string {
 	if len(e.Causes) == 0 {
-		loc := "/" + strings.Join(e.InstanceLocation, "/")
-		*out = append(*out, fmt.Sprintf("  %s: %s", loc, e.ErrorKind.LocalizedString(message.NewPrinter(language.English))))
-		return
+		return []string{fmt.Sprintf("  /%s: %s", strings.Join(e.InstanceLocation, "/"), e.ErrorKind.LocalizedString(p))}
 	}
+	var out []string
 	for _, c := range e.Causes {
-		collectLeaves(c, out)
+		out = append(out, collectLeaves(c, p)...)
 	}
+	return out
 }
 
 // A profile's $id, recorded as the crate's conformsTo, and the profile it builds on, if any.

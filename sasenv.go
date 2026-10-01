@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -24,7 +25,7 @@ func writeSASEnv(path string, t target) error {
 		"AZURE_ACCOUNT":         t.Account,
 		"AZURE_CONTAINER":       t.Container,
 		"AZURE_SAS":             t.SAS,
-		"AZURE_SAS_EXPIRY":      t.Expiry.UTC().Format(time.RFC3339),
+		"AZURE_SAS_EXPIRY":      timestamp(t.Expiry),
 		"AZURE_SAS_PERMISSIONS": t.Permissions,
 		"USER_IDENTITY":         t.User,
 		"SUBSCRIPTION_NAME":     t.SubscriptionName,
@@ -51,10 +52,6 @@ func readSASEnv(path, mode, expectContainer string) (target, error) {
 	}
 	remedy := fmt.Sprintf("mint a fresh one with: lbf mint-sas --mode %s", mode)
 
-	allowed := map[string]bool{}
-	for _, k := range sasEnvKeys {
-		allowed[k] = true
-	}
 	values := map[string]string{}
 	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -64,7 +61,7 @@ func readSASEnv(path, mode, expectContainer string) (target, error) {
 		if m == nil {
 			return target{}, fmt.Errorf("%s: not a KEY='value' line: %.60q; %s", path, line, remedy)
 		}
-		if !allowed[m[1]] {
+		if !slices.Contains(sasEnvKeys, m[1]) {
 			return target{}, fmt.Errorf("%s: unexpected key %s; %s", path, m[1], remedy)
 		}
 		if _, dup := values[m[1]]; dup {

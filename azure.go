@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
@@ -37,14 +36,7 @@ func (t target) client() (*container.Client, error) {
 	return container.NewClientWithNoCredential(t.containerURL()+"?"+t.SAS, nil)
 }
 
-func permissionsFor(mode string) sas.ContainerPermissions {
-	if mode == "upload" {
-		return sas.ContainerPermissions{Read: true, Write: true, List: true}
-	}
-	return sas.ContainerPermissions{Read: true, List: true}
-}
-
-func mintTarget(ctx context.Context, tenant, tag, containerName, mode string, lifetime time.Duration) (target, error) {
+func mintTarget(ctx context.Context, tenant, tag, containerName, mode string) (target, error) {
 	cred, source, err := credential(ctx, tenant)
 	if err != nil {
 		return target{}, err
@@ -66,7 +58,7 @@ func mintTarget(ctx context.Context, tenant, tag, containerName, mode string, li
 	}
 
 	start := time.Now().UTC()
-	expiry := start.Add(lifetime)
+	expiry := start.Add(sasLifetime)
 	udc, err := svc.GetUserDelegationCredential(ctx, service.KeyInfo{
 		Start:  to.Ptr(start.Format(sas.TimeFormat)),
 		Expiry: to.Ptr(expiry.Format(sas.TimeFormat)),
@@ -75,29 +67,30 @@ func mintTarget(ctx context.Context, tenant, tag, containerName, mode string, li
 		return target{}, fmt.Errorf("getting a user delegation key for %s needs the 'Storage Blob Delegator' role at storage account scope: %w", account, err)
 	}
 
-	perms := permissionsFor(mode)
+	perms := (&sas.ContainerPermissions{Read: true, List: true, Write: mode == "upload"}).String()
 	qp, err := sas.BlobSignatureValues{
 		Protocol:      sas.ProtocolHTTPS,
 		StartTime:     start,
 		ExpiryTime:    expiry,
-		Permissions:   perms.String(),
+		Permissions:   perms,
 		ContainerName: containerName,
 	}.SignWithUserDelegation(udc)
 	if err != nil {
 		return target{}, err
 	}
 
+	subName := deref(sub.DisplayName)
 	logf("[auth] %s via %s -> %s/%s (subscription %s, requested=%s)\n",
-		user, source, account, containerName, deref(sub.DisplayName), perms.String())
+		user, source, account, containerName, subName, perms)
 
 	return target{
 		Account:          account,
 		Container:        containerName,
 		SAS:              qp.Encode(),
 		Expiry:           expiry,
-		Permissions:      perms.String(),
+		Permissions:      perms,
 		User:             user,
-		SubscriptionName: deref(sub.DisplayName),
+		SubscriptionName: subName,
 		SubscriptionID:   deref(sub.SubscriptionID),
 	}, nil
 }
@@ -127,7 +120,7 @@ func findAccount(ctx context.Context, cred azcore.TokenCredential, tag string) (
 			return "", nil, fmt.Errorf("listing subscriptions failed (an access or connectivity problem, not a tagging problem): %w", err)
 		}
 		for _, sub := range page.Value {
-			if sub.State == nil || *sub.State != armsubscriptions.SubscriptionStateEnabled {
+			if deref(sub.State) != armsubscriptions.SubscriptionStateEnabled {
 				continue
 			}
 			accounts, err := armstorage.NewAccountsClient(*sub.SubscriptionID, cred, nil)
@@ -141,7 +134,7 @@ func findAccount(ctx context.Context, cred azcore.TokenCredential, tag string) (
 					return "", nil, fmt.Errorf("listing storage accounts in %s failed: %w", deref(sub.DisplayName), err)
 				}
 				for _, acc := range accPage.Value {
-					if v, ok := acc.Tags[key]; ok && v != nil && *v == value {
+					if v := acc.Tags[key]; v != nil && *v == value {
 						matches = append(matches, match{*acc.Name, sub})
 					}
 				}
@@ -163,21 +156,15 @@ func findAccount(ctx context.Context, cred azcore.TokenCredential, tag string) (
 }
 
 func signedInUser(ctx context.Context, cred azcore.TokenCredential) (string, error) {
-	tok, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{"https://management.azure.com/.default"}})
+	tok, err := cred.GetToken(ctx, armScope)
 	if err != nil {
 		return "", err
 	}
-	parts := strings.Split(tok.Token, ".")
-	if len(parts) != 3 {
-		return "unknown", nil
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "unknown", nil
-	}
 	var claims map[string]any
-	if json.Unmarshal(payload, &claims) != nil {
-		return "unknown", nil
+	if parts := strings.Split(tok.Token, "."); len(parts) == 3 {
+		if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
+			_ = json.Unmarshal(payload, &claims)
+		}
 	}
 	for _, k := range []string{"upn", "email", "preferred_username", "unique_name"} {
 		if s, ok := claims[k].(string); ok && s != "" {

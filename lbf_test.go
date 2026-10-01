@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,13 +13,7 @@ import (
 func TestDatasetFilesLayoutAndExclusions(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "run1")
 	for _, p := range []string{"a.txt", "sub/b.txt", ".DS_Store", "sub/._b.txt"} {
-		full := filepath.Join(root, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeFile(t, filepath.Join(root, filepath.FromSlash(p)), "x")
 	}
 	_ = os.Symlink(filepath.Join(root, "a.txt"), filepath.Join(root, "link.txt"))
 
@@ -67,9 +62,7 @@ func TestSASEnvRoundTrip(t *testing.T) {
 
 func TestSASEnvRejectsUnknownKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "azure_sas.env")
-	if err := os.WriteFile(path, []byte("PATH='/tmp'\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, path, "PATH='/tmp'\n")
 	if _, err := readSASEnv(path, "download", "bronze"); err == nil || !strings.Contains(err.Error(), "unexpected key") {
 		t.Fatalf("got %v", err)
 	}
@@ -90,7 +83,7 @@ func TestLocalPathRejectsEscapes(t *testing.T) {
 func TestRepairWindowsArgs(t *testing.T) {
 	got := repairWindowsArgs([]string{"publish", `.\test data" --dry-run  --tag role=x`, "--out", `C:\d"`})
 	want := []string{"publish", `.\test data\`, "--dry-run", "--tag", "role=x", "--out", `C:\d\`}
-	if strings.Join(got, "|") != strings.Join(want, "|") {
+	if !slices.Equal(got, want) {
 		t.Fatalf("got %q", got)
 	}
 }

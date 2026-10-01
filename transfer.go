@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -28,8 +27,6 @@ const (
 	blockSize     = 8 << 20
 	blockWorkers  = 4
 )
-
-var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type publication struct {
 	ID         string
@@ -62,18 +59,18 @@ func preparePublication(input, provenancePath, profileDir string) (publication, 
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
 func (p publication) crate(t target) ([]byte, error) {
 	published := time.Now()
-	conformsTo := p.Profile.ids()
+	ids := p.Profile.ids()
+	conformsTo := ids
 	if p.Provenance.DerivedFrom != "" {
-		conformsTo = append([]string{processRunCrate}, conformsTo...)
+		conformsTo = append([]string{processRunCrate}, ids...)
 	}
 	if err := p.Profile.validate(p.view(t, published, conformsTo)); err != nil {
 		return nil, err
 	}
-	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
+	logf("[profile] meets %s\n", strings.Join(ids, ", "))
 	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, conformsTo, published)
 }
 
-// What a profile checks: the files under the published path, and what the crate will record.
 func (p publication) view(t target, published time.Time, conformsTo []string) map[string]any {
 	name := filepath.Base(p.Source)
 	files := make([]map[string]any, len(p.Files))
@@ -109,45 +106,39 @@ func upload(ctx context.Context, t target, pub publication) error {
 		return err
 	}
 
-	id, files := pub.ID, pub.Files
+	id := pub.ID
 	if err := checkWrite(ctx, cc, t, id); err != nil {
 		return err
 	}
 	var total int64
-	for _, f := range files {
+	for _, f := range pub.Files {
 		total += f.Size
 	}
-	logf("Uploading %d files (%s) from %s as %s\n", len(files), humanBytes(total), pub.Source, id)
+	logf("Uploading %d files (%s) from %s as %s\n", len(pub.Files), humanBytes(total), pub.Source, id)
 
-	var done atomic.Int64
 	started := time.Now()
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(parallelFiles)
-	for _, f := range files {
-		g.Go(func() error {
-			fh, err := os.Open(f.Path)
-			if err != nil {
-				return err
-			}
-			defer fh.Close()
-			_, err = cc.NewBlockBlobClient(id+"/"+f.Rel).UploadFile(gctx, fh, &blockblob.UploadFileOptions{
-				BlockSize:   blockSize,
-				Concurrency: blockWorkers,
-				AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
-					IfNoneMatch: to.Ptr(azcore.ETagAny),
-				}},
-			})
-			if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-				return fmt.Errorf("%s already exists in the container; refusing to overwrite", id+"/"+f.Rel)
-			}
-			if err != nil {
-				return fmt.Errorf("uploading %s: %w", f.Rel, err)
-			}
-			logf("  [%d/%d] %s\n", done.Add(1), len(files), f.Rel)
-			return nil
+	err = transferAll(ctx, pub.Files, func(ctx context.Context, f localFile) (string, error) {
+		fh, err := os.Open(f.Path)
+		if err != nil {
+			return "", err
+		}
+		defer fh.Close()
+		_, err = cc.NewBlockBlobClient(id+"/"+f.Rel).UploadFile(ctx, fh, &blockblob.UploadFileOptions{
+			BlockSize:   blockSize,
+			Concurrency: blockWorkers,
+			AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+				IfNoneMatch: to.Ptr(azcore.ETagAny),
+			}},
 		})
-	}
-	if err := g.Wait(); err != nil {
+		if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
+			return "", fmt.Errorf("%s already exists in the container; refusing to overwrite", id+"/"+f.Rel)
+		}
+		if err != nil {
+			return "", fmt.Errorf("uploading %s: %w", f.Rel, err)
+		}
+		return f.Rel, nil
+	})
+	if err != nil {
 		return err
 	}
 
@@ -157,8 +148,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 	if err != nil {
 		return fmt.Errorf("uploading ro-crate-metadata.json: %w", err)
 	}
-
-	logf("Done in %s (%s/s)\n", time.Since(started).Round(time.Millisecond), humanBytes(rate(total, time.Since(started))))
+	logDone(started, total)
 	return nil
 }
 
@@ -200,48 +190,62 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	}
 	logf("Downloading %d files (%s) to %s\n", len(blobs), humanBytes(total), root)
 
-	var done atomic.Int64
 	started := time.Now()
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(parallelFiles)
-	for _, b := range blobs {
-		g.Go(func() error {
-			name := *b.Name
-			local, err := localPath(root, strings.TrimPrefix(name, prefix))
-			if err != nil {
-				return err
-			}
-			if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
-				return err
-			}
-			fh, err := os.Create(local)
-			if err != nil {
-				return err
-			}
-			_, err = cc.NewBlobClient(name).DownloadFile(gctx, fh, &blob.DownloadFileOptions{
-				BlockSize:   blockSize,
-				Concurrency: blockWorkers,
-			})
-			if cerr := fh.Close(); err == nil {
-				err = cerr
-			}
-			if err != nil {
-				return fmt.Errorf("downloading %s: %w", name, err)
-			}
-			logf("  [%d/%d] %s\n", done.Add(1), len(blobs), strings.TrimPrefix(name, prefix))
-			return nil
+	err = transferAll(ctx, blobs, func(ctx context.Context, b *container.BlobItem) (string, error) {
+		rel := strings.TrimPrefix(*b.Name, prefix)
+		local, err := localPath(root, rel)
+		if err != nil {
+			return "", err
+		}
+		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
+			return "", err
+		}
+		fh, err := os.Create(local)
+		if err != nil {
+			return "", err
+		}
+		_, err = cc.NewBlobClient(*b.Name).DownloadFile(ctx, fh, &blob.DownloadFileOptions{
+			BlockSize:   blockSize,
+			Concurrency: blockWorkers,
 		})
-	}
-	if err := g.Wait(); err != nil {
+		if cerr := fh.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return "", fmt.Errorf("downloading %s: %w", *b.Name, err)
+		}
+		return rel, nil
+	})
+	if err != nil {
 		return "", err
 	}
-
-	logf("Done in %s (%s/s)\n", time.Since(started).Round(time.Millisecond), humanBytes(rate(total, time.Since(started))))
+	logDone(started, total)
 	return root, nil
 }
 
-// Staging an uncommitted block proves write access without creating a visible blob;
-// the later upload of the same name discards it.
+func transferAll[T any](ctx context.Context, items []T, each func(context.Context, T) (string, error)) error {
+	var done atomic.Int64
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(parallelFiles)
+	for _, it := range items {
+		g.Go(func() error {
+			name, err := each(gctx, it)
+			if err != nil {
+				return err
+			}
+			logf("  [%d/%d] %s\n", done.Add(1), len(items), name)
+			return nil
+		})
+	}
+	return g.Wait()
+}
+
+func logDone(started time.Time, total int64) {
+	d := time.Since(started)
+	logf("Done in %s (%s/s)\n", d.Round(time.Millisecond), humanBytes(rate(total, d)))
+}
+
+// An uncommitted block proves write access without creating a visible blob; the crate upload discards it.
 func checkWrite(ctx context.Context, cc *container.Client, t target, id string) error {
 	blockID := base64.StdEncoding.EncodeToString([]byte("lbf-write-check"))
 	_, err := cc.NewBlockBlobClient(id+"/ro-crate-metadata.json").StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader([]byte{0})), nil)
