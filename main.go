@@ -69,18 +69,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	tag := fs.String("tag", "tag=storage", "tag identifying the storage account")
-	tenant := fs.String("tenant", imperialTenant, "Entra tenant to sign in to")
-	containerName := fs.String("container", "bronze", "blob container")
-	sasEnv := fs.String("sas-env", "", "pre-minted credential file from 'lbf mint-sas'")
-	out := fs.String("out", "", "output directory (fetch) or file (mint-sas)")
-	mode := fs.String("mode", "", "mint-sas only: upload or download")
-	provenancePath := fs.String("provenance", "", "publish only: provenance JSON file")
-	profileDir := fs.String("profile", "", "publish only: directory containing profile.json")
-	dryRun := fs.Bool("dry-run", false, "publish only: validate and print the crate without signing in or uploading")
-
-	positional, err := parseInterspersed(fs, args[1:])
+	o, positional, err := parseArgs(args[0], args[1:])
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -90,19 +82,19 @@ func run(ctx context.Context, args []string) error {
 		if len(positional) != 1 {
 			return errors.New("usage: lbf publish <path>")
 		}
-		pub, err := preparePublication(positional[0], *provenancePath, *profileDir)
+		pub, err := preparePublication(positional[0], o.provenance, o.profile)
 		if err != nil {
 			return err
 		}
-		if *dryRun {
-			crate, err := pub.crate(target{Account: "dryrun", Container: *containerName, User: "dry-run"})
+		if o.dryRun {
+			crate, err := pub.crate(target{Account: "dryrun", Container: o.container, User: "dry-run"})
 			if err != nil {
 				return err
 			}
 			fmt.Println(string(crate))
 			return nil
 		}
-		t, err := resolveTarget(ctx, *sasEnv, "upload", *tenant, *tag, *containerName)
+		t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.container)
 		if err != nil {
 			return err
 		}
@@ -120,11 +112,11 @@ func run(ctx context.Context, args []string) error {
 		if !validID.MatchString(id) {
 			return fmt.Errorf("%q is not a dataset ID", id)
 		}
-		t, err := resolveTarget(ctx, *sasEnv, "download", *tenant, *tag, *containerName)
+		t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.container)
 		if err != nil {
 			return err
 		}
-		path, err := download(ctx, t, id, cmp.Or(*out, "."))
+		path, err := download(ctx, t, id, cmp.Or(o.out, "."))
 		if err != nil {
 			return err
 		}
@@ -132,7 +124,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "login":
-		cred, err := login(ctx, *tenant)
+		if len(positional) != 0 {
+			return errors.New("usage: lbf login [--tenant ID]")
+		}
+		cred, err := login(ctx, o.tenant)
 		if err != nil {
 			return err
 		}
@@ -148,6 +143,9 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "logout":
+		if len(positional) != 0 {
+			return errors.New("usage: lbf logout")
+		}
 		removed, err := logout()
 		if err != nil {
 			return err
@@ -160,14 +158,17 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "mint-sas":
-		if *mode != "upload" && *mode != "download" {
+		if len(positional) != 0 {
+			return errors.New("usage: lbf mint-sas --mode upload|download [--out FILE]")
+		}
+		if o.mode != "upload" && o.mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
-		t, err := mintTarget(ctx, *tenant, *tag, *containerName, *mode)
+		t, err := mintTarget(ctx, o.tenant, o.tag, o.container, o.mode)
 		if err != nil {
 			return err
 		}
-		path := cmp.Or(*out, "azure_sas.env")
+		path := cmp.Or(o.out, "azure_sas.env")
 		if err := writeSASEnv(path, t); err != nil {
 			return err
 		}
@@ -175,8 +176,50 @@ func run(ctx context.Context, args []string) error {
 			path, t.Account, t.Container, t.Permissions, t.Expiry.Format(time.RFC3339))
 		return nil
 	}
-
 	return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
+}
+
+type options struct {
+	tag, tenant, container, sasEnv string
+	out, mode                      string
+	provenance, profile            string
+	dryRun                         bool
+}
+
+func parseArgs(cmd string, args []string) (options, []string, error) {
+	var o options
+	fs := flag.NewFlagSet("lbf "+cmd, flag.ContinueOnError)
+	tenant := func() { fs.StringVar(&o.tenant, "tenant", imperialTenant, "Entra tenant to sign in to") }
+	storage := func() {
+		tenant()
+		fs.StringVar(&o.tag, "tag", "tag=storage", "tag identifying the storage account")
+		fs.StringVar(&o.container, "container", "bronze", "blob container")
+	}
+	sasEnv := func() { fs.StringVar(&o.sasEnv, "sas-env", "", "pre-minted credential file from 'lbf mint-sas'") }
+
+	switch cmd {
+	case "publish", "upload":
+		storage()
+		sasEnv()
+		fs.StringVar(&o.provenance, "provenance", "", "provenance JSON file")
+		fs.StringVar(&o.profile, "profile", "", "directory containing profile.json")
+		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
+	case "fetch", "download":
+		storage()
+		sasEnv()
+		fs.StringVar(&o.out, "out", "", "output directory")
+	case "mint-sas":
+		storage()
+		fs.StringVar(&o.out, "out", "", "output file (default azure_sas.env)")
+		fs.StringVar(&o.mode, "mode", "", "upload or download")
+	case "login":
+		tenant()
+	case "logout":
+	default:
+		return o, nil, fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
+	}
+	positional, err := parseInterspersed(fs, args)
+	return o, positional, err
 }
 
 func logf(format string, a ...any) {
