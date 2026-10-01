@@ -1,0 +1,24 @@
+name: install-check
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - shell: pwsh
+        run: |
+          irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
+          lbf version
+          lbf help
+
+  unix:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: |
+          curl -fsSL https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.sh | sh
+          ~/.local/bin/lbf version

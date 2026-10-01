@@ -1,7 +1,7 @@
 name: windows-native
 
+# Needs short-lived SAS_ENV_B64, MGMT_TOKEN_B64 and STORAGE_TOKEN_B64 secrets, so it only runs on demand.
 on:
-  push:
   workflow_dispatch:
 
 jobs:

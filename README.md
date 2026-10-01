@@ -4,23 +4,79 @@ A single-binary replacement for the Nextflow upload, download and mint-sas
 pipelines. No Nextflow, Java, Python, bash or azcopy; runs natively on macOS,
 Linux and Windows.
 
+## Install
+
+Windows (PowerShell, no admin):
+
+```powershell
+irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
+```
+
+macOS / Linux:
+
+```sh
+curl -fsSL https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.sh | sh
+```
+
+Run the same command again to update. Binaries are also attached to each
+[release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
+
 ## Use
 
 ```
-az login
-lbf upload <path>              # prints the new dataset ID
-lbf download <id> [--out DIR]
-lbf mint-sas --mode upload     # writes azure_sas.env for a machine without az (HPC)
-lbf upload <path> --sas-env azure_sas.env
+lbf login                          # optional: browser sign-in to Imperial, remembered (macOS/Windows)
+lbf publish <path>                 # land in bronze; prints the new dataset ID (alias: upload)
+lbf fetch <id> [--out DIR]         # alias: download
+lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
+lbf logout
 ```
 
-`--tag KEY=VALUE` picks the storage account (default `tag=storage`; the test
-account is `role=bronze-test`). `--container` defaults to `bronze`.
+Sign-in order: a login saved by `lbf login`, an existing `az login`, then the
+browser. Always against Imperial's tenant (`--tenant` overrides). Remembered
+logins need the OS credential store, so the static Linux build uses `az` or
+`--sas-env` instead. Before uploading, lbf checks it can write to the target and
+stops with nothing uploaded if not.
+
+Every publish is validated before anything is signed in or uploaded. Without
+flags lbf uses its own minimal provenance (`provenance/bronze.json`) and its
+bronze profile (`profiles/bronze/profile.json`), both compiled into the binary.
+`provenance.json` itself must match `provenance/schema.json`. Derived datasets
+record what they came from:
+
+```
+lbf publish results/ --container silver \
+    --provenance provenance.json --profile profiles/minimal-silver
+```
+
+`provenance.json`:
+
+```json
+{"derived_from": "20261001-fancy-dassie-eadb",
+ "instruments": [{"name": "my-pipeline", "version": "0.1.0", "url": "https://..."}],
+ "properties": {"sample_id": "SAM-0001"}}
+```
+
+A profile is a directory holding a JSON Schema `profile.json`. Its `$id` is
+recorded as the crate's `conformsTo`, and `$ref` to a sibling profile's `$id`
+resolves locally, including to lbf's built-in bronze profile. It validates this view of the dataset:
+
+```json
+{"identifier": "...", "derived_from": "...", "instruments": [...],
+ "properties": {...}, "files": [{"path": "results/x.csv", "size": 12}]}
+```
+
+`--dry-run` validates and prints the crate without signing in. Progress goes to
+stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). `--tag KEY=VALUE` picks
+the storage account (default `tag=storage-test`, the test account; production is
+`tag=storage`), `--container` defaults to `bronze`, and `--sas-env FILE`
+uses a pre-minted credential instead of `az login`.
 
 Blob layout, RO-Crate sidecar and `azure_sas.env` format match the Nextflow
 pipelines, so either tool can read the other's output.
 
 ## Build
+
+Pushing a `v*` tag builds every platform and publishes a release.
 
 ```
 go test ./...
