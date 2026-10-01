@@ -38,6 +38,8 @@ func (t target) client() (*container.Client, error) {
 }
 
 func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mode string) (target, error) {
+	defer status("")
+	status("Signing in")
 	cred, source, err := credential(ctx, tenant)
 	if err != nil {
 		return target{}, err
@@ -48,7 +50,9 @@ func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mo
 		return target{}, err
 	}
 
+	status("Finding the storage account tagged " + tag)
 	matches, err := findAccounts(ctx, cred, tag)
+	status("")
 	if err != nil {
 		return target{}, err
 	}
@@ -63,6 +67,7 @@ func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mo
 		return target{}, err
 	}
 
+	status("Getting a " + mode + " key for " + account)
 	start := time.Now().UTC()
 	expiry := start.Add(sasLifetime)
 	udc, err := svc.GetUserDelegationCredential(ctx, service.KeyInfo{

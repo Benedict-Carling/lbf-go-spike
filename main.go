@@ -45,6 +45,8 @@ var sasSignature = regexp.MustCompile(`sig=[^&\s"]+`)
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	// A second Ctrl-C exits at once instead of waiting for the first to unwind.
+	context.AfterFunc(ctx, stop)
 
 	args := os.Args[1:]
 	if runtime.GOOS == "windows" {
@@ -311,10 +313,6 @@ func (c *command) usage(out io.Writer) {
 	if c.notes != "" {
 		fmt.Fprintf(out, "\n%s", c.notes)
 	}
-}
-
-func logf(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, format, a...)
 }
 
 func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, accountName, containerName string) (target, error) {

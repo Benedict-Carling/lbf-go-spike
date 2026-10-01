@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -108,7 +107,10 @@ func upload(ctx context.Context, t target, pub publication) error {
 	}
 
 	id := pub.ID
-	if err := checkWrite(ctx, cc, t, id); err != nil {
+	status("Checking write access to " + t.Account + "/" + t.Container)
+	err = checkWrite(ctx, cc, t, id)
+	status("")
+	if err != nil {
 		return err
 	}
 	var total int64
@@ -118,27 +120,35 @@ func upload(ctx context.Context, t target, pub publication) error {
 	logf("Uploading %d files (%s) from %s as %s\n", len(pub.Files), humanBytes(total), pub.Source, id)
 
 	started := time.Now()
-	err = transferAll(ctx, pub.Files, func(ctx context.Context, f localFile) (string, error) {
-		fh, err := os.Open(f.Path)
-		if err != nil {
-			return "", err
-		}
-		defer fh.Close()
-		// Left to the SDK, the block size grows with the file so it stays within 50,000 blocks.
-		_, err = cc.NewBlockBlobClient(id+"/"+f.Rel).UploadFile(ctx, fh, &blockblob.UploadFileOptions{
-			Concurrency: blockWorkers,
-			AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
-				IfNoneMatch: to.Ptr(azcore.ETagAny),
-			}},
-		})
-		if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-			return "", fmt.Errorf("%s already exists in the container; refusing to overwrite", id+"/"+f.Rel)
-		}
-		if err != nil {
-			return "", fmt.Errorf("uploading %s: %w", f.Rel, err)
-		}
-		return f.Rel, nil
-	})
+	jobs := make([]job, len(pub.Files))
+	for i, f := range pub.Files {
+		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
+			fh, err := os.Open(f.Path)
+			if err != nil {
+				return err
+			}
+			defer fh.Close()
+			// Left to the SDK, the block size grows with the file so it stays within 50,000 blocks.
+			_, err = cc.NewBlockBlobClient(id+"/"+f.Rel).UploadFile(ctx, fh, &blockblob.UploadFileOptions{
+				Concurrency: blockWorkers,
+				Progress:    progress,
+				AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+					IfNoneMatch: to.Ptr(azcore.ETagAny),
+				}},
+			})
+			if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
+				return fmt.Errorf("%s already exists in the container; refusing to overwrite", id+"/"+f.Rel)
+			}
+			if err != nil {
+				return fmt.Errorf("uploading %s: %w", f.Rel, err)
+			}
+			return nil
+		}}
+	}
+	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
+	if ctx.Err() != nil {
+		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Publish again to get a new ID", id)
+	}
 	if err != nil {
 		return err
 	}
@@ -166,6 +176,8 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	}
 
 	prefix := id + "/"
+	status("Listing " + id)
+	defer status("")
 	var blobs []*container.BlobItem
 	pager := cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
 		Prefix:  to.Ptr(prefix),
@@ -182,6 +194,7 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 			}
 		}
 	}
+	status("")
 	if len(blobs) == 0 {
 		return "", fmt.Errorf("no dataset %s in %s", id, t.containerURL())
 	}
@@ -210,24 +223,32 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	defer dir.Close()
 
 	started := time.Now()
-	err = transferAll(ctx, blobs, func(ctx context.Context, b *container.BlobItem) (string, error) {
+	jobs := make([]job, len(blobs))
+	for i, b := range blobs {
 		rel := strings.TrimPrefix(*b.Name, prefix)
-		fh, err := createIn(dir, rel)
-		if err != nil {
-			return "", err
-		}
-		_, err = cc.NewBlobClient(*b.Name).DownloadFile(ctx, fh, &blob.DownloadFileOptions{
-			BlockSize:   blockSize,
-			Concurrency: blockWorkers,
-		})
-		if cerr := fh.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return "", fmt.Errorf("downloading %s: %w", *b.Name, err)
-		}
-		return rel, nil
-	})
+		jobs[i] = job{name: rel, size: deref(b.Properties.ContentLength), run: func(ctx context.Context, progress func(int64)) error {
+			fh, err := createIn(dir, rel)
+			if err != nil {
+				return err
+			}
+			_, err = cc.NewBlobClient(*b.Name).DownloadFile(ctx, fh, &blob.DownloadFileOptions{
+				BlockSize:   blockSize,
+				Concurrency: blockWorkers,
+				Progress:    progress,
+			})
+			if cerr := fh.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return fmt.Errorf("downloading %s: %w", *b.Name, err)
+			}
+			return nil
+		}}
+	}
+	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("interrupted; %s is incomplete", root)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -235,21 +256,25 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	return root, nil
 }
 
-func transferAll[T any](ctx context.Context, items []T, each func(context.Context, T) (string, error)) error {
-	var done atomic.Int64
+type job struct {
+	name string
+	size int64
+	run  func(ctx context.Context, progress func(int64)) error
+}
+
+func transferAll(ctx context.Context, p *progress, jobs []job) error {
+	defer p.close()
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelFiles)
-	for _, it := range items {
+	for _, j := range jobs {
 		g.Go(func() error {
 			if err := gctx.Err(); err != nil {
 				return err
 			}
-			name, err := each(gctx, it)
-			if err != nil {
-				return err
-			}
-			logf("  [%d/%d] %s\n", done.Add(1), len(items), name)
-			return nil
+			b := p.start(j.name, j.size)
+			err := j.run(gctx, b.set)
+			p.end(b, err == nil)
+			return err
 		})
 	}
 	return g.Wait()
