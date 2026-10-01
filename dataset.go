@@ -82,8 +82,8 @@ type entity map[string]any
 func ref(id string) entity { return entity{"@id": id} }
 
 // Same graph as rocrate_generator.py; encoding/json sorts keys, matching its output.
-func buildCrate(id, source string, files []localFile, t target, prov provenance, profileID string, published time.Time) ([]byte, error) {
-	stamp := published.UTC().Format("2006-01-02T15:04:05Z")
+func buildCrate(id, source string, files []localFile, t target, prov provenance, conformsTo []string, published time.Time) ([]byte, error) {
+	stamp := timestamp(published)
 
 	parts := make([]entity, len(files))
 	for i, f := range files {
@@ -140,7 +140,6 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 		graph = append(graph, entity{"@id": "#" + p.name, "@type": "PropertyValue", "name": p.name, "value": p.value})
 	}
 
-	var profiles []string
 	if prov.DerivedFrom != "" {
 		sourceID := "#source-" + prov.DerivedFrom
 		root["wasDerivedFrom"] = ref(sourceID)
@@ -169,14 +168,10 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 			"result":     ref("./"),
 			"agent":      ref("#uploader"),
 		})
-		profiles = append(profiles, processRunCrate)
 	}
-	if profileID != "" {
-		profiles = append(profiles, profileID)
-	}
-	if len(profiles) > 0 {
-		refs := make([]entity, len(profiles))
-		for i, uri := range profiles {
+	if len(conformsTo) > 0 {
+		refs := make([]entity, len(conformsTo))
+		for i, uri := range conformsTo {
 			refs[i] = ref(uri)
 			graph = append(graph, entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": uri})
 		}
@@ -191,6 +186,10 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 		"@context": "https://w3id.org/ro/crate/1.2/context",
 		"@graph":   graph,
 	}, "", "    ")
+}
+
+func timestamp(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
 func orUnknown(s string) string {
