@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 )
 
 func TestDatasetFilesLayoutAndExclusions(t *testing.T) {
@@ -172,7 +176,7 @@ func TestCommandHelpListsOwnFlagsInOrderWithDefaults(t *testing.T) {
 	var buf strings.Builder
 	c.usage(&buf)
 	got := buf.String()
-	want := []string{"Required:", "<id>", "Optional:", "--out DIR", "(default .)", "--container NAME", "(default bronze)", "--tag KEY=VALUE", "(default tag=storage)", "--tenant ID", "Imperial College London", "--sas-env FILE"}
+	want := []string{"Required:", "<id>", "Optional:", "--out DIR", "(default .)", "--container NAME", "(default bronze)", "--tag KEY=VALUE", "(default tag=storage)", "--account NAME", "--tenant ID", "Imperial College London", "--sas-env FILE"}
 	rest := got
 	for _, w := range want {
 		i := strings.Index(rest, w)
@@ -408,5 +412,90 @@ func TestDefaultsAreBronze(t *testing.T) {
 	pub.Files = nil
 	if _, err := pub.crate(tgt); err == nil {
 		t.Fatal("bronze accepted a dataset with no files")
+	}
+}
+
+func TestChooseAccount(t *testing.T) {
+	m := func(name, sub string) accountMatch {
+		return accountMatch{Name: name, Location: "uksouth", Sub: &armsubscriptions.Subscription{DisplayName: to.Ptr(sub)}}
+	}
+	two := []accountMatch{m("lbfb", "Sub B"), m("lbfa", "Sub A")}
+	never := func(string, []string) (int, error) { t.Fatal("picker called"); return 0, nil }
+
+	if got, err := chooseAccount([]accountMatch{m("lbfa", "Sub A")}, "tag=x", "", never); err != nil || got.Name != "lbfa" {
+		t.Errorf("single match: %v %v", got.Name, err)
+	}
+	if got, err := chooseAccount(two, "tag=x", "lbfb", never); err != nil || got.Name != "lbfb" {
+		t.Errorf("--account: %v %v", got.Name, err)
+	}
+	if _, err := chooseAccount(two, "tag=x", "other", never); err == nil || !strings.Contains(err.Error(), `"other"`) || !strings.Contains(err.Error(), "--account lbfa") {
+		t.Errorf("unknown --account: %v", err)
+	}
+	if _, err := chooseAccount(nil, "tag=x", "", never); err == nil || !strings.Contains(err.Error(), "no storage account tagged") {
+		t.Errorf("no match: %v", err)
+	}
+	_, err := chooseAccount(two, "tag=x", "", nil)
+	if err == nil || !strings.Contains(err.Error(), "--account lbfa") || !strings.Contains(err.Error(), "--account lbfb") || !strings.Contains(err.Error(), "Sub B") {
+		t.Errorf("no terminal: %v", err)
+	}
+
+	var labels []string
+	got, err := chooseAccount(two, "tag=x", "", func(_ string, l []string) (int, error) { labels = l; return 1, nil })
+	if err != nil || got.Name != "lbfb" {
+		t.Errorf("picked: %v %v", got.Name, err)
+	}
+	if len(labels) != 2 || !strings.HasPrefix(labels[0], "lbfa") || !strings.Contains(labels[1], "Sub B") || !strings.Contains(labels[1], "uksouth") {
+		t.Errorf("labels not sorted or incomplete: %q", labels)
+	}
+	if _, err := chooseAccount(two, "tag=x", "", func(string, []string) (int, error) { return 0, errNoChoice }); !errors.Is(err, errNoChoice) {
+		t.Errorf("cancelled: %v", err)
+	}
+}
+
+func TestPickArrows(t *testing.T) {
+	items := []string{"a", "b", "c"}
+	for _, tc := range []struct {
+		keys string
+		want int
+	}{
+		{"\r", 0},
+		{"\x1b[B\r", 1},
+		{"\x1b[B\x1b[B\x1b[B\x1b[B\n", 2},
+		{"\x1b[B\x1b[A\x1b[A\r", 0},
+		{"jjk\r", 1},
+		{"\x1bOB\r", 1},
+		{"x\r", 0},
+	} {
+		got, err := pickArrows(strings.NewReader(tc.keys), io.Discard, "Choose:", items)
+		if err != nil || got != tc.want {
+			t.Errorf("%q: got %d %v, want %d", tc.keys, got, err, tc.want)
+		}
+	}
+	for _, keys := range []string{"\x03", "q", "\x1b", "", "\x1b[B"} {
+		if _, err := pickArrows(strings.NewReader(keys), io.Discard, "Choose:", items); !errors.Is(err, errNoChoice) {
+			t.Errorf("%q: got %v, want cancel", keys, err)
+		}
+	}
+	var out strings.Builder
+	got, err := pickArrows(io.MultiReader(strings.NewReader("\x1b["), strings.NewReader("B"), strings.NewReader("\r")), &out, "Choose:", items)
+	if err != nil || got != 1 {
+		t.Errorf("keys split across reads: got %d %v", got, err)
+	}
+	if s := out.String(); !strings.HasPrefix(s, "Choose:") || !strings.Contains(s, "(*) a") || !strings.Contains(s, "\x1b[3A") || !strings.Contains(s[strings.LastIndex(s, "\x1b[3A"):], "(*) b") {
+		t.Errorf("render:\n%q", out.String())
+	}
+}
+
+func TestPickNumbered(t *testing.T) {
+	var out strings.Builder
+	got, err := pickNumbered(strings.NewReader("x\n9\n\n 2 \r\n"), &out, "Choose:", []string{"a", "b"})
+	if err != nil || got != 1 {
+		t.Errorf("got %d %v", got, err)
+	}
+	if !strings.Contains(out.String(), "1) a") || strings.Count(out.String(), "Choose [1-2]: ") != 4 {
+		t.Errorf("render:\n%s", out.String())
+	}
+	if _, err := pickNumbered(strings.NewReader("9\n"), io.Discard, "Choose:", []string{"a", "b"}); !errors.Is(err, errNoChoice) {
+		t.Errorf("eof: %v", err)
 	}
 }

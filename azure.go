@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,7 +37,7 @@ func (t target) client() (*container.Client, error) {
 	return container.NewClientWithNoCredential(t.containerURL()+"?"+t.SAS, nil)
 }
 
-func mintTarget(ctx context.Context, tenant, tag, containerName, mode string) (target, error) {
+func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mode string) (target, error) {
 	cred, source, err := credential(ctx, tenant)
 	if err != nil {
 		return target{}, err
@@ -47,10 +48,15 @@ func mintTarget(ctx context.Context, tenant, tag, containerName, mode string) (t
 		return target{}, err
 	}
 
-	account, sub, err := findAccount(ctx, cred, tag)
+	matches, err := findAccounts(ctx, cred, tag)
 	if err != nil {
 		return target{}, err
 	}
+	chosen, err := chooseAccount(matches, tag, accountName, terminalPicker())
+	if err != nil {
+		return target{}, err
+	}
+	account, sub := chosen.Name, chosen.Sub
 
 	svc, err := service.NewClient(fmt.Sprintf("https://%s.blob.core.windows.net/", account), cred, nil)
 	if err != nil {
@@ -95,29 +101,29 @@ func mintTarget(ctx context.Context, tenant, tag, containerName, mode string) (t
 	}, nil
 }
 
-// Searches every subscription the user can see; exactly one account may carry the tag.
-func findAccount(ctx context.Context, cred azcore.TokenCredential, tag string) (string, *armsubscriptions.Subscription, error) {
+type accountMatch struct {
+	Name, Location string
+	Sub            *armsubscriptions.Subscription
+}
+
+// Searches every subscription the user can see.
+func findAccounts(ctx context.Context, cred azcore.TokenCredential, tag string) ([]accountMatch, error) {
 	key, value, ok := strings.Cut(tag, "=")
 	if !ok || key == "" {
-		return "", nil, fmt.Errorf("--tag must be KEY=VALUE, got %q", tag)
+		return nil, fmt.Errorf("--tag must be KEY=VALUE, got %q", tag)
 	}
 
 	subs, err := armsubscriptions.NewClient(cred, nil)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
-	type match struct {
-		account string
-		sub     *armsubscriptions.Subscription
-	}
-	var matches []match
-
+	var matches []accountMatch
 	subPager := subs.NewListPager(nil)
 	for subPager.More() {
 		page, err := subPager.NextPage(ctx)
 		if err != nil {
-			return "", nil, fmt.Errorf("listing subscriptions failed (an access or connectivity problem, not a tagging problem): %w", err)
+			return nil, fmt.Errorf("listing subscriptions failed (an access or connectivity problem, not a tagging problem): %w", err)
 		}
 		for _, sub := range page.Value {
 			if deref(sub.State) != armsubscriptions.SubscriptionStateEnabled {
@@ -125,34 +131,67 @@ func findAccount(ctx context.Context, cred azcore.TokenCredential, tag string) (
 			}
 			accounts, err := armstorage.NewAccountsClient(*sub.SubscriptionID, cred, nil)
 			if err != nil {
-				return "", nil, err
+				return nil, err
 			}
 			accPager := accounts.NewListPager(nil)
 			for accPager.More() {
 				accPage, err := accPager.NextPage(ctx)
 				if err != nil {
-					return "", nil, fmt.Errorf("listing storage accounts in %s failed: %w", deref(sub.DisplayName), err)
+					return nil, fmt.Errorf("listing storage accounts in %s failed: %w", deref(sub.DisplayName), err)
 				}
 				for _, acc := range accPage.Value {
 					if v := acc.Tags[key]; v != nil && *v == value {
-						matches = append(matches, match{*acc.Name, sub})
+						matches = append(matches, accountMatch{*acc.Name, deref(acc.Location), sub})
 					}
 				}
 			}
 		}
 	}
+	return matches, nil
+}
 
-	switch len(matches) {
-	case 0:
-		return "", nil, fmt.Errorf("no storage account tagged %q is visible to you; ask your Azure administrator to apply it", tag)
-	case 1:
-		return matches[0].account, matches[0].sub, nil
+// pick is nil when there is no terminal to ask at.
+func chooseAccount(matches []accountMatch, tag, want string, pick picker) (accountMatch, error) {
+	if len(matches) == 0 {
+		return accountMatch{}, fmt.Errorf("no storage account tagged %q is visible to you; ask your Azure administrator to apply it", tag)
 	}
-	names := make([]string, len(matches))
+	slices.SortFunc(matches, func(a, b accountMatch) int { return strings.Compare(a.Name, b.Name) })
+	labels := accountLabels(matches)
+	choices := "  --account " + strings.Join(labels, "\n  --account ")
+
+	if want != "" {
+		for _, m := range matches {
+			if m.Name == want {
+				return m, nil
+			}
+		}
+		return accountMatch{}, fmt.Errorf("no storage account named %q is tagged %q; use one of:\n%s", want, tag, choices)
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if pick == nil {
+		return accountMatch{}, fmt.Errorf("%d storage accounts are tagged %q; choose one by adding:\n%s", len(matches), tag, choices)
+	}
+	i, err := pick(fmt.Sprintf("%d storage accounts are tagged %q. Choose one", len(matches), tag), labels)
+	if err != nil {
+		return accountMatch{}, err
+	}
+	logf("Tip: skip this question next time with --account %s\n", matches[i].Name)
+	return matches[i], nil
+}
+
+func accountLabels(matches []accountMatch) []string {
+	nameW, subW := 0, 0
+	for _, m := range matches {
+		nameW = max(nameW, len(m.Name))
+		subW = max(subW, len(deref(m.Sub.DisplayName)))
+	}
+	labels := make([]string, len(matches))
 	for i, m := range matches {
-		names[i] = m.account
+		labels[i] = fmt.Sprintf("%-*s  %-*s  %s", nameW, m.Name, subW, deref(m.Sub.DisplayName), m.Location)
 	}
-	return "", nil, fmt.Errorf("%d storage accounts are tagged %q (%s); exactly one must be", len(matches), tag, strings.Join(names, ", "))
+	return labels
 }
 
 func signedInUser(ctx context.Context, cred azcore.TokenCredential) (string, error) {
