@@ -165,15 +165,14 @@ func TestCommandsRejectOtherCommandsFlags(t *testing.T) {
 
 func TestCommandHelpListsOwnFlagsInOrderWithDefaults(t *testing.T) {
 	var o options
-	fs, err := newFlagSet("fetch", &o)
+	c, err := newCommand("fetch", &o)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var buf strings.Builder
-	fs.SetOutput(&buf)
-	fs.Usage()
+	c.usage(&buf)
 	got := buf.String()
-	want := []string{"--out DIR", "(default .)", "--container NAME", "(default bronze)", "--tag KEY=VALUE", "(default tag=storage)", "--tenant ID", "Imperial College London", "--sas-env FILE"}
+	want := []string{"Required:", "<id>", "Optional:", "--out DIR", "(default .)", "--container NAME", "(default bronze)", "--tag KEY=VALUE", "(default tag=storage)", "--tenant ID", "Imperial College London", "--sas-env FILE"}
 	rest := got
 	for _, w := range want {
 		i := strings.Index(rest, w)
@@ -184,6 +183,24 @@ func TestCommandHelpListsOwnFlagsInOrderWithDefaults(t *testing.T) {
 	}
 	if strings.Contains(got, "--dry-run") || strings.Contains(got, imperialTenant) {
 		t.Errorf("unexpected content:\n%s", got)
+	}
+}
+
+func TestMissingRequiredArgumentsNamedWithUsage(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"publish"}, "missing <path>"},
+		{[]string{"fetch", "--out", "x"}, "missing <id>"},
+		{[]string{"mint-sas"}, "missing --mode"},
+		{[]string{"logout", "extra"}, `unexpected argument "extra"`},
+		{[]string{"fetch", "a", "b"}, `unexpected argument "b"`},
+	} {
+		_, _, err := parseArgs(tc.args[0], tc.args[1:])
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want) || !strings.Contains(err.Error(), "Usage: lbf") {
+			t.Errorf("%v: got %v", tc.args, err)
+		}
 	}
 }
 
