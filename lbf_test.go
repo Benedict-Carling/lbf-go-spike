@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -210,10 +212,14 @@ func TestMissingRequiredArgumentsNamedWithUsage(t *testing.T) {
 
 func TestTransferStopsStartingAfterAFailure(t *testing.T) {
 	var calls atomic.Int64
-	err := transferAll(t.Context(), make([]int, 100), func(context.Context, int) (string, error) {
-		calls.Add(1)
-		return "", errors.New("boom")
-	})
+	jobs := make([]job, 100)
+	for i := range jobs {
+		jobs[i].run = func(context.Context, func(int64)) error {
+			calls.Add(1)
+			return errors.New("boom")
+		}
+	}
+	err := transferAll(t.Context(), newProgress(io.Discard, len(jobs), 0), jobs)
 	if err == nil || calls.Load() > parallelFiles {
 		t.Fatalf("err %v after %d calls", err, calls.Load())
 	}
@@ -497,5 +503,88 @@ func TestPickNumbered(t *testing.T) {
 	}
 	if _, err := pickNumbered(strings.NewReader("9\n"), io.Discard, "Choose:", []string{"a", "b"}); !errors.Is(err, errNoChoice) {
 		t.Errorf("eof: %v", err)
+	}
+}
+
+func TestProgressLogsEachFinishedFileWhenNotATerminal(t *testing.T) {
+	var out strings.Builder
+	ok := []job{{name: "run1/a.txt", size: 2048, run: func(_ context.Context, p func(int64)) error { p(2048); return nil }}}
+	if err := transferAll(t.Context(), newProgress(&out, 1, 2048), ok); err != nil {
+		t.Fatal(err)
+	}
+	failed := []job{{name: "run1/b.txt", size: 10, run: func(context.Context, func(int64)) error { return errors.New("boom") }}}
+	if err := transferAll(t.Context(), newProgress(&out, 1, 10), failed); err == nil {
+		t.Fatal("failure not reported")
+	}
+	if got, want := out.String(), "  [1/1] run1/a.txt (2.0 KiB)\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestLiveProgressFitsAnyTerminal(t *testing.T) {
+	escape := regexp.MustCompile(`\x1b\[\d*[A-Za-z]\r?`)
+	names := []string{"a.txt", "run1/细胞图像/样本一.tiff", "tab\there\nnewline.bin", "‮evil.exe",
+		"🧪🧫/" + strings.Repeat("x", 300) + ".parquet", "é́́.csv", "plate1/a.parquet", "b", "c", "d"}
+	for _, height := range []int{1, 2, 3, 5, 8, 24, 60} {
+		for width := 1; width <= 200; width++ {
+			now := time.Now()
+			p := &progress{live: true, size: func() (int, int) { return width, height }, files: 40, total: 40 << 30,
+				samples: []sample{{now.Add(-time.Minute), 0}}, done: 7, settled: 9 << 30}
+			for i, name := range names {
+				b := p.start(name, int64(i+1)<<30)
+				b.set(int64(i) << 29)
+			}
+			for frame := range 2 {
+				lines := strings.Split(escape.ReplaceAllString(p.render(now, false), ""), "\n")
+				lines = lines[:len(lines)-1]
+				if len(lines) > max(height-2, 1) {
+					t.Fatalf("%dx%d frame %d: %d lines", width, height, frame, len(lines))
+				}
+				for _, l := range lines {
+					if len(l) > max(width-1, 0) || strings.ContainsAny(l, "\t\r‮") {
+						t.Fatalf("%dx%d frame %d: %q", width, height, frame, l)
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestLiveProgressRewindsRewrappedFrame(t *testing.T) {
+	width := 120
+	p := &progress{live: true, size: func() (int, int) { return width, 24 }, files: 1, total: 100, samples: []sample{{time.Now(), 0}}}
+	p.start("a.txt", 100)
+	p.render(time.Now(), false)
+	want := 0
+	for _, w := range p.frame {
+		want += (w + 39) / 40
+	}
+	width = 40
+	if got := p.render(time.Now(), false); !strings.HasPrefix(got, fmt.Sprintf("\x1b[%dA", want)) || want <= len(p.frame) {
+		t.Fatalf("want rewind of %d rows, got %q", want, got)
+	}
+}
+
+func TestProgressFormatting(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{bar(0, 100, 8), "[>       ]"},
+		{bar(50, 100, 8), "[====>   ]"},
+		{bar(100, 100, 8), "[========]"},
+		{bar(0, 0, 8), "[========]"},
+		{clipLeft("a.txt", 8), "a.txt"},
+		{clipLeft("run1/images/plate1.tiff", 12), "...ate1.tiff"},
+		{clipLeft("run1/细胞.tiff", 12), "...胞.tiff"},
+		{clipLeft("run1/a.tiff", 2), ".."},
+		{printable("bad\tname\n‮gpj.exe"), "bad?name??gpj.exe"},
+		{fit("ab细胞", 4), "ab"},
+		{fit("ab细胞", 5), "ab细"},
+		{fit("abc", -1), ""},
+		{shortDuration(42 * time.Second), "42s"},
+		{shortDuration(5*time.Minute + 3*time.Second), "5m03s"},
+		{shortDuration(2*time.Hour + 7*time.Minute), "2h07m"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("got %q, want %q", tc.got, tc.want)
+		}
 	}
 }
