@@ -80,6 +80,11 @@ func (p provenance) check() error {
 			return fmt.Errorf("property %q is set by lbf and cannot be supplied", k)
 		}
 	}
+	for k := range p.Properties {
+		if k == "uploader" || k == "blob-location" || k == "run" || strings.HasPrefix(k, "source-") {
+			return fmt.Errorf("property %q would clash with an entity in the crate; choose another name", k)
+		}
+	}
 	return nil
 }
 
@@ -118,6 +123,9 @@ func loadProfile(dir string) (*profile, error) {
 			id, parent, err := schemaHead(raw)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", path, err)
+			}
+			if id == bronzeID {
+				return nil, fmt.Errorf("%s: $id %s is lbf's bronze profile, which only lbf defines", path, id)
 			}
 			docs[id], parents[id] = raw, parent
 			if path == target {

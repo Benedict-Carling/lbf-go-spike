@@ -76,7 +76,6 @@ func datasetFiles(input string) (string, []localFile, error) {
 }
 
 func newID() string {
-	petname.NonDeterministicMode()
 	b := make([]byte, 2)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%s-%s-%s", time.Now().Format("20060102"), petname.Generate(2, "-"), hex.EncodeToString(b))
@@ -92,7 +91,7 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 
 	parts := make([]entity, len(files))
 	for i, f := range files {
-		parts[i] = ref(f.Rel)
+		parts[i] = ref(fileID(f.Rel))
 	}
 
 	props := []struct{ name, value string }{
@@ -179,13 +178,26 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 	}
 
 	for _, f := range files {
-		graph = append(graph, entity{"@id": f.Rel, "@type": "File", "contentSize": fmt.Sprint(f.Size)})
+		graph = append(graph, entity{"@id": fileID(f.Rel), "@type": "File", "contentSize": fmt.Sprint(f.Size)})
 	}
 
 	return json.MarshalIndent(map[string]any{
 		"@context": "https://w3id.org/ro/crate/1.2/context",
 		"@graph":   graph,
 	}, "", "    ")
+}
+
+// Percent-encodes like Python's urllib.parse.quote, as ro-crate-py does.
+func fileID(rel string) string {
+	var b strings.Builder
+	for _, c := range []byte(rel) {
+		if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("_.-~/", c) >= 0 {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }
 
 func timestamp(t time.Time) string {
