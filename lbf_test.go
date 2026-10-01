@@ -106,7 +106,7 @@ func TestRepairWindowsArgs(t *testing.T) {
 }
 
 func TestCrateMatchesPythonShape(t *testing.T) {
-	files := []localFile{{Rel: "run1/a.txt", Size: 3}}
+	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5}, {Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}
 	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
@@ -125,6 +125,18 @@ func TestCrateMatchesPythonShape(t *testing.T) {
 	last := doc.Graph[len(doc.Graph)-1]
 	if last["@id"] != "run1/a.txt" || last["contentSize"] != "3" {
 		t.Fatalf("file entity: %v", last)
+	}
+	if !strings.Contains(string(raw), `"run1/a%20b%231%25.csv"`) || strings.Contains(string(raw), "a b#1") {
+		t.Fatalf("file @id not percent-encoded like ro-crate-py: %s", raw)
+	}
+}
+
+func TestProfileCannotReplaceBronze(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "fake", "profile.json"),
+		`{"$id": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0"}`)
+	if _, err := loadProfile(filepath.Join(root, "fake")); err == nil || !strings.Contains(err.Error(), "bronze") {
+		t.Fatalf("profile reusing bronze's $id accepted: %v", err)
 	}
 }
 
@@ -258,15 +270,19 @@ func TestProvenanceRules(t *testing.T) {
 	data := filepath.Join(dir, "data")
 	writeFile(t, filepath.Join(data, "a.txt"), "a")
 	cases := map[string]string{
-		"unknown field":         `{"properties": {}, "instrumentz": []}`,
-		"parent without tools":  `{"derived_from": "20260101-x-y-0000"}`,
-		"tools without parent":  `{"instruments": [{"name": "a", "version": "1", "url": "u"}]}`,
-		"incomplete instrument": `{"derived_from": "20260101-x-y-0000", "instruments": [{"name": "a"}]}`,
-		"bad parent id":         `{"derived_from": "../x", "instruments": [{"name": "a", "version": "1", "url": "https://a"}], "properties": {}}`,
-		"reserved property":     `{"properties": {"source_path": "/elsewhere"}}`,
-		"non-string property":   `{"properties": {"n": 1}}`,
-		"trailing content":      `{"properties": {}} {"derived_from": "x"}`,
-		"url not a uri":         `{"derived_from": "20260101-x-y-0000", "instruments": [{"name": "a", "version": "1", "url": "not a url"}], "properties": {}}`,
+		"unknown field":          `{"properties": {}, "instrumentz": []}`,
+		"parent without tools":   `{"derived_from": "20260101-x-y-0000"}`,
+		"tools without parent":   `{"instruments": [{"name": "a", "version": "1", "url": "u"}]}`,
+		"incomplete instrument":  `{"derived_from": "20260101-x-y-0000", "instruments": [{"name": "a"}]}`,
+		"bad parent id":          `{"derived_from": "../x", "instruments": [{"name": "a", "version": "1", "url": "https://a"}], "properties": {}}`,
+		"reserved property":      `{"properties": {"source_path": "/elsewhere"}}`,
+		"property named run":     `{"properties": {"run": "7"}}`,
+		"property uploader":      `{"properties": {"uploader": "x"}}`,
+		"property blob-location": `{"properties": {"blob-location": "x"}}`,
+		"property source-":       `{"properties": {"source-20260101-x-y-0000": "x"}}`,
+		"non-string property":    `{"properties": {"n": 1}}`,
+		"trailing content":       `{"properties": {}} {"derived_from": "x"}`,
+		"url not a uri":          `{"derived_from": "20260101-x-y-0000", "instruments": [{"name": "a", "version": "1", "url": "not a url"}], "properties": {}}`,
 	}
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
