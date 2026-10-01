@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -190,17 +189,19 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	}
 	logf("Downloading %d files (%s) to %s\n", len(blobs), humanBytes(total), root)
 
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", err
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close()
+
 	started := time.Now()
 	err = transferAll(ctx, blobs, func(ctx context.Context, b *container.BlobItem) (string, error) {
 		rel := strings.TrimPrefix(*b.Name, prefix)
-		local, err := localPath(root, rel)
-		if err != nil {
-			return "", err
-		}
-		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
-			return "", err
-		}
-		fh, err := os.Create(local)
+		fh, err := createIn(dir, rel)
 		if err != nil {
 			return "", err
 		}
@@ -268,13 +269,17 @@ func isDirectoryMarker(b *container.BlobItem) bool {
 	return false
 }
 
-func localPath(root, rel string) (string, error) {
-	p := filepath.Join(root, filepath.FromSlash(rel))
-	r, err := filepath.Rel(root, p)
-	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) {
-		return "", errors.New("blob name escapes the download directory: " + rel)
+// os.Root refuses names, including via symlinks, that would land outside the download directory.
+func createIn(dir *os.Root, rel string) (*os.File, error) {
+	name := filepath.FromSlash(rel)
+	if err := dir.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return nil, fmt.Errorf("blob %s: %w", rel, err)
 	}
-	return p, nil
+	fh, err := dir.Create(name)
+	if err != nil {
+		return nil, fmt.Errorf("blob %s: %w", rel, err)
+	}
+	return fh, nil
 }
 
 func rate(n int64, d time.Duration) int64 {

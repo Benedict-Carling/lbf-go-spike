@@ -68,14 +68,31 @@ func TestSASEnvRejectsUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestLocalPathRejectsEscapes(t *testing.T) {
-	root := t.TempDir()
-	if _, err := localPath(root, "run1/a.txt"); err != nil {
+func TestCreateInRejectsEscapes(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "out")
+	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"../x", "run1/../../x"} {
-		if _, err := localPath(root, bad); err == nil {
-			t.Fatalf("%s accepted", bad)
+	bad := []string{"../x", "run1/../../x"}
+	// Windows runners may lack the privilege to create symlinks.
+	if os.Symlink(base, filepath.Join(root, "link")) == nil {
+		bad = append(bad, "link/x")
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	fh, err := createIn(dir, "run1/sub/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh.Close()
+	for _, name := range bad {
+		if fh, err := createIn(dir, name); err == nil {
+			fh.Close()
+			t.Errorf("%s accepted", name)
 		}
 	}
 }
