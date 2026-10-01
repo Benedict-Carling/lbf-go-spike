@@ -6,12 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"regexp"
 	"runtime"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
@@ -76,9 +76,6 @@ func run(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "publish", "upload":
-		if len(positional) != 1 {
-			return errors.New("usage: lbf publish <path>")
-		}
 		pub, err := preparePublication(positional[0], o.provenance, o.profile)
 		if err != nil {
 			return err
@@ -102,9 +99,6 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "fetch", "download":
-		if len(positional) != 1 {
-			return errors.New("usage: lbf fetch <id>")
-		}
 		id := positional[0]
 		if !validID.MatchString(id) {
 			return fmt.Errorf("%q is not a dataset ID", id)
@@ -121,9 +115,6 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "login":
-		if len(positional) != 0 {
-			return errors.New("usage: lbf login [--tenant ID]")
-		}
 		cred, err := login(ctx, o.tenant)
 		if err != nil {
 			return err
@@ -140,9 +131,6 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "logout":
-		if len(positional) != 0 {
-			return errors.New("usage: lbf logout")
-		}
 		removed, err := logout()
 		if err != nil {
 			return err
@@ -155,9 +143,6 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "mint-sas":
-		if len(positional) != 0 {
-			return errors.New("usage: lbf mint-sas --mode upload|download [--out FILE]")
-		}
 		if o.mode != "upload" && o.mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
@@ -185,22 +170,33 @@ type options struct {
 
 func parseArgs(cmd string, args []string) (options, []string, error) {
 	var o options
-	fs, err := newFlagSet(cmd, &o)
+	c, err := newCommand(cmd, &o)
 	if err != nil {
 		return o, nil, err
 	}
-	positional, err := parseInterspersed(fs, args)
+	positional, err := c.parse(args)
 	o.tenant = cmp.Or(o.tenant, imperialTenant)
 	return o, positional, err
 }
 
-func newFlagSet(cmd string, o *options) (*flag.FlagSet, error) {
-	fs := flag.NewFlagSet("lbf "+cmd, flag.ContinueOnError)
-	type flagHelp struct{ name, arg string }
-	var help []flagHelp
+type command struct {
+	fs              *flag.FlagSet
+	synopsis, notes string
+	arg, argDesc    string
+	flags           []commandFlag
+}
+
+type commandFlag struct {
+	name, arg string
+	required  bool
+}
+
+func newCommand(cmd string, o *options) (*command, error) {
+	c := &command{fs: flag.NewFlagSet("lbf "+cmd, flag.ContinueOnError)}
+	fs := c.fs
 	str := func(p *string, name, arg, def, desc string) {
 		fs.StringVar(p, name, def, desc)
-		help = append(help, flagHelp{name, arg})
+		c.flags = append(c.flags, commandFlag{name: name, arg: arg})
 	}
 	tenant := func() {
 		str(&o.tenant, "tenant", "ID", "", "Entra tenant to sign in to (default Imperial College London)")
@@ -212,57 +208,108 @@ func newFlagSet(cmd string, o *options) (*flag.FlagSet, error) {
 	}
 	sasEnv := func() { str(&o.sasEnv, "sas-env", "FILE", "", "pre-minted credential file from 'lbf mint-sas'") }
 
-	var synopsis, notes string
 	switch cmd {
 	case "publish", "upload":
-		synopsis = cmd + " <path> [options]"
-		notes = provenanceHelp
+		c.synopsis = cmd + " <path> [options]"
+		c.arg, c.argDesc = "<path>", "dataset directory to upload"
+		c.notes = provenanceHelp
 		str(&o.provenance, "provenance", "FILE", "", "provenance JSON file")
 		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
 		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
-		help = append(help, flagHelp{"dry-run", ""})
+		c.flags = append(c.flags, commandFlag{name: "dry-run"})
 		storage()
 		sasEnv()
 	case "fetch", "download":
-		synopsis = cmd + " <id> [options]"
+		c.synopsis = cmd + " <id> [options]"
+		c.arg, c.argDesc = "<id>", "dataset ID, as printed by 'lbf publish'"
 		str(&o.out, "out", "DIR", ".", "output directory")
 		storage()
 		sasEnv()
 	case "mint-sas":
-		synopsis = "mint-sas --mode upload|download [options]"
+		c.synopsis = "mint-sas --mode upload|download [options]"
 		str(&o.mode, "mode", "upload|download", "", "what the credential may do")
+		c.flags[len(c.flags)-1].required = true
 		str(&o.out, "out", "FILE", "azure_sas.env", "output file")
 		storage()
 	case "login":
-		synopsis = "login [options]"
+		c.synopsis = "login [options]"
 		tenant()
 	case "logout":
-		synopsis = "logout"
+		c.synopsis = "logout"
 	default:
 		return nil, fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
+	fs.Usage = func() { c.usage(fs.Output()) }
+	return c, nil
+}
 
-	fs.Usage = func() {
-		out := fs.Output()
-		fmt.Fprintf(out, "Usage: lbf %s\n", synopsis)
-		if len(help) > 0 {
-			fmt.Fprintln(out)
-		}
-		w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-		for _, h := range help {
-			f := fs.Lookup(h.name)
-			desc := f.Usage
-			if f.DefValue != "" && f.DefValue != "false" {
-				desc += " (default " + f.DefValue + ")"
-			}
-			fmt.Fprintf(w, "  --%s\t%s\n", strings.TrimSpace(h.name+" "+h.arg), desc)
-		}
-		w.Flush()
-		if notes != "" {
-			fmt.Fprintf(out, "\n%s", notes)
+func (c *command) parse(args []string) ([]string, error) {
+	positional, err := parseInterspersed(c.fs, args)
+	if err != nil {
+		return nil, err
+	}
+	want := 0
+	if c.arg != "" {
+		want = 1
+	}
+	if len(positional) > want {
+		return nil, c.usageError(fmt.Sprintf("unexpected argument %q", positional[want]))
+	}
+	if len(positional) < want {
+		return nil, c.usageError("missing " + c.arg)
+	}
+	for _, f := range c.flags {
+		if f.required && c.fs.Lookup(f.name).Value.String() == "" {
+			return nil, c.usageError("missing --" + f.name)
 		}
 	}
-	return fs, nil
+	return positional, nil
+}
+
+func (c *command) usageError(msg string) error {
+	var b strings.Builder
+	c.usage(&b)
+	return fmt.Errorf("%s\n\n%s", msg, b.String())
+}
+
+func (c *command) usage(out io.Writer) {
+	type row struct{ left, desc string }
+	var required, optional []row
+	if c.arg != "" {
+		required = append(required, row{c.arg, c.argDesc})
+	}
+	for _, cf := range c.flags {
+		f := c.fs.Lookup(cf.name)
+		r := row{"--" + strings.TrimSpace(cf.name+" "+cf.arg), f.Usage}
+		if f.DefValue != "" && f.DefValue != "false" {
+			r.desc += " (default " + f.DefValue + ")"
+		}
+		if cf.required {
+			required = append(required, r)
+		} else {
+			optional = append(optional, r)
+		}
+	}
+	width := 0
+	for _, r := range append(required, optional...) {
+		width = max(width, len(r.left))
+	}
+	fmt.Fprintf(out, "Usage: lbf %s\n", c.synopsis)
+	for _, sec := range []struct {
+		title string
+		rows  []row
+	}{{"Required:", required}, {"Optional:", optional}} {
+		if len(sec.rows) == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "\n%s\n", sec.title)
+		for _, r := range sec.rows {
+			fmt.Fprintf(out, "  %-*s   %s\n", width, r.left, r.desc)
+		}
+	}
+	if c.notes != "" {
+		fmt.Fprintf(out, "\n%s", c.notes)
+	}
 }
 
 func logf(format string, a ...any) {
