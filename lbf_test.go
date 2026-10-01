@@ -163,6 +163,30 @@ func TestCommandsRejectOtherCommandsFlags(t *testing.T) {
 	}
 }
 
+func TestCommandHelpListsOwnFlagsInOrderWithDefaults(t *testing.T) {
+	var o options
+	fs, err := newFlagSet("fetch", &o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	fs.SetOutput(&buf)
+	fs.Usage()
+	got := buf.String()
+	want := []string{"--out DIR", "(default .)", "--container NAME", "(default bronze)", "--tag KEY=VALUE", "(default tag=storage)", "--tenant ID", "Imperial College London", "--sas-env FILE"}
+	rest := got
+	for _, w := range want {
+		i := strings.Index(rest, w)
+		if i < 0 {
+			t.Fatalf("missing or out of order %q in:\n%s", w, got)
+		}
+		rest = rest[i+len(w):]
+	}
+	if strings.Contains(got, "--dry-run") || strings.Contains(got, imperialTenant) {
+		t.Errorf("unexpected content:\n%s", got)
+	}
+}
+
 func TestTransferStopsStartingAfterAFailure(t *testing.T) {
 	var calls atomic.Int64
 	err := transferAll(t.Context(), make([]int, 100), func(context.Context, int) (string, error) {

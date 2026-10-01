@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
@@ -19,21 +20,17 @@ import (
 const usage = `lbf - land and retrieve datasets in the Azure bronze layer
 
 Usage:
-  lbf publish <path> [--provenance FILE] [--profile DIR] [--dry-run]   (alias: upload)
-  lbf fetch <id> [--out DIR]                                           (alias: download)
-  lbf mint-sas --mode upload|download [--out FILE]
-  lbf login                                   sign in with the browser and remember it
-  lbf logout                                  forget the login saved by 'lbf login'
+  lbf publish <path>    upload a dataset (alias: upload)
+  lbf fetch <id>        download a dataset (alias: download)
+  lbf mint-sas          write a pre-minted credential file
+  lbf login             sign in with the browser and remember it
+  lbf logout            forget the login saved by 'lbf login'
   lbf version
 
-Common options:
-  --container NAME     blob container (default bronze)
-  --tag KEY=VALUE      tag identifying the storage account (default tag=storage, production;
-                       the test account is tag=storage-test)
-  --tenant ID          Entra tenant to sign in to (default Imperial College London)
-  --sas-env FILE       pre-minted credential instead of 'az login'
+Run 'lbf <command> --help' for its options.
+`
 
---provenance is a JSON file: {"derived_from": "<id>", "instruments": [{"name", "version", "url"}],
+const provenanceHelp = `--provenance is a JSON file: {"derived_from": "<id>", "instruments": [{"name", "version", "url"}],
 "properties": {"name": "value"}}. --profile is a directory holding a JSON Schema profile.json;
 publish validates against it, and lbf's bronze profile, before uploading anything.
 `
@@ -116,7 +113,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		path, err := download(ctx, t, id, cmp.Or(o.out, "."))
+		path, err := download(ctx, t, id, o.out)
 		if err != nil {
 			return err
 		}
@@ -168,7 +165,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		path := cmp.Or(o.out, "azure_sas.env")
+		path := o.out
 		if err := writeSASEnv(path, t); err != nil {
 			return err
 		}
@@ -188,38 +185,84 @@ type options struct {
 
 func parseArgs(cmd string, args []string) (options, []string, error) {
 	var o options
-	fs := flag.NewFlagSet("lbf "+cmd, flag.ContinueOnError)
-	tenant := func() { fs.StringVar(&o.tenant, "tenant", imperialTenant, "Entra tenant to sign in to") }
-	storage := func() {
-		tenant()
-		fs.StringVar(&o.tag, "tag", "tag=storage", "tag identifying the storage account")
-		fs.StringVar(&o.container, "container", "bronze", "blob container")
-	}
-	sasEnv := func() { fs.StringVar(&o.sasEnv, "sas-env", "", "pre-minted credential file from 'lbf mint-sas'") }
-
-	switch cmd {
-	case "publish", "upload":
-		storage()
-		sasEnv()
-		fs.StringVar(&o.provenance, "provenance", "", "provenance JSON file")
-		fs.StringVar(&o.profile, "profile", "", "directory containing profile.json")
-		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
-	case "fetch", "download":
-		storage()
-		sasEnv()
-		fs.StringVar(&o.out, "out", "", "output directory")
-	case "mint-sas":
-		storage()
-		fs.StringVar(&o.out, "out", "", "output file (default azure_sas.env)")
-		fs.StringVar(&o.mode, "mode", "", "upload or download")
-	case "login":
-		tenant()
-	case "logout":
-	default:
-		return o, nil, fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
+	fs, err := newFlagSet(cmd, &o)
+	if err != nil {
+		return o, nil, err
 	}
 	positional, err := parseInterspersed(fs, args)
+	o.tenant = cmp.Or(o.tenant, imperialTenant)
 	return o, positional, err
+}
+
+func newFlagSet(cmd string, o *options) (*flag.FlagSet, error) {
+	fs := flag.NewFlagSet("lbf "+cmd, flag.ContinueOnError)
+	type flagHelp struct{ name, arg string }
+	var help []flagHelp
+	str := func(p *string, name, arg, def, desc string) {
+		fs.StringVar(p, name, def, desc)
+		help = append(help, flagHelp{name, arg})
+	}
+	tenant := func() {
+		str(&o.tenant, "tenant", "ID", "", "Entra tenant to sign in to (default Imperial College London)")
+	}
+	storage := func() {
+		str(&o.container, "container", "NAME", "bronze", "blob container")
+		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
+		tenant()
+	}
+	sasEnv := func() { str(&o.sasEnv, "sas-env", "FILE", "", "pre-minted credential file from 'lbf mint-sas'") }
+
+	var synopsis, notes string
+	switch cmd {
+	case "publish", "upload":
+		synopsis = cmd + " <path> [options]"
+		notes = provenanceHelp
+		str(&o.provenance, "provenance", "FILE", "", "provenance JSON file")
+		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
+		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
+		help = append(help, flagHelp{"dry-run", ""})
+		storage()
+		sasEnv()
+	case "fetch", "download":
+		synopsis = cmd + " <id> [options]"
+		str(&o.out, "out", "DIR", ".", "output directory")
+		storage()
+		sasEnv()
+	case "mint-sas":
+		synopsis = "mint-sas --mode upload|download [options]"
+		str(&o.mode, "mode", "upload|download", "", "what the credential may do")
+		str(&o.out, "out", "FILE", "azure_sas.env", "output file")
+		storage()
+	case "login":
+		synopsis = "login [options]"
+		tenant()
+	case "logout":
+		synopsis = "logout"
+	default:
+		return nil, fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
+	}
+
+	fs.Usage = func() {
+		out := fs.Output()
+		fmt.Fprintf(out, "Usage: lbf %s\n", synopsis)
+		if len(help) > 0 {
+			fmt.Fprintln(out)
+		}
+		w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+		for _, h := range help {
+			f := fs.Lookup(h.name)
+			desc := f.Usage
+			if f.DefValue != "" && f.DefValue != "false" {
+				desc += " (default " + f.DefValue + ")"
+			}
+			fmt.Fprintf(w, "  --%s\t%s\n", strings.TrimSpace(h.name+" "+h.arg), desc)
+		}
+		w.Flush()
+		if notes != "" {
+			fmt.Fprintf(out, "\n%s", notes)
+		}
+	}
+	return fs, nil
 }
 
 func logf(format string, a ...any) {
