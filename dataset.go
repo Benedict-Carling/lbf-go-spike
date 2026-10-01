@@ -1,14 +1,17 @@
 package main
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +19,8 @@ import (
 )
 
 const licenseURL = "https://rightsstatements.org/vocab/InC/1.0/"
+
+var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type localFile struct {
 	Path string
@@ -66,7 +71,7 @@ func datasetFiles(input string) (string, []localFile, error) {
 		files = append(files, localFile{path, base + "/" + filepath.ToSlash(rel), fi.Size()})
 		return nil
 	})
-	sort.Slice(files, func(i, j int) bool { return files[i].Rel < files[j].Rel })
+	slices.SortFunc(files, func(a, b localFile) int { return strings.Compare(a.Rel, b.Rel) })
 	return source, files, err
 }
 
@@ -95,12 +100,7 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 		{"subscription_id", orUnknown(t.SubscriptionID)},
 		{"source_path", filepath.ToSlash(source)},
 	}
-	names := make([]string, 0, len(prov.Properties))
-	for k := range prov.Properties {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	for _, k := range names {
+	for _, k := range slices.Sorted(maps.Keys(prov.Properties)) {
 		props = append(props, struct{ name, value string }{k, prov.Properties[k]})
 	}
 	propRefs := make([]entity, len(props))
@@ -189,14 +189,11 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 }
 
 func timestamp(t time.Time) string {
-	return t.UTC().Format("2006-01-02T15:04:05Z")
+	return t.UTC().Format(time.RFC3339)
 }
 
 func orUnknown(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "unknown"
-	}
-	return strings.TrimSpace(s)
+	return cmp.Or(strings.TrimSpace(s), "unknown")
 }
 
 func deref[T any](p *T) T {

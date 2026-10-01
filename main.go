@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -123,11 +124,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		dir := *out
-		if dir == "" {
-			dir = "."
-		}
-		path, err := download(ctx, t, id, dir)
+		path, err := download(ctx, t, id, cmp.Or(*out, "."))
 		if err != nil {
 			return err
 		}
@@ -166,14 +163,11 @@ func run(ctx context.Context, args []string) error {
 		if *mode != "upload" && *mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
-		t, err := mintTarget(ctx, *tenant, *tag, *containerName, *mode, sasLifetime)
+		t, err := mintTarget(ctx, *tenant, *tag, *containerName, *mode)
 		if err != nil {
 			return err
 		}
-		path := *out
-		if path == "" {
-			path = "azure_sas.env"
-		}
+		path := cmp.Or(*out, "azure_sas.env")
 		if err := writeSASEnv(path, t); err != nil {
 			return err
 		}
@@ -193,11 +187,10 @@ func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, containerName
 	if sasEnv != "" {
 		return readSASEnv(sasEnv, mode, containerName)
 	}
-	return mintTarget(ctx, tenant, tag, containerName, mode, sasLifetime)
+	return mintTarget(ctx, tenant, tag, containerName, mode)
 }
 
-// Windows PowerShell 5.1 passes 'C:\My Folder\' -x as the single argument `C:\My Folder" -x`.
-// A quote cannot appear in a Windows path, so split it back apart.
+// PowerShell 5.1 passes 'C:\My Folder\' -x as `C:\My Folder" -x`; a quote cannot appear in a Windows path.
 func repairWindowsArgs(args []string) []string {
 	var out []string
 	for _, a := range args {
