@@ -1,0 +1,101 @@
+name: windows-native
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags='-s -w' -o lbf.exe .
+          [System.Environment]::OSVersion.VersionString
+          .\lbf.exe --help
+
+      - name: Test data under a path with spaces
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'test data\run 1'
+          New-Item -ItemType Directory -Force (Join-Path $root 'sub dir') | Out-Null
+          Set-Content (Join-Path $root 'readme.txt') 'hello from windows'
+          Set-Content (Join-Path $root 'sub dir\data.csv') "a,b`n1,2"
+          Set-Content (Join-Path $root '.DS_Store') 'junk'
+          $big = New-Object byte[] (20MB)
+          (New-Object Random 42).NextBytes($big)
+          [IO.File]::WriteAllBytes((Join-Path $root 'sub dir\big.bin'), $big)
+          "SRC=$root" >> $env:GITHUB_ENV
+
+      - name: Round trip with --sas-env (CRLF file for download)
+        env:
+          SAS_ENV_B64: ${{ secrets.SAS_ENV_B64 }}
+        run: |
+          $f = Join-Path $env:RUNNER_TEMP 'azure_sas.env'
+          [IO.File]::WriteAllBytes($f, [Convert]::FromBase64String($env:SAS_ENV_B64))
+          $crlf = Join-Path $env:RUNNER_TEMP 'azure_sas_crlf.env'
+          (Get-Content $f) -join "`r`n" | Set-Content -NoNewline $crlf
+
+          $out = .\lbf.exe upload $env:SRC --sas-env $f
+          $out
+          if ($LASTEXITCODE) { exit 1 }
+          $id = ($out | Select-String '^Uploaded as (\S+)').Matches[0].Groups[1].Value
+
+          $dest = Join-Path $env:RUNNER_TEMP 'dl sas'
+          .\lbf.exe download $id --sas-env $crlf --out $dest
+          if ($LASTEXITCODE) { exit 1 }
+          & .github\compare.ps1 -Src $env:SRC -Got (Join-Path $dest "$id\run 1")
+
+      - name: Stub az with real tokens
+        env:
+          MGMT_TOKEN_B64: ${{ secrets.MGMT_TOKEN_B64 }}
+          STORAGE_TOKEN_B64: ${{ secrets.STORAGE_TOKEN_B64 }}
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'azstub'
+          New-Item -ItemType Directory $d | Out-Null
+          [IO.File]::WriteAllBytes("$d\mgmt.json", [Convert]::FromBase64String($env:MGMT_TOKEN_B64))
+          [IO.File]::WriteAllBytes("$d\storage.json", [Convert]::FromBase64String($env:STORAGE_TOKEN_B64))
+          @(
+            '@echo off'
+            'echo %* >> "%~dp0calls.log"'
+            'echo %* | findstr /C:"storage.azure.com" >nul && (type "%~dp0storage.json" & exit /b 0)'
+            'type "%~dp0mgmt.json"'
+          ) | Set-Content "$d\az.cmd"
+          $d >> $env:GITHUB_PATH
+          "AZSTUB=$d" >> $env:GITHUB_ENV
+
+      - name: Round trip with az credential
+        run: |
+          where.exe az
+          $out = .\lbf.exe upload $env:SRC --tag role=bronze-test
+          $out
+          if ($LASTEXITCODE) { exit 1 }
+          $id = ($out | Select-String '^Uploaded as (\S+)').Matches[0].Groups[1].Value
+
+          $dest = Join-Path $env:RUNNER_TEMP 'dl az'
+          .\lbf.exe download $id --tag role=bronze-test --out $dest
+          if ($LASTEXITCODE) { exit 1 }
+          & .github\compare.ps1 -Src $env:SRC -Got (Join-Path $dest "$id\run 1")
+
+      - name: mint-sas on Windows, then use it
+        run: |
+          $f = Join-Path $env:RUNNER_TEMP 'minted.env'
+          .\lbf.exe mint-sas --mode download --tag role=bronze-test --out $f
+          if ($LASTEXITCODE) { exit 1 }
+          .\lbf.exe download 20260908-grown-bat-9824 --sas-env $f --out (Join-Path $env:RUNNER_TEMP 'dl minted')
+          if ($LASTEXITCODE) { exit 1 }
+          'az invocations seen by the stub:'
+          Get-Content "$env:AZSTUB\calls.log"
