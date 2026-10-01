@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -137,6 +140,17 @@ func TestProfileCannotReplaceBronze(t *testing.T) {
 		`{"$id": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0"}`)
 	if _, err := loadProfile(filepath.Join(root, "fake")); err == nil || !strings.Contains(err.Error(), "bronze") {
 		t.Fatalf("profile reusing bronze's $id accepted: %v", err)
+	}
+}
+
+func TestTransferStopsStartingAfterAFailure(t *testing.T) {
+	var calls atomic.Int64
+	err := transferAll(t.Context(), make([]int, 100), func(context.Context, int) (string, error) {
+		calls.Add(1)
+		return "", errors.New("boom")
+	})
+	if err == nil || calls.Load() > parallelFiles {
+		t.Fatalf("err %v after %d calls", err, calls.Load())
 	}
 }
 
