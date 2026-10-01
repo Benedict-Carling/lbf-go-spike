@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.2.0",
+  "title": "Bronze dataset",
+  "description": "A dataset landed as uploaded: a dataset identifier and at least one file. Other profiles can $ref this one.",
+  "type": "object",
+  "required": ["identifier", "properties", "files"],
+  "properties": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[0-9]{8}-[a-z]+-[a-z]+-[a-f0-9]{4}$"
+    },
+    "properties": { "type": "object" },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "size"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "size": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

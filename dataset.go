@@ -82,7 +82,9 @@ type entity map[string]any
 func ref(id string) entity { return entity{"@id": id} }
 
 // Same graph as rocrate_generator.py; encoding/json sorts keys, matching its output.
-func buildCrate(id, source string, files []localFile, t target, published time.Time) ([]byte, error) {
+func buildCrate(id, source string, files []localFile, t target, prov provenance, profileID string, published time.Time) ([]byte, error) {
+	stamp := published.UTC().Format("2006-01-02T15:04:05Z")
+
 	parts := make([]entity, len(files))
 	for i, f := range files {
 		parts[i] = ref(f.Rel)
@@ -93,25 +95,38 @@ func buildCrate(id, source string, files []localFile, t target, published time.T
 		{"subscription_id", orUnknown(t.SubscriptionID)},
 		{"source_path", filepath.ToSlash(source)},
 	}
+	names := make([]string, 0, len(prov.Properties))
+	for k := range prov.Properties {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		props = append(props, struct{ name, value string }{k, prov.Properties[k]})
+	}
 	propRefs := make([]entity, len(props))
 	for i, p := range props {
 		propRefs[i] = ref("#" + p.name)
 	}
 
+	description := "Dataset " + id
+	if t.Container == "bronze" {
+		description = "Bronze-layer dataset " + id
+	}
+	root := entity{
+		"@id":                "./",
+		"@type":              "Dataset",
+		"identifier":         id,
+		"name":               id,
+		"description":        description,
+		"datePublished":      stamp,
+		"license":            licenseURL,
+		"creator":            ref("#uploader"),
+		"distribution":       ref("#blob-location"),
+		"additionalProperty": propRefs,
+		"hasPart":            parts,
+	}
 	graph := []entity{
-		{
-			"@id":                "./",
-			"@type":              "Dataset",
-			"identifier":         id,
-			"name":               id,
-			"description":        "Bronze-layer dataset " + id,
-			"datePublished":      published.UTC().Format("2006-01-02T15:04:05Z"),
-			"license":            licenseURL,
-			"creator":            ref("#uploader"),
-			"distribution":       ref("#blob-location"),
-			"additionalProperty": propRefs,
-			"hasPart":            parts,
-		},
+		root,
 		{
 			"@id":        "ro-crate-metadata.json",
 			"@type":      "CreativeWork",
@@ -124,6 +139,50 @@ func buildCrate(id, source string, files []localFile, t target, published time.T
 	for _, p := range props {
 		graph = append(graph, entity{"@id": "#" + p.name, "@type": "PropertyValue", "name": p.name, "value": p.value})
 	}
+
+	var profiles []string
+	if prov.DerivedFrom != "" {
+		sourceID := "#source-" + prov.DerivedFrom
+		root["wasDerivedFrom"] = ref(sourceID)
+		graph = append(graph, entity{"@id": sourceID, "@type": "Dataset", "identifier": prov.DerivedFrom, "name": prov.DerivedFrom})
+
+		var tools []entity
+		seen := map[string]bool{}
+		for _, in := range prov.Instruments {
+			tools = append(tools, ref(in.URL))
+			if !seen[in.URL] {
+				seen[in.URL] = true
+				graph = append(graph, entity{"@id": in.URL, "@type": "SoftwareApplication", "name": in.Name, "version": in.Version, "url": in.URL})
+			}
+		}
+		var instrumentRef any = tools
+		if len(tools) == 1 {
+			instrumentRef = tools[0]
+		}
+		graph = append(graph, entity{
+			"@id":        "#run",
+			"@type":      "CreateAction",
+			"name":       fmt.Sprintf("Dataset %s produced by %s", id, prov.Instruments[0].Name),
+			"endTime":    stamp,
+			"instrument": instrumentRef,
+			"object":     ref(sourceID),
+			"result":     ref("./"),
+			"agent":      ref("#uploader"),
+		})
+		profiles = append(profiles, processRunCrate)
+	}
+	if profileID != "" {
+		profiles = append(profiles, profileID)
+	}
+	if len(profiles) > 0 {
+		refs := make([]entity, len(profiles))
+		for i, uri := range profiles {
+			refs[i] = ref(uri)
+			graph = append(graph, entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": uri})
+		}
+		root["conformsTo"] = refs
+	}
+
 	for _, f := range files {
 		graph = append(graph, entity{"@id": f.Rel, "@type": "File", "contentSize": fmt.Sprint(f.Size)})
 	}

@@ -11,7 +11,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -45,15 +44,15 @@ func permissionsFor(mode string) sas.ContainerPermissions {
 	return sas.ContainerPermissions{Read: true, List: true}
 }
 
-func mintTarget(ctx context.Context, tag, containerName, mode string, lifetime time.Duration) (target, error) {
-	cred, err := azidentity.NewAzureCLICredential(nil)
+func mintTarget(ctx context.Context, tenant, tag, containerName, mode string, lifetime time.Duration) (target, error) {
+	cred, source, err := credential(ctx, tenant)
 	if err != nil {
 		return target{}, err
 	}
 
 	user, err := signedInUser(ctx, cred)
 	if err != nil {
-		return target{}, fmt.Errorf("could not get a token from the Azure CLI (run 'az login'): %w", err)
+		return target{}, err
 	}
 
 	account, sub, err := findAccount(ctx, cred, tag)
@@ -88,8 +87,8 @@ func mintTarget(ctx context.Context, tag, containerName, mode string, lifetime t
 		return target{}, err
 	}
 
-	fmt.Printf("[auth] %s -> %s/%s (subscription %s, permissions=%s)\n",
-		user, account, containerName, deref(sub.DisplayName), perms.String())
+	logf("[auth] %s via %s -> %s/%s (subscription %s, requested=%s)\n",
+		user, source, account, containerName, deref(sub.DisplayName), perms.String())
 
 	return target{
 		Account:          account,

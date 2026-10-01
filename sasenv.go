@@ -95,7 +95,7 @@ func readSASEnv(path, mode, expectContainer string) (target, error) {
 		return target{}, fmt.Errorf("%s targets container %q, but this run asked for %q", path, values["AZURE_CONTAINER"], expectContainer)
 	}
 
-	fmt.Printf("[sas] using %s -> %s/%s (permissions=%s, expires %s)\n",
+	logf("[sas] using %s -> %s/%s (permissions=%s, expires %s)\n",
 		path, values["AZURE_ACCOUNT"], values["AZURE_CONTAINER"], values["AZURE_SAS_PERMISSIONS"], values["AZURE_SAS_EXPIRY"])
 
 	return target{

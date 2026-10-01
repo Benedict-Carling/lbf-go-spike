@@ -16,14 +16,29 @@ import (
 const usage = `lbf - land and retrieve datasets in the Azure bronze layer
 
 Usage:
-  lbf upload <path>       [--tag KEY=VALUE] [--container NAME] [--sas-env FILE]
-  lbf download <id>       [--out DIR] [--tag KEY=VALUE] [--container NAME] [--sas-env FILE]
-  lbf mint-sas --mode upload|download [--out FILE] [--tag KEY=VALUE] [--container NAME]
+  lbf publish <path> [--provenance FILE] [--profile DIR] [--dry-run]   (alias: upload)
+  lbf fetch <id> [--out DIR]                                           (alias: download)
+  lbf mint-sas --mode upload|download [--out FILE]
+  lbf login                                   sign in with the browser and remember it
+  lbf logout                                  forget the login saved by 'lbf login'
+  lbf version
 
-Without --sas-env, credentials come from your 'az login' session.
+Common options:
+  --container NAME     blob container (default bronze)
+  --tag KEY=VALUE      tag identifying the storage account (default tag=storage-test;
+                       production is tag=storage)
+  --tenant ID          Entra tenant to sign in to (default Imperial College London)
+  --sas-env FILE       pre-minted credential instead of 'az login'
+
+--provenance is a JSON file: {"derived_from": "<id>", "instruments": [{"name", "version", "url"}],
+"properties": {"name": "value"}}. --profile is a directory holding a JSON Schema profile.json;
+publish validates against it before signing in or uploading anything.
 `
 
 const sasLifetime = 144 * time.Hour
+
+// Set at release build time with -ldflags "-X main.version=v0.1.0".
+var version = "dev"
 
 var sasSignature = regexp.MustCompile(`sig=[^&\s"]+`)
 
@@ -42,13 +57,21 @@ func run(ctx context.Context, args []string) error {
 		fmt.Print(usage)
 		return nil
 	}
+	if args[0] == "version" || args[0] == "--version" {
+		fmt.Println("lbf", version)
+		return nil
+	}
 
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	tag := fs.String("tag", "tag=storage", "tag identifying the storage account")
+	tag := fs.String("tag", "tag=storage-test", "tag identifying the storage account")
+	tenant := fs.String("tenant", imperialTenant, "Entra tenant to sign in to")
 	containerName := fs.String("container", "bronze", "blob container")
 	sasEnv := fs.String("sas-env", "", "pre-minted credential file from 'lbf mint-sas'")
-	out := fs.String("out", "", "output directory (download) or file (mint-sas)")
+	out := fs.String("out", "", "output directory (fetch) or file (mint-sas)")
 	mode := fs.String("mode", "", "mint-sas only: upload or download")
+	provenancePath := fs.String("provenance", "", "publish only: provenance JSON file")
+	profileDir := fs.String("profile", "", "publish only: directory containing profile.json")
+	dryRun := fs.Bool("dry-run", false, "publish only: validate and print the crate without signing in or uploading")
 
 	positional, err := parseInterspersed(fs, args[1:])
 	if err != nil {
@@ -56,29 +79,41 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
-	case "upload":
+	case "publish", "upload":
 		if len(positional) != 1 {
-			return errors.New("usage: lbf upload <path>")
+			return errors.New("usage: lbf publish <path>")
 		}
-		t, err := resolveTarget(ctx, *sasEnv, "upload", *tag, *containerName)
+		pub, err := preparePublication(positional[0], *provenancePath, *profileDir)
 		if err != nil {
 			return err
 		}
-		id, err := upload(ctx, t, positional[0])
+		if *dryRun {
+			crate, err := pub.crate(target{Account: "dryrun", Container: *containerName, User: "dry-run"})
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(crate))
+			return nil
+		}
+		t, err := resolveTarget(ctx, *sasEnv, "upload", *tenant, *tag, *containerName)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Uploaded as %s\n%s/%s\n", id, t.containerURL(), id)
+		if err := upload(ctx, t, pub); err != nil {
+			return err
+		}
+		fmt.Printf("Uploaded as %s\n%s/%s\n", pub.ID, t.containerURL(), pub.ID)
 		return nil
 
-	case "download":
+	case "fetch", "download":
 		if len(positional) != 1 {
-			return errors.New("usage: lbf download <id>")
+			return errors.New("usage: lbf fetch <id>")
 		}
-		if !validID.MatchString(positional[0]) {
-			return fmt.Errorf("%q is not a dataset ID", positional[0])
+		id := positional[0]
+		if !validID.MatchString(id) {
+			return fmt.Errorf("%q is not a dataset ID", id)
 		}
-		t, err := resolveTarget(ctx, *sasEnv, "download", *tag, *containerName)
+		t, err := resolveTarget(ctx, *sasEnv, "download", *tenant, *tag, *containerName)
 		if err != nil {
 			return err
 		}
@@ -86,13 +121,46 @@ func run(ctx context.Context, args []string) error {
 		if dir == "" {
 			dir = "."
 		}
-		return download(ctx, t, positional[0], dir)
+		path, err := download(ctx, t, id, dir)
+		if err != nil {
+			return err
+		}
+		fmt.Println(path)
+		return nil
+
+	case "login":
+		cred, err := login(ctx, *tenant)
+		if err != nil {
+			return err
+		}
+		user, err := signedInUser(ctx, cred)
+		if err != nil {
+			return err
+		}
+		if hasPersistentCache() {
+			fmt.Printf("Signed in as %s; lbf will reuse this login until 'lbf logout'\n", user)
+		} else {
+			fmt.Printf("Signed in as %s, but this build cannot remember logins; use 'az login' or --sas-env\n", user)
+		}
+		return nil
+
+	case "logout":
+		removed, err := logout()
+		if err != nil {
+			return err
+		}
+		if removed {
+			fmt.Println("Forgot the login saved by 'lbf login' ('az login' is unaffected)")
+		} else {
+			fmt.Println("No saved lbf login ('az login' is unaffected)")
+		}
+		return nil
 
 	case "mint-sas":
 		if *mode != "upload" && *mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
-		t, err := mintTarget(ctx, *tag, *containerName, *mode, sasLifetime)
+		t, err := mintTarget(ctx, *tenant, *tag, *containerName, *mode, sasLifetime)
 		if err != nil {
 			return err
 		}
@@ -111,11 +179,15 @@ func run(ctx context.Context, args []string) error {
 	return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
 }
 
-func resolveTarget(ctx context.Context, sasEnv, mode, tag, containerName string) (target, error) {
+func logf(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format, a...)
+}
+
+func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, containerName string) (target, error) {
 	if sasEnv != "" {
 		return readSASEnv(sasEnv, mode, containerName)
 	}
-	return mintTarget(ctx, tag, containerName, mode, sasLifetime)
+	return mintTarget(ctx, tenant, tag, containerName, mode, sasLifetime)
 }
 
 // flag stops at the first positional argument; this lets flags follow it.
