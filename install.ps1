@@ -1,4 +1,7 @@
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 downloads very slowly while drawing a progress bar, and older .NET defaults predate TLS 1.2.
+$ProgressPreference = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 $repo = 'Benedict-Carling/lbf-go-spike'
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
