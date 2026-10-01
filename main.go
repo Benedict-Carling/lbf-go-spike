@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime"
+	"strings"
 	"time"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
@@ -46,7 +48,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	args := os.Args[1:]
+	if runtime.GOOS == "windows" {
+		args = repairWindowsArgs(args)
+	}
+	if err := run(ctx, args); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", sasSignature.ReplaceAllString(err.Error(), "sig=REDACTED"))
 		os.Exit(1)
 	}
@@ -188,6 +194,22 @@ func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, containerName
 		return readSASEnv(sasEnv, mode, containerName)
 	}
 	return mintTarget(ctx, tenant, tag, containerName, mode, sasLifetime)
+}
+
+// Windows PowerShell 5.1 passes 'C:\My Folder\' -x as the single argument `C:\My Folder" -x`.
+// A quote cannot appear in a Windows path, so split it back apart.
+func repairWindowsArgs(args []string) []string {
+	var out []string
+	for _, a := range args {
+		head, rest, found := strings.Cut(a, `"`)
+		if !found {
+			out = append(out, a)
+			continue
+		}
+		out = append(out, head+`\`)
+		out = append(out, strings.Fields(strings.ReplaceAll(rest, `"`, ""))...)
+	}
+	return out
 }
 
 // flag stops at the first positional argument; this lets flags follow it.
