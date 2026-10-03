@@ -53,7 +53,7 @@ func readSASEnv(path, mode, expectContainer string) (target, error) {
 	remedy := fmt.Sprintf("mint a fresh one with: lbf mint-sas --mode %s", mode)
 
 	values := map[string]string{}
-	for _, line := range strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
