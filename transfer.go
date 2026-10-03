@@ -154,7 +154,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 	}
 
 	_, err = cc.NewBlockBlobClient(id+"/"+crateName).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
-		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: to.Ptr("application/json")},
+		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: new("application/json")},
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 			IfNoneMatch: to.Ptr(azcore.ETagAny),
 		}},
@@ -180,7 +180,7 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	defer status("")
 	var blobs []*container.BlobItem
 	pager := cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
-		Prefix:  to.Ptr(prefix),
+		Prefix:  new(prefix),
 		Include: container.ListBlobsInclude{Metadata: true},
 	})
 	for pager.More() {

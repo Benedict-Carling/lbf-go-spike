@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -71,8 +70,8 @@ func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mo
 	start := time.Now().UTC()
 	expiry := start.Add(sasLifetime)
 	udc, err := svc.GetUserDelegationCredential(ctx, service.KeyInfo{
-		Start:  to.Ptr(start.Format(sas.TimeFormat)),
-		Expiry: to.Ptr(expiry.Format(sas.TimeFormat)),
+		Start:  new(start.Format(sas.TimeFormat)),
+		Expiry: new(expiry.Format(sas.TimeFormat)),
 	}, nil)
 	if err != nil {
 		return target{}, fmt.Errorf("getting a user delegation key for %s needs the 'Storage Blob Delegator' role at storage account scope: %w", account, err)

@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 )
 
@@ -423,7 +422,7 @@ func TestDefaultsAreBronze(t *testing.T) {
 
 func TestChooseAccount(t *testing.T) {
 	m := func(name, sub string) accountMatch {
-		return accountMatch{Name: name, Location: "uksouth", Sub: &armsubscriptions.Subscription{DisplayName: to.Ptr(sub)}}
+		return accountMatch{Name: name, Location: "uksouth", Sub: &armsubscriptions.Subscription{DisplayName: new(sub)}}
 	}
 	two := []accountMatch{m("lbfb", "Sub B"), m("lbfa", "Sub A")}
 	never := func(string, []string) (int, error) { t.Fatal("picker called"); return 0, nil }
@@ -523,7 +522,7 @@ func TestProgressLogsEachFinishedFileWhenNotATerminal(t *testing.T) {
 
 func TestLiveProgressFitsAnyTerminal(t *testing.T) {
 	escape := regexp.MustCompile(`\x1b\[\d*[A-Za-z]\r?`)
-	names := []string{"a.txt", "run1/细胞图像/样本一.tiff", "tab\there\nnewline.bin", "‮evil.exe",
+	names := []string{"a.txt", "run1/细胞图像/样本一.tiff", "tab\there\nnewline.bin", "\u202eevil.exe",
 		"🧪🧫/" + strings.Repeat("x", 300) + ".parquet", "é́́.csv", "plate1/a.parquet", "b", "c", "d"}
 	for _, height := range []int{1, 2, 3, 5, 8, 24, 60} {
 		for width := 1; width <= 200; width++ {
@@ -541,7 +540,7 @@ func TestLiveProgressFitsAnyTerminal(t *testing.T) {
 					t.Fatalf("%dx%d frame %d: %d lines", width, height, frame, len(lines))
 				}
 				for _, l := range lines {
-					if len(l) > max(width-1, 0) || strings.ContainsAny(l, "\t\r‮") {
+					if len(l) > max(width-1, 0) || strings.ContainsAny(l, "\t\r\u202e") {
 						t.Fatalf("%dx%d frame %d: %q", width, height, frame, l)
 					}
 				}
@@ -575,7 +574,7 @@ func TestProgressFormatting(t *testing.T) {
 		{clipLeft("run1/images/plate1.tiff", 12), "...ate1.tiff"},
 		{clipLeft("run1/细胞.tiff", 12), "...胞.tiff"},
 		{clipLeft("run1/a.tiff", 2), ".."},
-		{printable("bad\tname\n‮gpj.exe"), "bad?name??gpj.exe"},
+		{printable("bad\tname\n\u202egpj.exe"), "bad?name??gpj.exe"},
 		{fit("ab细胞", 4), "ab"},
 		{fit("ab细胞", 5), "ab细"},
 		{fit("abc", -1), ""},
