@@ -28,8 +28,18 @@ macOS / Linux:
 curl -fsSL https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.sh | sh
 ```
 
-Run the same command again to update. Binaries are also attached to each
+Binaries are also attached to each
 [release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
+
+## Update
+
+```
+lbf upgrade
+```
+
+lbf checks for a newer release at most once an hour and prints a warning after
+any command when it is out of date. Set `LBF_NO_UPDATE_CHECK=1` to turn the
+check off.
 
 ## Use
 

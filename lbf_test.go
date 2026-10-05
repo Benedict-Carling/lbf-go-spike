@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -584,6 +588,112 @@ func TestProgressFormatting(t *testing.T) {
 	} {
 		if tc.got != tc.want {
 			t.Errorf("got %q, want %q", tc.got, tc.want)
+		}
+	}
+}
+
+func TestNewerVersion(t *testing.T) {
+	for _, c := range []struct {
+		latest, current string
+		want            bool
+	}{
+		{"v0.1.6", "v0.1.5", true},
+		{"v0.2.0", "v0.1.10", true},
+		{"v0.1.10", "v0.1.9", true},
+		{"v0.1.5", "v0.1.5", false},
+		{"v0.1.4", "v0.1.5", false},
+		{"v0.1.6", "dev", false},
+		{"", "v0.1.5", false},
+	} {
+		if got := newerVersion(c.latest, c.current); got != c.want {
+			t.Errorf("newerVersion(%q, %q) = %v", c.latest, c.current, got)
+		}
+	}
+}
+
+func fakeReleases(t *testing.T, tag string, bin []byte, sum string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/releases/latest":
+			http.Redirect(w, r, "/releases/tag/"+tag, http.StatusFound)
+		case "/releases/download/" + tag + "/SHA256SUMS":
+			fmt.Fprintf(w, "%s  lbf-other-os\n%s  %s\n", strings.Repeat("0", 64), sum, assetName())
+		case "/releases/download/" + tag + "/" + assetName():
+			w.Write(bin)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestUpgradeReplacesExecutable(t *testing.T) {
+	bin := []byte("new lbf")
+	sum := sha256.Sum256(bin)
+	srv := fakeReleases(t, "v0.2.0", bin, hex.EncodeToString(sum[:]))
+	exe := filepath.Join(t.TempDir(), "lbf")
+	writeFile(t, exe, "old lbf")
+
+	latest, upgraded, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe)
+	if err != nil || !upgraded || latest != "v0.2.0" {
+		t.Fatalf("got %q %v %v", latest, upgraded, err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "new lbf" {
+		t.Fatalf("exe holds %q", got)
+	}
+
+	_, upgraded, err = upgrade(context.Background(), srv.URL+"/releases", "v0.2.0", exe)
+	if err != nil || upgraded {
+		t.Fatalf("up to date: upgraded=%v err=%v", upgraded, err)
+	}
+}
+
+func TestUpgradeRejectsChecksumMismatch(t *testing.T) {
+	srv := fakeReleases(t, "v0.2.0", []byte("tampered"), strings.Repeat("a", 64))
+	exe := filepath.Join(t.TempDir(), "lbf")
+	writeFile(t, exe, "old lbf")
+
+	if _, _, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("want checksum error, got %v", err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "old lbf" {
+		t.Fatalf("exe changed to %q", got)
+	}
+}
+
+func TestLatestVersionIsCached(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, "/releases/tag/v0.3.0", http.StatusFound)
+	}))
+	defer srv.Close()
+	cache := filepath.Join(t.TempDir(), "lbf", "latest-version")
+
+	for range 2 {
+		if got := cachedLatestVersion(context.Background(), srv.URL+"/releases", cache); got != "v0.3.0" {
+			t.Fatalf("got %q", got)
+		}
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("asked GitHub %d times, want 1", hits.Load())
+	}
+
+	stale := time.Now().Add(-2 * updateCheckEvery)
+	os.Chtimes(cache, stale, stale)
+	srv.Close()
+	if got := cachedLatestVersion(context.Background(), srv.URL+"/releases", cache); got != "v0.3.0" {
+		t.Fatalf("offline refresh lost the cached version: %q", got)
+	}
+}
+
+func TestUpgradeWarningNamesBothVersionsAndCommand(t *testing.T) {
+	w := upgradeWarning("v0.1.5", "v0.2.0")
+	for _, s := range []string{"v0.1.5", "v0.2.0", "lbf upgrade"} {
+		if !strings.Contains(w, s) {
+			t.Errorf("warning lacks %q:\n%s", s, w)
 		}
 	}
 }
