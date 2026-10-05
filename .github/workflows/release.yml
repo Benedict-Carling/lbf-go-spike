@@ -15,7 +15,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx -y -p azurite azurite-blob --inMemoryPersistence --skipApiVersionCheck --silent &
+      - run: npx -y wait-on -t 60000 tcp:127.0.0.1:10000
       - run: go test ./...
+        env:
+          LBF_AZURITE: "1"
 
   # macOS needs cgo for the Keychain-backed login cache, so it builds on a Mac.
   build-macos:

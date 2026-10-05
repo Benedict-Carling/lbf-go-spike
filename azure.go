@@ -26,9 +26,13 @@ type target struct {
 	User             string
 	SubscriptionName string
 	SubscriptionID   string
+	endpoint         string // an emulator's account URL, in tests
 }
 
 func (t target) containerURL() string {
+	if t.endpoint != "" {
+		return t.endpoint + "/" + t.Container
+	}
 	return fmt.Sprintf("https://%s.blob.core.windows.net/%s", t.Account, t.Container)
 }
 

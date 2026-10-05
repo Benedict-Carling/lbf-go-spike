@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -48,7 +50,12 @@ type publication struct {
 }
 
 // Everything that can fail without Azure happens here, so a bad dataset never reaches sign-in or upload.
-func preparePublication(input string, provFlags provenanceFlags, profileDir string) (publication, error) {
+func preparePublication(input string, provFlags provenanceFlags, profileDir, id string) (publication, error) {
+	if id == "" {
+		id = newID()
+	} else if !mintedID.MatchString(id) {
+		return publication{}, fmt.Errorf("--id %q is not an ID from 'lbf new-id'", id)
+	}
 	prov, err := provFlags.load()
 	if err != nil {
 		return publication{}, err
@@ -64,7 +71,7 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir stri
 	if len(files) == 0 {
 		return publication{}, fmt.Errorf("%s contains no files to upload", input)
 	}
-	return publication{ID: newID(), Source: source, Files: files, Provenance: prov, Profile: prof}, nil
+	return publication{ID: id, Source: source, Files: files, Provenance: prov, Profile: prof}, nil
 }
 
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
@@ -127,41 +134,209 @@ func upload(ctx context.Context, t target, pub publication) error {
 
 	id := pub.ID
 	status("Checking write access to " + t.Account + "/" + t.Container)
-	err = checkWrite(ctx, cc, t, id)
+	err = checkWrite(ctx, cc, t)
+	var stored map[string]crateFile
+	if err == nil {
+		stored, err = listStored(ctx, cc, id)
+	}
 	status("")
 	if err != nil {
 		return err
 	}
-	var total int64
-	for _, f := range pub.Files {
-		total += f.Size
+	if _, ok := stored[crateName]; ok {
+		return confirmPublished(ctx, cc, pub, conformsTo)
 	}
-	logf("Uploading %d files (%s) from %s as %s\n", len(pub.Files), humanBytes(total), pub.Source, id)
 
-	started := time.Now()
-	jobs := make([]job, len(pub.Files))
-	for i := range pub.Files {
-		f := &pub.Files[i]
+	if len(stored) > 0 {
+		logf("Resuming %s: an earlier attempt stored %d of its %d files\n", id, len(stored), len(pub.Files))
+	}
+	toSend, problems, err := compareRecorded(ctx, pub.Files, stored)
+	if err != nil {
+		return err
+	}
+	if len(problems) > 0 {
+		return idTaken{problemList(fmt.Sprintf("an earlier attempt at %s stored different files, and lbf never changes a stored file, so nothing was uploaded; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
+	}
+
+	var total int64
+	jobs := make([]job, len(toSend))
+	for i, n := range toSend {
+		f := &pub.Files[n]
+		total += f.Size
 		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
-			return uploadFile(ctx, cc, id+"/"+f.Rel, f, progress)
+			return uploadFile(ctx, cc, id+"/"+f.Rel, f, t.User, progress)
 		}}
 	}
+	logf("Uploading %d files (%s) from %s as %s\n", len(jobs), humanBytes(total), pub.Source, id)
+
+	started := time.Now()
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
 	if err == nil {
 		err = uploadCrate(ctx, cc, t, pub, published, conformsTo)
 	}
 	if ctx.Err() != nil {
-		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Publish again to get a new ID", id)
+		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
+	}
+	if _, ok := errors.AsType[idTaken](err); ok {
+		return idTaken{fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Publish without --id, or with a new ID from 'lbf new-id'", err, id)}
 	}
 	if err != nil {
-		return fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Publish again to get a new ID", err, id)
+		return fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", err, id, id)
+	}
+	if err := verifyLanded(ctx, cc, pub); err != nil {
+		return err
 	}
 	logDone(started, total)
 	return nil
 }
 
-// Hashes the bytes as they are sent, and refuses a file that changed meanwhile, so the crate records exactly what landed.
-func uploadFile(ctx context.Context, cc *container.Client, name string, f *localFile, progress func(int64)) error {
+// The ID holds other files or another crate, so retrying cannot help; lbf exits with exitIDTaken.
+type idTaken struct{ error }
+
+func (e idTaken) Unwrap() error { return e.error }
+
+func listStored(ctx context.Context, cc *container.Client, id string) (map[string]crateFile, error) {
+	prefix := id + "/"
+	stored := map[string]crateFile{}
+	pager := cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix:  new(prefix),
+		Include: container.ListBlobsInclude{Metadata: true},
+	})
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("listing %s: %w", id, err)
+		}
+		for _, b := range page.Segment.BlobItems {
+			if !isDirectoryMarker(b) {
+				rel := strings.TrimPrefix(*b.Name, prefix)
+				stored[rel] = crateFile{Rel: rel, Size: deref(b.Properties.ContentLength), SHA256: metadata(b.Metadata, "sha256")}
+			}
+		}
+	}
+	return stored, nil
+}
+
+// A rerun of a publish that already finished succeeds only if it would have published the same thing.
+func confirmPublished(ctx context.Context, cc *container.Client, pub publication, conformsTo []string) error {
+	id := pub.ID
+	status("Reading the crate of " + id)
+	crate, err := downloadBuffer(ctx, cc, id+"/"+crateName)
+	status("")
+	if err != nil {
+		return fmt.Errorf("reading the crate of %s: %w", id, err)
+	}
+	files, err := crateFiles(crate)
+	if err != nil {
+		return fmt.Errorf("dataset %s: %w", id, err)
+	}
+	stated, statedConformsTo, err := crateProvenance(crate)
+	if err != nil {
+		return fmt.Errorf("dataset %s: %w", id, err)
+	}
+
+	var problems []string
+	if !stated.sameAs(pub.Provenance) || !slices.Equal(statedConformsTo, conformsTo) {
+		problems = append(problems, "its parent, instruments, properties or profiles differ from these")
+	}
+	recorded := map[string]crateFile{}
+	for _, f := range files {
+		recorded[f.Rel] = f
+	}
+	toSend, differ, err := compareRecorded(ctx, pub.Files, recorded)
+	if err != nil {
+		return err
+	}
+	for _, n := range toSend {
+		problems = append(problems, pub.Files[n].Rel+": not in it")
+	}
+	problems = append(problems, differ...)
+	if len(problems) > 0 {
+		return idTaken{problemList(fmt.Sprintf("%s is already published, differently, and a dataset never changes; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
+	}
+	logf("%s is already published with exactly these files; nothing was uploaded\n", id)
+	return nil
+}
+
+// Hashes each local file that is already recorded and returns every difference; the indexes of the rest are left to send.
+func compareRecorded(ctx context.Context, files []localFile, recorded map[string]crateFile) ([]int, []string, error) {
+	var toSend []int
+	var problems []string
+	var mu sync.Mutex
+	var jobs []job
+	var total int64
+	local := map[string]bool{}
+	for i := range files {
+		f := &files[i]
+		local[f.Rel] = true
+		r, ok := recorded[f.Rel]
+		switch {
+		case !ok:
+			toSend = append(toSend, i)
+		case r.Size != f.Size:
+			problems = append(problems, fmt.Sprintf("%s: %d bytes here, %d stored", f.Rel, f.Size, r.Size))
+		case r.SHA256 == "":
+			problems = append(problems, f.Rel+": stored without a sha256 to compare with")
+		default:
+			total += f.Size
+			jobs = append(jobs, job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
+				sum, err := hashFile(f, progress)
+				if err != nil {
+					return err
+				}
+				if sum != r.SHA256 {
+					mu.Lock()
+					problems = append(problems, f.Rel+": its content differs from what is stored")
+					mu.Unlock()
+					return nil
+				}
+				f.SHA256 = sum
+				return nil
+			}})
+		}
+	}
+	for _, rel := range slices.Sorted(maps.Keys(recorded)) {
+		if !local[rel] && rel != crateName {
+			problems = append(problems, rel+": stored, but not here")
+		}
+	}
+	if len(jobs) > 0 {
+		logf("Checking %d files (%s) against what is stored\n", len(jobs), humanBytes(total))
+		if err := transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs); err != nil {
+			return nil, nil, err
+		}
+	}
+	slices.Sort(problems)
+	return toSend, problems, nil
+}
+
+func hashFile(f *localFile, progress func(int64)) (string, error) {
+	fh, err := os.Open(f.Path)
+	if err != nil {
+		return "", err
+	}
+	defer fh.Close()
+	h := sha256.New()
+	r := &countingReader{r: io.LimitReader(fh, f.Size), progress: progress}
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	if err := unchanged(f, r.n); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func unchanged(f *localFile, read int64) error {
+	after, err := os.Stat(f.Path)
+	if err != nil || read != f.Size || after.Size() != f.Size || !after.ModTime().Equal(f.ModTime) {
+		return fmt.Errorf("%s changed while it was being uploaded; wait until whatever writes it has finished, then publish again", f.Rel)
+	}
+	return nil
+}
+
+// Commits with its sha256 only if the file did not change while being sent, so stored metadata never lies.
+func uploadFile(ctx context.Context, cc *container.Client, name string, f *localFile, uploader string, progress func(int64)) error {
 	fh, err := os.Open(f.Path)
 	if err != nil {
 		return err
@@ -169,24 +344,77 @@ func uploadFile(ctx context.Context, cc *container.Client, name string, f *local
 	defer fh.Close()
 	h := sha256.New()
 	r := &countingReader{r: io.TeeReader(io.LimitReader(fh, f.Size), h), progress: progress}
-	_, err = cc.NewBlockBlobClient(name).UploadStream(ctx, r, &blockblob.UploadStreamOptions{
-		BlockSize:   max(blockSize, (f.Size+maxBlocks-1)/maxBlocks),
-		Concurrency: blockWorkers,
+	bb := cc.NewBlockBlobClient(name)
+	size := max(blockSize, (f.Size+maxBlocks-1)/maxBlocks)
+
+	// Uncommitted blocks are shared by everyone writing this blob, so each attempt stages under its own IDs.
+	attempt := make([]byte, 8)
+	_, _ = rand.Read(attempt)
+	var ids []string
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(blockWorkers)
+	for off := int64(0); off < f.Size && gctx.Err() == nil; off += size {
+		buf := make([]byte, min(size, f.Size-off))
+		if _, err := io.ReadFull(r, buf); err != nil {
+			break
+		}
+		blockID := base64.StdEncoding.EncodeToString(fmt.Appendf(nil, "%x-%08d", attempt, len(ids)))
+		ids = append(ids, blockID)
+		g.Go(func() error {
+			_, err := bb.StageBlock(gctx, blockID, streaming.NopCloser(bytes.NewReader(buf)), nil)
+			return err
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("uploading %s: %w", f.Rel, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := unchanged(f, r.n); err != nil {
+		return err
+	}
+
+	sum := hex.EncodeToString(h.Sum(nil))
+	meta := map[string]*string{"sha256": &sum}
+	if u := strings.TrimSpace(uploader); u != "" && !strings.ContainsFunc(u, func(c rune) bool { return c < ' ' || c > '~' }) {
+		meta["uploader"] = &u
+	}
+	_, err = bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
+		Metadata: meta,
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 			IfNoneMatch: to.Ptr(azcore.ETagAny),
 		}},
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		return fmt.Errorf("%s already exists in the container; refusing to overwrite", name)
+		return idTaken{fmt.Errorf("%s changed while this publish was writing it; is another publish of the same ID running?", name)}
 	}
 	if err != nil {
 		return fmt.Errorf("uploading %s: %w", f.Rel, err)
 	}
-	after, err := os.Stat(f.Path)
-	if err != nil || r.n != f.Size || after.Size() != f.Size || !after.ModTime().Equal(f.ModTime) {
-		return fmt.Errorf("%s changed while it was being uploaded; wait until whatever writes it has finished, then publish again", f.Rel)
+	f.SHA256 = sum
+	return nil
+}
+
+// Another publish of the same ID could have added files before this one's crate landed.
+func verifyLanded(ctx context.Context, cc *container.Client, pub publication) error {
+	stored, err := listStored(ctx, cc, pub.ID)
+	if err != nil {
+		return err
 	}
-	f.SHA256 = hex.EncodeToString(h.Sum(nil))
+	files := make([]crateFile, len(pub.Files))
+	for i, f := range pub.Files {
+		files[i] = crateFile{Rel: f.Rel, Size: f.Size, SHA256: f.SHA256}
+	}
+	problems := compareStored(files, stored)
+	for _, f := range files {
+		if s, ok := stored[f.Rel]; ok && s.SHA256 != f.SHA256 {
+			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %s", f.Rel, s.SHA256, f.SHA256))
+		}
+	}
+	if len(problems) > 0 {
+		return idTaken{problemList(fmt.Sprintf("%s was published, but something else changed its files meanwhile, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", pub.ID), problems)}
+	}
 	return nil
 }
 
@@ -236,27 +464,15 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	prefix := id + "/"
 	status("Listing " + id)
 	defer status("")
-	stored := map[string]int64{}
-	pager := cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
-		Prefix:  new(prefix),
-		Include: container.ListBlobsInclude{Metadata: true},
-	})
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return fetched{}, fmt.Errorf("listing %s: %w", id, err)
-		}
-		for _, b := range page.Segment.BlobItems {
-			if !isDirectoryMarker(b) {
-				stored[strings.TrimPrefix(*b.Name, prefix)] = deref(b.Properties.ContentLength)
-			}
-		}
+	stored, err := listStored(ctx, cc, id)
+	if err != nil {
+		return fetched{}, err
 	}
 	if len(stored) == 0 {
 		return fetched{}, fmt.Errorf("no dataset %s in %s", id, t.containerURL())
 	}
 	if _, ok := stored[crateName]; !ok {
-		return fetched{}, fmt.Errorf("dataset %s has no %s, so its upload never finished; nothing was downloaded", id, crateName)
+		return fetched{}, fmt.Errorf("dataset %s has no %s, so its upload never finished; nothing was downloaded. Whoever published it can finish it by running the same publish with --id %s", id, crateName, id)
 	}
 
 	status("Reading the crate of " + id)
@@ -444,17 +660,17 @@ func crateFiles(crate []byte) ([]crateFile, error) {
 	return files, nil
 }
 
-func compareStored(files []crateFile, stored map[string]int64) []string {
+func compareStored(files []crateFile, stored map[string]crateFile) []string {
 	var problems []string
 	listed := map[string]bool{crateName: true}
 	for _, f := range files {
 		listed[f.Rel] = true
-		size, ok := stored[f.Rel]
+		s, ok := stored[f.Rel]
 		switch {
 		case !ok:
 			problems = append(problems, f.Rel+": listed in the crate but not stored")
-		case size != f.Size:
-			problems = append(problems, fmt.Sprintf("%s: stored as %d bytes, but the crate records %d", f.Rel, size, f.Size))
+		case s.Size != f.Size:
+			problems = append(problems, fmt.Sprintf("%s: stored as %d bytes, but the crate records %d", f.Rel, s.Size, f.Size))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(stored)) {
@@ -576,10 +792,30 @@ func logDone(started time.Time, total int64) {
 	logf("Done in %s (%s/s)\n", d.Round(time.Millisecond), humanBytes(rate(total, d)))
 }
 
-// An uncommitted block proves write access without creating a visible blob; the crate upload discards it.
-func checkWrite(ctx context.Context, cc *container.Client, t target, id string) error {
+func checkAccess(ctx context.Context, t target, mode string) error {
+	cc, err := t.client()
+	if err != nil {
+		return err
+	}
+	status("Checking access to " + t.Account + "/" + t.Container)
+	defer status("")
+	_, err = cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{MaxResults: to.Ptr[int32](1)}).NextPage(ctx)
+	if bloberror.HasCode(err, bloberror.AuthorizationPermissionMismatch, bloberror.AuthorizationFailure, bloberror.InsufficientAccountPermissions) {
+		return fmt.Errorf("you cannot list %s/%s; your login needs 'Storage Blob Data Reader' there", t.Account, t.Container)
+	}
+	if err != nil {
+		return fmt.Errorf("checking access to %s/%s: %w", t.Account, t.Container, err)
+	}
+	if mode == "upload" {
+		return checkWrite(ctx, cc, t)
+	}
+	return nil
+}
+
+// An uncommitted block proves write access without creating a visible blob; Azure discards it after a week.
+func checkWrite(ctx context.Context, cc *container.Client, t target) error {
 	blockID := base64.StdEncoding.EncodeToString([]byte("lbf-write-check"))
-	_, err := cc.NewBlockBlobClient(id+"/"+crateName).StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader([]byte{0})), nil)
+	_, err := cc.NewBlockBlobClient(".lbf-check").StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader([]byte{0})), nil)
 	if bloberror.HasCode(err, bloberror.AuthorizationPermissionMismatch, bloberror.AuthorizationFailure, bloberror.InsufficientAccountPermissions) {
 		return fmt.Errorf("you cannot write to %s/%s, so nothing was uploaded; your login needs 'Storage Blob Data Contributor' there", t.Account, t.Container)
 	}
@@ -591,12 +827,16 @@ func checkWrite(ctx context.Context, cc *container.Client, t target, id string) 
 
 // Hierarchical-namespace accounts list directories as zero-length blobs.
 func isDirectoryMarker(b *container.BlobItem) bool {
-	for k, v := range b.Metadata {
-		if strings.EqualFold(k, "hdi_isfolder") && v != nil && *v == "true" {
-			return true
+	return metadata(b.Metadata, "hdi_isfolder") == "true"
+}
+
+func metadata(m map[string]*string, key string) string {
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return deref(v)
 		}
 	}
-	return false
+	return ""
 }
 
 // os.Root refuses names, including via symlinks, that would land outside the download directory.

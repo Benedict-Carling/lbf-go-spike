@@ -47,6 +47,8 @@ check off.
 lbf login                          # optional: browser sign-in to Imperial, remembered (macOS/Windows)
 lbf publish <path>                 # land in bronze; prints the new dataset ID (alias: upload)
 lbf fetch <id> [--out DIR]         # alias: download
+lbf new-id                         # an ID to publish under later, with publish --id
+lbf check --mode upload            # proves the credential works, before a long job
 lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
 lbf logout
 ```
@@ -109,14 +111,47 @@ the storage account (default `tag=storage`, production; the test account is
 otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
 uses a pre-minted credential instead of `az login`.
 
+## Resuming a publish
+
+A dataset is published once its crate lands, so a publish that fails partway
+can be finished: run it again with `--id <the ID it printed>`. Files the earlier
+attempt stored are checked by sha256 and not sent again; the rest are sent. lbf
+never changes or removes a stored file, so if any stored file differs from the
+local one, or the earlier attempt stored a file that is no longer there, the
+rerun stops before uploading anything; publish without `--id` for a new dataset.
+If the dataset was in fact published, the rerun succeeds without uploading
+anything when the files and provenance are the same, and refuses if they differ.
+Every refusal because the ID holds other files exits with code 3, so a pipeline
+can tell it from a failure worth retrying.
+
+A pipeline can take its ID before computing, name its outputs by it, and retry
+its publish step:
+
+```
+id=$(lbf new-id)                   # offline; no sign-in
+lbf check --mode upload --container silver
+...compute into results/, logging $id...
+lbf publish results --container silver --id $id
+```
+
+In Nextflow, mint the ID in its own process so `-resume` reuses it, and give
+the publish process `errorStrategy { task.exitStatus == 3 ? 'terminate' : 'retry' }`.
+Give that process everything publish records as inputs: the data, its
+properties, the parent and the instruments' versions. Then any change mints a new
+ID, and exit code 3 only means an ID was reused by hand. `--id` accepts only an ID from
+`lbf new-id`. Two publishes of one ID at once cannot overwrite each other's
+files, and the stored files are checked against the crate once more after it
+lands.
+
 ## Integrity
 
 Publish follows symlinks, and refuses, before uploading anything, a dataset with
 a broken symlink, an unreadable file, or a name that could not be fetched
 everywhere: one Windows cannot store (`\ : * ? " < > |`, a trailing dot or
 space, `CON`, `NUL` and the like) or two that differ only in case. Each file's
-sha256 is computed as it is sent and recorded in the crate. A file that changes
-while it is being sent stops the publish.
+sha256 is computed as it is sent, recorded in the crate, and stored with the
+file as blob metadata, which is how a resumed publish knows what is already
+there. A file that changes while it is being sent stops the publish.
 
 Fetch downloads exactly the files the crate lists, refusing a dataset whose
 stored files differ from it, and checks each file's size and sha256 (size only
@@ -134,6 +169,7 @@ Nextflow pipelines carry no checksums.
 Pushing a `v*` tag builds every platform and publishes a release.
 
 ```
+npx -p azurite azurite-blob --inMemoryPersistence &   # optional: the publish tests skip without it
 go test ./...
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/lbf-windows-amd64.exe .
 ```

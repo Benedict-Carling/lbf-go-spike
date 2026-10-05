@@ -25,6 +25,8 @@ const usage = `lbf - land and retrieve datasets in the Azure bronze layer
 Usage:
   lbf publish <path>    upload a dataset (alias: upload)
   lbf fetch <id>        download a dataset (alias: download)
+  lbf new-id            print a dataset ID to publish under later
+  lbf check             prove a credential can publish or fetch, without changing anything
   lbf mint-sas          write a pre-minted credential file
   lbf login             sign in with the browser and remember it
   lbf logout            forget the login saved by 'lbf login'
@@ -41,6 +43,8 @@ bronze profile, before uploading anything.
 `
 
 const sasLifetime = 144 * time.Hour
+
+const exitIDTaken = 3
 
 // Set at release build time with -ldflags "-X main.version=v0.1.0".
 var version = "dev"
@@ -64,6 +68,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", sasSignature.ReplaceAllString(err.Error(), "sig=REDACTED"))
 	}
 	warnIfOutdated()
+	if _, ok := errors.AsType[idTaken](err); ok {
+		os.Exit(exitIDTaken)
+	}
 	if err != nil {
 		os.Exit(1)
 	}
@@ -89,7 +96,7 @@ func run(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "publish", "upload":
-		pub, err := preparePublication(positional[0], o.prov, o.profile)
+		pub, err := preparePublication(positional[0], o.prov, o.profile, o.id)
 		if err != nil {
 			return err
 		}
@@ -132,6 +139,24 @@ func run(ctx context.Context, args []string) error {
 			return printJSON(map[string]string{"id": id, "url": t.containerURL() + "/" + id, "path": got.path, "data_path": got.dataPath})
 		}
 		fmt.Println(got.path)
+		return nil
+
+	case "new-id":
+		fmt.Println(newID())
+		return nil
+
+	case "check":
+		if o.mode != "upload" && o.mode != "download" {
+			return errors.New("--mode must be 'upload' or 'download'")
+		}
+		t, err := resolveTarget(ctx, o.sasEnv, o.mode, o.tenant, o.tag, o.account, o.container)
+		if err != nil {
+			return err
+		}
+		if err := checkAccess(ctx, t, o.mode); err != nil {
+			return err
+		}
+		fmt.Printf("%s can %s %s/%s until %s\n", orUnknown(t.User), o.mode, t.Account, t.Container, t.Expiry.Format(time.RFC3339))
 		return nil
 
 	case "login":
@@ -206,7 +231,7 @@ func run(ctx context.Context, args []string) error {
 type options struct {
 	tag, account, tenant, container, sasEnv string
 	out, mode                               string
-	profile                                 string
+	profile, id                             string
 	prov                                    provenanceFlags
 	dryRun, json                            bool
 }
@@ -271,6 +296,8 @@ func newCommand(cmd string, o *options) (*command, error) {
 		str(&o.prov.properties, "properties", "FILE", "", `JSON object of property names and values, e.g. {"sample_id": "SAM-0001"}`)
 		str(&o.prov.file, "provenance", "FILE", "", "all of the above as one JSON file, instead of those flags")
 		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
+		str(&o.id, "id", "ID", "", "publish under this ID from 'lbf new-id'; run again with the same ID to finish a failed publish")
+		c.notes += "Exits with 3 when the ID already holds different files or crate, which retrying cannot fix; use a new ID.\n"
 		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})
 		jsonFlag("print {\"id\", \"url\"} as JSON instead of text")
@@ -281,6 +308,16 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.arg, c.argDesc = "<id>", "dataset ID, as printed by 'lbf publish'"
 		str(&o.out, "out", "DIR", ".", "output directory")
 		jsonFlag("print {\"id\", \"url\", \"path\", \"data_path\"} as JSON instead of the path; data_path is the uploaded folder inside path")
+		storage()
+		sasEnv()
+	case "new-id":
+		c.synopsis = "new-id"
+		c.notes = "Prints a new dataset ID without signing in. Pass it to 'lbf publish --id' once the data is ready.\n"
+	case "check":
+		c.synopsis = "check --mode upload|download [options]"
+		c.notes = "Run before a long job, so a missing or expiring credential is found before the work, not after.\n"
+		str(&o.mode, "mode", "upload|download", "", "what the credential must be able to do")
+		c.flags[len(c.flags)-1].required = true
 		storage()
 		sasEnv()
 	case "mint-sas":

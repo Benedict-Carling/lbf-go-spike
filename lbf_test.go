@@ -75,9 +75,12 @@ func TestDatasetFilesFollowsSymlinks(t *testing.T) {
 
 func TestDatasetFilesRefusesWhatCannotRoundTrip(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "run1")
-	names := []string{"ok.txt", "12:30.csv", "nul.txt", "trailing."}
+	names := []string{"ok.txt", "nul.txt"}
+	want := []string{"nothing was uploaded", "run1/nul.txt: \"nul.txt\" is a reserved"}
+	// Windows turns these into an alternate data stream and a name without the dot, so they never reach lbf there.
 	if runtime.GOOS != "windows" {
-		names = append(names, `back\slash.txt`)
+		names = append(names, "12:30.csv", "trailing.", `back\slash.txt`)
+		want = append(want, "run1/12:30.csv: contains", "run1/trailing.: ")
 	}
 	for _, n := range names {
 		if err := os.MkdirAll(root, 0o755); err != nil {
@@ -91,9 +94,9 @@ func TestDatasetFilesRefusesWhatCannotRoundTrip(t *testing.T) {
 	if err == nil {
 		t.Fatal("accepted")
 	}
-	for _, want := range []string{"nothing was uploaded", "run1/12:30.csv: contains", "run1/nul.txt: \"nul.txt\" is a reserved", "run1/trailing.: "} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("want %q in:\n%v", want, err)
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("want %q in:\n%v", w, err)
 		}
 	}
 	if strings.Contains(err.Error(), "ok.txt") {
@@ -140,7 +143,7 @@ func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 
-	problems := compareStored(want, map[string]int64{"run1/a b#1%.csv": 4, crateName: 9, "run1/extra": 1})
+	problems := compareStored(want, map[string]crateFile{"run1/a b#1%.csv": {Size: 4}, crateName: {Size: 9}, "run1/extra": {Size: 1}})
 	if got := strings.Join(problems, "\n"); got != "run1/a b#1%.csv: stored as 4 bytes, but the crate records 5\n"+
 		"run1/old.txt: listed in the crate but not stored\nrun1/extra: stored but not listed in the crate" {
 		t.Fatalf("got:\n%s", got)
@@ -523,7 +526,7 @@ func TestProvenanceRules(t *testing.T) {
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		_, err := preparePublication(data, provenanceFlags{file: path}, "")
+		_, err := preparePublication(data, provenanceFlags{file: path}, "", "")
 		if err == nil {
 			t.Errorf("%s: accepted", name)
 			continue

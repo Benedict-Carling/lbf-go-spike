@@ -22,7 +22,10 @@ import (
 
 const licenseURL = "https://rightsstatements.org/vocab/InC/1.0/"
 
-var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var (
+	validID  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	mintedID = regexp.MustCompile(`^[0-9]{8}-[a-z]+-[a-z]+-[0-9a-f]{4}$`)
+)
 
 type localFile struct {
 	Path    string
@@ -283,6 +286,57 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 		"@context": "https://w3id.org/ro/crate/1.2/context",
 		"@graph":   graph,
 	}, "", "    ")
+}
+
+// What a crate written by buildCrate states about its dataset, leaving out the properties lbf sets itself.
+func crateProvenance(crate []byte) (provenance, []string, error) {
+	var doc struct {
+		Graph []map[string]any `json:"@graph"`
+	}
+	if err := json.Unmarshal(crate, &doc); err != nil {
+		return provenance{}, nil, fmt.Errorf("its %s is not valid JSON: %w", crateName, err)
+	}
+	entities := map[string]map[string]any{}
+	for _, e := range doc.Graph {
+		if id, ok := e["@id"].(string); ok {
+			entities[id] = e
+		}
+	}
+	refs := func(v any) []string {
+		items, ok := v.([]any)
+		if !ok {
+			items = []any{v}
+		}
+		var ids []string
+		for _, item := range items {
+			if r, ok := item.(map[string]any); ok {
+				if id, ok := r["@id"].(string); ok {
+					ids = append(ids, id)
+				}
+			}
+		}
+		return ids
+	}
+	str := func(e map[string]any, key string) string {
+		s, _ := e[key].(string)
+		return s
+	}
+
+	root := entities["./"]
+	p := provenance{Properties: map[string]string{}}
+	for _, id := range refs(root["additionalProperty"]) {
+		if name := str(entities[id], "name"); !slices.Contains(lbfProperties, name) {
+			p.Properties[name] = str(entities[id], "value")
+		}
+	}
+	if src := refs(root["wasDerivedFrom"]); len(src) == 1 {
+		p.DerivedFrom = str(entities[src[0]], "identifier")
+		for _, id := range refs(entities["#run"]["instrument"]) {
+			e := entities[id]
+			p.Instruments = append(p.Instruments, instrument{str(e, "name"), str(e, "version"), str(e, "url")})
+		}
+	}
+	return p, refs(root["conformsTo"]), nil
 }
 
 // Percent-encodes like Python's urllib.parse.quote, as ro-crate-py does.
