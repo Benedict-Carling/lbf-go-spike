@@ -223,10 +223,14 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func download(ctx context.Context, t target, id, outDir string) (string, error) {
+type fetched struct {
+	path, dataPath string
+}
+
+func download(ctx context.Context, t target, id, outDir string) (fetched, error) {
 	cc, err := t.client()
 	if err != nil {
-		return "", err
+		return fetched{}, err
 	}
 
 	prefix := id + "/"
@@ -240,7 +244,7 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return "", fmt.Errorf("listing %s: %w", id, err)
+			return fetched{}, fmt.Errorf("listing %s: %w", id, err)
 		}
 		for _, b := range page.Segment.BlobItems {
 			if !isDirectoryMarker(b) {
@@ -249,50 +253,50 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 		}
 	}
 	if len(stored) == 0 {
-		return "", fmt.Errorf("no dataset %s in %s", id, t.containerURL())
+		return fetched{}, fmt.Errorf("no dataset %s in %s", id, t.containerURL())
 	}
 	if _, ok := stored[crateName]; !ok {
-		return "", fmt.Errorf("dataset %s has no %s, so its upload never finished; nothing was downloaded", id, crateName)
+		return fetched{}, fmt.Errorf("dataset %s has no %s, so its upload never finished; nothing was downloaded", id, crateName)
 	}
 
 	status("Reading the crate of " + id)
 	crate, err := downloadBuffer(ctx, cc, prefix+crateName)
 	if err != nil {
-		return "", fmt.Errorf("downloading the crate of %s: %w", id, err)
+		return fetched{}, fmt.Errorf("downloading the crate of %s: %w", id, err)
 	}
 	status("")
 	files, err := crateFiles(crate)
 	if err != nil {
-		return "", fmt.Errorf("dataset %s: %w", id, err)
+		return fetched{}, fmt.Errorf("dataset %s: %w", id, err)
 	}
 	if problems := compareStored(files, stored); len(problems) > 0 {
-		return "", problemList(fmt.Sprintf("dataset %s does not match its crate, so nothing was downloaded:", id), problems)
+		return fetched{}, problemList(fmt.Sprintf("dataset %s does not match its crate, so nothing was downloaded:", id), problems)
 	}
 	if problems := localNameProblems(files, runtime.GOOS); len(problems) > 0 {
-		return "", problemList(fmt.Sprintf("dataset %s cannot be saved on this computer, so nothing was downloaded:", id), problems)
+		return fetched{}, problemList(fmt.Sprintf("dataset %s cannot be saved on this computer, so nothing was downloaded:", id), problems)
 	}
 
 	root, err := filepath.Abs(filepath.Join(outDir, id))
 	if err != nil {
-		return "", err
+		return fetched{}, err
 	}
 	if _, err := os.Lstat(root); err == nil {
 		status("Checking the existing " + root)
 		problem, err := verifyDir(root, files, crate)
 		if err != nil {
-			return "", err
+			return fetched{}, err
 		}
 		if problem != "" {
-			return "", fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
+			return fetched{}, fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
 		}
 		logf("%s is already here and matches its crate\n", root)
-		return root, nil
+		return fetched{root, dataDir(root, files)}, nil
 	}
 	partial := root + ".partial"
 	if _, err := os.Lstat(partial); err == nil {
 		logf("Discarding %s, left by an earlier fetch that did not finish\n", partial)
 		if err := os.RemoveAll(partial); err != nil {
-			return "", err
+			return fetched{}, err
 		}
 	}
 
@@ -310,11 +314,11 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	}
 
 	if err := os.MkdirAll(partial, 0o755); err != nil {
-		return "", err
+		return fetched{}, err
 	}
 	dir, err := os.OpenRoot(partial)
 	if err != nil {
-		return "", err
+		return fetched{}, err
 	}
 	started := time.Now()
 	jobs := make([]job, len(files))
@@ -329,16 +333,32 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	}
 	dir.Close()
 	if ctx.Err() != nil {
-		return "", fmt.Errorf("interrupted; nothing was saved as %s, and the next fetch starts again", root)
+		return fetched{}, fmt.Errorf("interrupted; nothing was saved as %s, and the next fetch starts again", root)
 	}
 	if err != nil {
-		return "", err
+		return fetched{}, err
 	}
 	if err := os.Rename(partial, root); err != nil {
-		return "", err
+		return fetched{}, err
 	}
 	logDone(started, total)
-	return root, nil
+	return fetched{root, dataDir(root, files)}, nil
+}
+
+// The folder that was published, which every file sits under; root itself if they do not share one.
+func dataDir(root string, files []crateFile) string {
+	top := ""
+	for _, f := range files {
+		first, _, nested := strings.Cut(f.Rel, "/")
+		if !nested || (top != "" && first != top) {
+			return root
+		}
+		top = first
+	}
+	if top == "" {
+		return root
+	}
+	return filepath.Join(root, filepath.FromSlash(top))
 }
 
 func downloadFile(ctx context.Context, cc *container.Client, dir *os.Root, name string, f crateFile, progress func(int64)) error {

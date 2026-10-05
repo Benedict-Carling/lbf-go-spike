@@ -101,7 +101,9 @@ validates this view of the dataset, once the uploader is known:
 File paths are relative to `<path>`. `crate` uses the RO-Crate's own names.
 
 `--dry-run` validates and prints the crate without signing in, as uploader `dry-run`. Progress goes to
-stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). `--tag KEY=VALUE` picks
+stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
+publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path"}` as one line, where
+`path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it. `--tag KEY=VALUE` picks
 the storage account (default `tag=storage`, production; the test account is
 `tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and
 otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`

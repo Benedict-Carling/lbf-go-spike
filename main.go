@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -107,7 +108,11 @@ func run(ctx context.Context, args []string) error {
 		if err := upload(ctx, t, pub); err != nil {
 			return err
 		}
-		fmt.Printf("Uploaded as %s\n%s/%s\n", pub.ID, t.containerURL(), pub.ID)
+		url := t.containerURL() + "/" + pub.ID
+		if o.json {
+			return printJSON(map[string]string{"id": pub.ID, "url": url})
+		}
+		fmt.Printf("Uploaded as %s\n%s\n", pub.ID, url)
 		return nil
 
 	case "fetch", "download":
@@ -119,11 +124,14 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		path, err := download(ctx, t, id, o.out)
+		got, err := download(ctx, t, id, o.out)
 		if err != nil {
 			return err
 		}
-		fmt.Println(path)
+		if o.json {
+			return printJSON(map[string]string{"id": id, "url": t.containerURL() + "/" + id, "path": got.path, "data_path": got.dataPath})
+		}
+		fmt.Println(got.path)
 		return nil
 
 	case "login":
@@ -200,7 +208,7 @@ type options struct {
 	out, mode                               string
 	profile                                 string
 	prov                                    provenanceFlags
-	dryRun                                  bool
+	dryRun, json                            bool
 }
 
 func parseArgs(cmd string, args []string) (options, []string, error) {
@@ -242,6 +250,10 @@ func newCommand(cmd string, o *options) (*command, error) {
 		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
 		tenant()
 	}
+	jsonFlag := func(desc string) {
+		fs.BoolVar(&o.json, "json", false, desc)
+		c.flags = append(c.flags, commandFlag{name: "json"})
+	}
 	sasEnv := func() { str(&o.sasEnv, "sas-env", "FILE", "", "pre-minted credential file from 'lbf mint-sas'") }
 
 	switch cmd {
@@ -261,12 +273,14 @@ func newCommand(cmd string, o *options) (*command, error) {
 		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
 		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})
+		jsonFlag("print {\"id\", \"url\"} as JSON instead of text")
 		storage()
 		sasEnv()
 	case "fetch", "download":
 		c.synopsis = cmd + " <id> [options]"
 		c.arg, c.argDesc = "<id>", "dataset ID, as printed by 'lbf publish'"
 		str(&o.out, "out", "DIR", ".", "output directory")
+		jsonFlag("print {\"id\", \"url\", \"path\", \"data_path\"} as JSON instead of the path; data_path is the uploaded folder inside path")
 		storage()
 		sasEnv()
 	case "mint-sas":
@@ -357,6 +371,10 @@ func (c *command) usage(out io.Writer) {
 	if c.notes != "" {
 		fmt.Fprintf(out, "\n%s", c.notes)
 	}
+}
+
+func printJSON(v any) error {
+	return json.NewEncoder(os.Stdout).Encode(v)
 }
 
 func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, accountName, containerName string) (target, error) {

@@ -588,6 +588,38 @@ func TestProvenanceFlags(t *testing.T) {
 	}
 }
 
+func TestJSONFlagOnPublishAndFetchOnly(t *testing.T) {
+	for _, args := range [][]string{{"publish", "data", "--json"}, {"fetch", "20260101-x-y-0000", "--json"}} {
+		if o, _, err := parseArgs(args[0], args[1:]); err != nil || !o.json {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	if _, _, err := parseArgs("mint-sas", []string{"--mode", "upload", "--json"}); err == nil {
+		t.Error("mint-sas accepted --json")
+	}
+}
+
+func TestDataDir(t *testing.T) {
+	root := filepath.Join("out", "id")
+	for _, tc := range []struct {
+		rels []string
+		want string
+	}{
+		{[]string{"plate1/a.nd2", "plate1/sub/b.csv"}, filepath.Join(root, "plate1")},
+		{[]string{"plate1/a.nd2", "plate2/b.nd2"}, root},
+		{[]string{"plate1/a.nd2", "loose.txt"}, root},
+		{nil, root},
+	} {
+		files := make([]crateFile, len(tc.rels))
+		for i, r := range tc.rels {
+			files[i].Rel = r
+		}
+		if got := dataDir(root, files); got != tc.want {
+			t.Errorf("%v: got %s, want %s", tc.rels, got, tc.want)
+		}
+	}
+}
+
 func TestVersionedProfilesResolveSiblings(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "minimal-silver", "0.1.0", "profile.json"), minimalSilverProfile)
