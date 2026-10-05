@@ -128,7 +128,7 @@ func upgrade(ctx context.Context, base, current, exe string) (latest string, upg
 		return latest, false, fmt.Errorf("downloaded %s does not match its published checksum; nothing was changed", assetName())
 	}
 	if err := replaceExecutable(exe, bin); err != nil {
-		return latest, false, fmt.Errorf("replacing %s: %w; reinstall with the command in the README instead", exe, err)
+		return latest, false, fmt.Errorf("replacing %s: %w", exe, err)
 	}
 	return latest, true, nil
 }
@@ -178,7 +178,7 @@ func replaceExecutable(exe string, bin []byte) error {
 	_ = os.Remove(old)
 	if err := os.Rename(exe, old); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("%w; an lbf started before the last upgrade may still be running: close it and run 'lbf upgrade' again", err)
 	}
 	if err := os.Rename(tmp, exe); err != nil {
 		return errors.Join(err, os.Rename(old, exe))
