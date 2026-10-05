@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 )
 
 const processRunCrate = "https://w3id.org/ro/wfrun/process/0.5"
+
+var lbfProperties = []string{"subscription_name", "subscription_id", "source_path"}
 
 //go:embed profiles/bronze/profile.json
 var bronzeProfileJSON []byte
@@ -62,6 +65,10 @@ func (f provenanceFlags) load() (provenance, error) {
 		return provenance{}, err
 	}
 	return p, nil
+}
+
+func (p provenance) sameAs(q provenance) bool {
+	return p.DerivedFrom == q.DerivedFrom && slices.Equal(p.Instruments, q.Instruments) && maps.Equal(p.Properties, q.Properties)
 }
 
 func readProvenance(path string) (provenance, error) {
@@ -127,7 +134,7 @@ func (p provenance) check() error {
 			return fmt.Errorf("instruments[%d] url %q is not an absolute URL", i, in.URL)
 		}
 	}
-	for _, k := range []string{"subscription_name", "subscription_id", "source_path"} {
+	for _, k := range lbfProperties {
 		if _, ok := p.Properties[k]; ok {
 			return fmt.Errorf("property %q is set by lbf and cannot be supplied", k)
 		}
