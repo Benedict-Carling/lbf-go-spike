@@ -37,8 +37,8 @@ type publication struct {
 }
 
 // Everything that can fail without Azure happens here, so a bad dataset never reaches sign-in or upload.
-func preparePublication(input, provenancePath, profileDir string) (publication, error) {
-	prov, err := readProvenance(provenancePath)
+func preparePublication(input string, provFlags provenanceFlags, profileDir string) (publication, error) {
+	prov, err := provFlags.load()
 	if err != nil {
 		return publication{}, err
 	}

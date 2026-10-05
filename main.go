@@ -32,9 +32,10 @@ Usage:
 Run 'lbf <command> --help' for its options.
 `
 
-const provenanceHelp = `--provenance is a JSON file: {"derived_from": "<id>", "instruments": [{"name", "version", "url"}],
-"properties": {"name": "value"}}. --profile is a directory holding a JSON Schema profile.json;
-publish validates against it, and lbf's bronze profile, before uploading anything.
+const provenanceHelp = `--derived-from and --instrument are given together or not at all. --provenance is a JSON file:
+{"derived_from": "<id>", "instruments": [{"name", "version", "url"}], "properties": {"name": "value"}}.
+--profile is a directory holding a JSON Schema profile.json; publish validates against it, and lbf's
+bronze profile, before uploading anything.
 `
 
 const sasLifetime = 144 * time.Hour
@@ -85,7 +86,7 @@ func run(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "publish", "upload":
-		pub, err := preparePublication(positional[0], o.provenance, o.profile)
+		pub, err := preparePublication(positional[0], o.prov, o.profile)
 		if err != nil {
 			return err
 		}
@@ -195,7 +196,8 @@ func run(ctx context.Context, args []string) error {
 type options struct {
 	tag, account, tenant, container, sasEnv string
 	out, mode                               string
-	provenance, profile                     string
+	profile                                 string
+	prov                                    provenanceFlags
 	dryRun                                  bool
 }
 
@@ -245,7 +247,15 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.synopsis = cmd + " <path> [options]"
 		c.arg, c.argDesc = "<path>", "dataset directory to upload"
 		c.notes = provenanceHelp
-		str(&o.provenance, "provenance", "FILE", "", "provenance JSON file")
+		str(&o.prov.derivedFrom, "derived-from", "ID", "", "the dataset this one was derived from")
+		fs.Func("instrument", "what produced it; repeat for several", func(v string) error {
+			in, err := parseInstrument(v)
+			o.prov.instruments = append(o.prov.instruments, in)
+			return err
+		})
+		c.flags = append(c.flags, commandFlag{name: "instrument", arg: "name=NAME,version=VERSION,url=URL"})
+		str(&o.prov.properties, "properties", "FILE", "", `JSON object of property names and values, e.g. {"sample_id": "SAM-0001"}`)
+		str(&o.prov.file, "provenance", "FILE", "", "all of the above as one JSON file, instead of those flags")
 		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
 		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})

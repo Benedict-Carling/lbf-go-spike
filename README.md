@@ -64,10 +64,16 @@ no properties. Derived datasets record what they came from:
 
 ```
 lbf publish results/ --container silver \
-    --provenance provenance.json --profile profiles/minimal-silver
+    --derived-from 20261001-fancy-dassie-eadb \
+    --instrument name=my-pipeline,version=0.1.0,url=https://... \
+    --properties metadata.json \
+    --profile profiles/minimal-silver/0.1.0
 ```
 
-`provenance.json`:
+`metadata.json` holds the properties as strings, e.g. `{"sample_id": "SAM-0001"}`.
+`--derived-from` and `--instrument` come together, and `--instrument` repeats
+for several. The same provenance can instead be given as one file with
+`--provenance provenance.json`:
 
 ```json
 {"derived_from": "20261001-fancy-dassie-eadb",
@@ -76,12 +82,13 @@ lbf publish results/ --container silver \
 ```
 
 Every field is optional, but `derived_from` and `instruments` come together.
-Property values are strings and unknown fields are rejected.
+Unknown fields are rejected.
 
 A profile is a directory holding a JSON Schema `profile.json`, describing both
 the data given as `<path>` and the crate lbf writes for it. Its `$id` is
 recorded in the crate's `conformsTo`, along with every profile it builds on
-through `$ref`; sibling profiles and lbf's bronze profile resolve locally. It
+through `$ref`; sibling profiles (`profiles/<name>/profile.json` or, versioned,
+`profiles/<name>/<version>/profile.json`) and lbf's bronze profile resolve locally. It
 validates this view of the dataset, once the uploader is known:
 
 ```json
