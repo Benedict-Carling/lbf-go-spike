@@ -2,35 +2,56 @@
 set -eu
 
 repo=Benedict-Carling/lbf-go-spike
-os=$(uname -s | tr '[:upper:]' '[:lower:]')
-case $(uname -m) in
-    x86_64 | amd64) arch=amd64 ;;
-    arm64 | aarch64) arch=arm64 ;;
-    *) echo "lbf: unsupported architecture $(uname -m)" >&2; exit 1 ;;
-esac
-case $os in
-    darwin | linux) ;;
-    *) echo "lbf: unsupported OS $os (on Windows use install.ps1)" >&2; exit 1 ;;
-esac
 
-dir=${LBF_INSTALL_DIR:-$HOME/.local/bin}
-mkdir -p "$dir"
-echo "Downloading lbf for $os $arch..."
-curl -fsSL "https://github.com/$repo/releases/latest/download/lbf-$os-$arch" -o "$dir/lbf.new"
-chmod +x "$dir/lbf.new"
-mv "$dir/lbf.new" "$dir/lbf"
+detect_platform() {
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    case $(uname -m) in
+        x86_64 | amd64) arch=amd64 ;;
+        arm64 | aarch64) arch=arm64 ;;
+        *) echo "lbf: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+    case $os in
+        darwin | linux) ;;
+        *) echo "lbf: unsupported OS $os (on Windows use install.ps1)" >&2; exit 1 ;;
+    esac
+    # A shell running under Rosetta reports x86_64 on Apple Silicon.
+    if [ "$os" = darwin ] && [ "$arch" = amd64 ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ]; then
+        arch=arm64
+    fi
+}
 
-"$dir/lbf" version
-echo "Installed to $dir/lbf"
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 -r "$1" | awk '{print $1}'
+    fi
+}
 
-case $dir in
-    "$HOME"/*) dir_expr="\$HOME/${dir#"$HOME"/}" ;;
-    *) dir_expr=$dir ;;
-esac
-env_sh="$dir/env"
-env_fish="$dir/env.fish"
-changed=""
-failed=""
+download() {
+    asset="lbf-$os-$arch"
+    base="https://github.com/$repo/releases/latest/download"
+    mkdir -p "$dir"
+    echo "Downloading lbf for $os $arch..."
+    curl -fsSL "$base/$asset" -o "$dir/lbf.new"
+    want=$(curl -fsSL "$base/SHA256SUMS" | awk -v n="$asset" '$2 == n || $2 == "*" n {print $1}')
+    got=$(sha256_of "$dir/lbf.new")
+    if [ -z "$want" ] || [ -z "$got" ] || [ "$want" != "$got" ]; then
+        rm -f "$dir/lbf.new"
+        if [ -z "$want" ]; then
+            echo "lbf: could not fetch the published checksum for $asset; nothing was installed. Try again." >&2
+        elif [ -z "$got" ]; then
+            echo "lbf: cannot verify the download: install sha256sum, shasum or openssl" >&2
+        else
+            echo "lbf: the download does not match its published checksum; nothing was installed. Try again." >&2
+        fi
+        exit 1
+    fi
+    chmod +x "$dir/lbf.new"
+    mv "$dir/lbf.new" "$dir/lbf"
+}
 
 # Same env script and rc lines as uv and rustup, so installing several of them does not stack duplicates.
 write_env() {
@@ -87,35 +108,66 @@ modify_path() {
 
 manual_hint() {
     case ${SHELL:-} in
-        */fish) echo "Add $dir to your PATH: fish_add_path \"$dir\"" ;;
-        */zsh) echo "Add $dir to your PATH: echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc" ;;
-        */bash) echo "Add $dir to your PATH: echo 'export PATH=\"$dir:\$PATH\"' >> ~/.bashrc" ;;
-        *) echo "Add $dir to your PATH in your shell's startup file: export PATH=\"$dir:\$PATH\"" ;;
+        */fish) echo "To use plain lbf, add $dir to your PATH: fish_add_path \"$dir\"" ;;
+        */zsh) echo "To use plain lbf, add $dir to your PATH: echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc" ;;
+        */bash) echo "To use plain lbf, add $dir to your PATH: echo 'export PATH=\"$dir:\$PATH\"' >> ~/.bashrc" ;;
+        *) echo "To use plain lbf, add $dir to your PATH in your shell's startup file: export PATH=\"$dir:\$PATH\"" ;;
     esac
 }
 
-case ":$PATH:" in
-    *":$dir:"*) echo "Next: lbf login"; exit 0 ;;
-esac
-
-if [ "${LBF_NO_MODIFY_PATH:-0}" = 1 ]; then
-    manual_hint
-    echo "Then: lbf login"
-    exit 0
-fi
-
-modify_path
-if [ -n "$changed" ]; then
-    echo "Added $dir to your PATH in:$changed"
-fi
-if [ -n "$failed" ]; then
-    echo "Could not update all of your shell startup files."
-    manual_hint
-else
-    echo "Open a new terminal, or run this in the current one:"
-    case ${SHELL:-} in
-        */fish) echo "    source \"$dir/env.fish\"" ;;
-        *) echo "    . \"$dir/env\"" ;;
+get_started() {
+    case $dir in
+        *" "*) cmd="\"$dir/lbf\" login" ;;
+        *) cmd="$dir/lbf login" ;;
     esac
-fi
-echo "Then: lbf login"
+    echo
+    echo "Get started now:"
+    echo "    $cmd"
+    echo
+}
+
+main() {
+    detect_platform
+    dir=${LBF_INSTALL_DIR:-$HOME/.local/bin}
+    download
+    "$dir/lbf" version
+    echo "Installed to $dir/lbf"
+
+    case ":$PATH:" in
+        *":$dir:"*) echo "Next: lbf login"; return 0 ;;
+    esac
+
+    case $dir in
+        "$HOME"/*) dir_expr="\$HOME/${dir#"$HOME"/}" ;;
+        *) dir_expr=$dir ;;
+    esac
+    env_sh="$dir/env"
+    env_fish="$dir/env.fish"
+    changed=""
+    failed=""
+
+    if [ "${LBF_NO_MODIFY_PATH:-0}" = 1 ]; then
+        get_started
+        manual_hint
+        return 0
+    fi
+
+    modify_path
+    if [ -n "$changed" ]; then
+        echo "Added $dir to your PATH for new terminals, in:$changed"
+    fi
+    get_started
+    if [ -n "$failed" ]; then
+        echo "Could not update all of your shell startup files."
+        manual_hint
+    else
+        echo "Or make plain lbf work in this terminal:"
+        case ${SHELL:-} in
+            */fish) echo "    source \"$dir/env.fish\"" ;;
+            *) echo "    . \"$dir/env\"" ;;
+        esac
+    fi
+}
+
+# Called last so a download cut off part way runs nothing.
+main "$@"
