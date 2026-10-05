@@ -35,18 +35,39 @@ type provenance struct {
 	Properties  map[string]string `json:"properties"`
 }
 
+// Where publish takes its provenance from: a --provenance file, or the flags that spell it out.
+type provenanceFlags struct {
+	file, derivedFrom, properties string
+	instruments                   []instrument
+}
+
+func (f provenanceFlags) load() (provenance, error) {
+	if f.file != "" {
+		if f.derivedFrom != "" || len(f.instruments) > 0 || f.properties != "" {
+			return provenance{}, errors.New("--provenance cannot be combined with --derived-from, --instrument or --properties")
+		}
+		return readProvenance(f.file)
+	}
+	p := provenance{DerivedFrom: f.derivedFrom, Instruments: f.instruments, Properties: map[string]string{}}
+	if f.properties != "" {
+		err := decodeStrict(f.properties, &p.Properties)
+		if err == nil && p.Properties == nil {
+			err = errors.New("want a JSON object of property names and values")
+		}
+		if err != nil {
+			return provenance{}, fmt.Errorf("%s is not a valid properties file: %w", f.properties, err)
+		}
+	}
+	if err := p.check(); err != nil {
+		return provenance{}, err
+	}
+	return p, nil
+}
+
 func readProvenance(path string) (provenance, error) {
 	var p provenance
 	if path != "" {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return provenance{}, err
-		}
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.DisallowUnknownFields()
-		if err = dec.Decode(&p); err == nil && dec.More() {
-			err = errors.New("unexpected content after the JSON object")
-		}
+		err := decodeStrict(path, &p)
 		if err == nil {
 			err = p.check()
 		}
@@ -58,6 +79,37 @@ func readProvenance(path string) (provenance, error) {
 		p.Properties = map[string]string{}
 	}
 	return p, nil
+}
+
+func decodeStrict(path string, v any) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err = dec.Decode(v); err == nil && dec.More() {
+		err = errors.New("unexpected content after the JSON object")
+	}
+	return err
+}
+
+// --instrument name=NAME,version=VERSION,url=URL; a comma not followed by a known key stays in the value.
+func parseInstrument(s string) (instrument, error) {
+	var in instrument
+	fields := map[string]*string{"name": &in.Name, "version": &in.Version, "url": &in.URL}
+	var last *string
+	for part := range strings.SplitSeq(s, ",") {
+		if k, v, ok := strings.Cut(part, "="); ok && fields[k] != nil {
+			*fields[k], last = v, fields[k]
+			continue
+		}
+		if last == nil {
+			return instrument{}, fmt.Errorf("%q is not name=NAME,version=VERSION,url=URL", s)
+		}
+		*last += "," + part
+	}
+	return in, nil
 }
 
 func (p provenance) check() error {
@@ -110,24 +162,33 @@ func loadProfile(dir string) (*profile, error) {
 	targetID := bronzeID
 
 	if dir != "" {
+		if dir, err = filepath.Abs(dir); err != nil {
+			return nil, err
+		}
 		target := filepath.Join(dir, "profile.json")
 		if info, err := os.Stat(dir); err == nil && !info.IsDir() {
 			target = dir
 		}
-		siblings, _ := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(target)), "*", "profile.json"))
-		for _, path := range append(siblings, target) {
+		// Siblings are profiles/<name>/profile.json or, versioned, profiles/<name>/<version>/profile.json.
+		parent := filepath.Dir(filepath.Dir(target))
+		siblings, _ := filepath.Glob(filepath.Join(parent, "*", "profile.json"))
+		versioned, _ := filepath.Glob(filepath.Join(filepath.Dir(parent), "*", "*", "profile.json"))
+		for _, path := range slices.Concat(siblings, versioned, []string{target}) {
+			var id, ref string
 			raw, err := os.ReadFile(path)
-			if err != nil {
-				return nil, err
+			if err == nil {
+				id, ref, err = schemaHead(raw)
 			}
-			id, parent, err := schemaHead(raw)
+			if err != nil && path != target {
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
 			if id == bronzeID {
 				return nil, fmt.Errorf("%s: $id %s is lbf's bronze profile, which only lbf defines", path, id)
 			}
-			docs[id], parents[id] = raw, parent
+			docs[id], parents[id] = raw, ref
 			if path == target {
 				targetID = id
 			}

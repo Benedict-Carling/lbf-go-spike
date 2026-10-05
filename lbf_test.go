@@ -376,7 +376,7 @@ func TestProvenanceRules(t *testing.T) {
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		_, err := preparePublication(data, path, "")
+		_, err := preparePublication(data, provenanceFlags{file: path}, "")
 		if err == nil {
 			t.Errorf("%s: accepted", name)
 			continue
@@ -395,6 +395,76 @@ func TestProvenanceAccepted(t *testing.T) {
 	}
 	if p.DerivedFrom != "20260101-x-y-0000" || len(p.Instruments) != 1 || p.Properties == nil {
 		t.Fatalf("%+v", p)
+	}
+}
+
+func TestProvenanceFlags(t *testing.T) {
+	dir := t.TempDir()
+	props := filepath.Join(dir, "metadata.json")
+	writeFile(t, props, `{"sample_id": "SAM-0001"}`)
+	in, err := parseInstrument("name=nf,version=0.1.0,url=https://example.org/a,b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := provenanceFlags{derivedFrom: "20260101-x-y-0000", instruments: []instrument{in}, properties: props}.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := instrument{"nf", "0.1.0", "https://example.org/a,b"}
+	if p.DerivedFrom != "20260101-x-y-0000" || len(p.Instruments) != 1 || p.Instruments[0] != want || p.Properties["sample_id"] != "SAM-0001" {
+		t.Fatalf("%+v", p)
+	}
+
+	nonString := filepath.Join(dir, "n.json")
+	writeFile(t, nonString, `{"n": 1}`)
+	null := filepath.Join(dir, "null.json")
+	writeFile(t, null, `null`)
+	for name, f := range map[string]provenanceFlags{
+		"parent without tools":  {derivedFrom: "20260101-x-y-0000"},
+		"tools without parent":  {instruments: []instrument{want}},
+		"incomplete instrument": {derivedFrom: "20260101-x-y-0000", instruments: []instrument{{Name: "nf"}}},
+		"non-string property":   {properties: nonString},
+		"null properties":       {properties: null},
+		"with --provenance":     {file: props, derivedFrom: "20260101-x-y-0000"},
+	} {
+		if _, err := f.load(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	for _, bad := range []string{"nf", "colour=red,name=nf"} {
+		if _, err := parseInstrument(bad); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
+	}
+	if _, _, err := parseArgs("publish", []string{"data", "--instrument", "nf"}); err == nil {
+		t.Error("malformed --instrument accepted by publish")
+	}
+}
+
+func TestVersionedProfilesResolveSiblings(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "minimal-silver", "0.1.0", "profile.json"), minimalSilverProfile)
+	writeFile(t, filepath.Join(root, "cell-painting", "0.1.0", "profile.json"), cellPaintingProfile)
+	prof, err := loadProfile(filepath.Join(root, "cell-painting", "0.1.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := prof.ids(); len(got) != 3 {
+		t.Fatalf("chain %v", got)
+	}
+}
+
+func TestUnrelatedProfileJSONNearbyIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "app", "cfg", "profile.json"), `{"theme": "dark"}`)
+	writeFile(t, filepath.Join(root, "work", "notes", "profile.json"), `not json`)
+	writeFile(t, filepath.Join(root, "work", "myprof", "profile.json"), minimalSilverProfile)
+	if _, err := loadProfile(filepath.Join(root, "work", "myprof")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "work", "bad", "profile.json"), `{"theme": "dark"}`)
+	if _, err := loadProfile(filepath.Join(root, "work", "bad")); err == nil {
+		t.Fatal("a profile without $id was accepted")
 	}
 }
 
