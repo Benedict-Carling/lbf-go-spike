@@ -33,6 +33,9 @@ that folder is not already on your PATH, adds it via `~/.profile` and your
 bash, zsh and fish startup files, the same way uv and rustup do. Open a new
 terminal afterwards. Set `LBF_NO_MODIFY_PATH=1` to leave startup files alone.
 
+Both installers check the download against the release's `SHA256SUMS` before
+installing it, as `lbf upgrade` does.
+
 Binaries are also attached to each
 [release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
 
