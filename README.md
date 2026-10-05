@@ -107,8 +107,25 @@ the storage account (default `tag=storage`, production; the test account is
 otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
 uses a pre-minted credential instead of `az login`.
 
+## Integrity
+
+Publish follows symlinks, and refuses, before uploading anything, a dataset with
+a broken symlink, an unreadable file, or a name that could not be fetched
+everywhere: one Windows cannot store (`\ : * ? " < > |`, a trailing dot or
+space, `CON`, `NUL` and the like) or two that differ only in case. Each file's
+sha256 is computed as it is sent and recorded in the crate. A file that changes
+while it is being sent stops the publish.
+
+Fetch downloads exactly the files the crate lists, refusing a dataset whose
+stored files differ from it, and checks each file's size and sha256 (size only
+for datasets published before lbf recorded checksums). It works in
+`<id>.partial` and renames it to `<id>` only once everything has checked out,
+so `<id>` is always complete. Fetching into a folder that already holds the
+dataset verifies it instead of downloading again.
+
 Blob layout, RO-Crate sidecar and `azure_sas.env` format match the Nextflow
-pipelines, so either tool can read the other's output.
+pipelines, so either tool can read the other's output; crates written by the
+Nextflow pipelines carry no checksums.
 
 ## Build
 

@@ -29,23 +29,170 @@ func TestDatasetFilesLayoutAndExclusions(t *testing.T) {
 	for _, p := range []string{"a.txt", "sub/b.txt", ".DS_Store", "sub/._b.txt"} {
 		writeFile(t, filepath.Join(root, filepath.FromSlash(p)), "x")
 	}
-	_ = os.Symlink(filepath.Join(root, "a.txt"), filepath.Join(root, "link.txt"))
 
 	_, files, err := datasetFiles(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []string
-	for _, f := range files {
-		got = append(got, f.Rel)
-	}
-	if want := "run1/a.txt,run1/sub/b.txt"; strings.Join(got, ",") != want {
-		t.Fatalf("got %v, want %s", got, want)
+	if got := rels(files); got != "run1/a.txt,run1/sub/b.txt" {
+		t.Fatalf("got %s", got)
 	}
 
 	_, single, err := datasetFiles(filepath.Join(root, "a.txt"))
 	if err != nil || len(single) != 1 || single[0].Rel != "a.txt" {
 		t.Fatalf("single file: %v %v", single, err)
+	}
+}
+
+func TestDatasetFilesFollowsSymlinks(t *testing.T) {
+	base := t.TempDir()
+	writeFile(t, filepath.Join(base, "elsewhere", "r.txt"), "r")
+	writeFile(t, filepath.Join(base, "elsewhere", "dir", "d.txt"), "d")
+	root := filepath.Join(base, "run1")
+	writeFile(t, filepath.Join(root, "own.txt"), "o")
+	if os.Symlink(filepath.Join(base, "elsewhere", "r.txt"), filepath.Join(root, "file-link")) != nil {
+		t.Skip("cannot create symlinks here")
+	}
+	must(t, os.Symlink(filepath.Join(base, "elsewhere", "dir"), filepath.Join(root, "dir-link")))
+
+	_, files, err := datasetFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rels(files); got != "run1/dir-link/d.txt,run1/file-link,run1/own.txt" {
+		t.Fatalf("got %s", got)
+	}
+
+	must(t, os.Symlink(filepath.Join(base, "gone"), filepath.Join(root, "dangling")))
+	must(t, os.Symlink(root, filepath.Join(root, "dir-link", "loop")))
+	_, _, err = datasetFiles(root)
+	for _, want := range []string{"run1/dangling: broken symlink", "run1/dir-link/loop: symlink loop"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q in %v", want, err)
+		}
+	}
+}
+
+func TestDatasetFilesRefusesWhatCannotRoundTrip(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "run1")
+	names := []string{"ok.txt", "12:30.csv", "nul.txt", "trailing."}
+	if runtime.GOOS != "windows" {
+		names = append(names, `back\slash.txt`)
+	}
+	for _, n := range names {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, n), []byte("x"), 0o644); err != nil {
+			t.Skipf("this filesystem cannot hold %q", n)
+		}
+	}
+	_, _, err := datasetFiles(root)
+	if err == nil {
+		t.Fatal("accepted")
+	}
+	for _, want := range []string{"nothing was uploaded", "run1/12:30.csv: contains", "run1/nul.txt: \"nul.txt\" is a reserved", "run1/trailing.: "} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q in:\n%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "ok.txt") {
+		t.Errorf("flagged ok.txt:\n%v", err)
+	}
+
+	ok := filepath.Join(root, "ok.txt")
+	folded := checkFiles([]localFile{{Path: ok, Rel: "run1/Same.txt"}, {Path: ok, Rel: "run1/same.txt"}})
+	if len(folded) != 1 || !strings.Contains(folded[0], "run1/Same.txt and run1/same.txt differ only in case") {
+		t.Errorf("case collision: %v", folded)
+	}
+
+	crateFile := filepath.Join(t.TempDir(), crateName)
+	writeFile(t, crateFile, "{}")
+	if _, _, err := datasetFiles(crateFile); err == nil || !strings.Contains(err.Error(), "replaced by the crate") {
+		t.Errorf("single %s: %v", crateName, err)
+	}
+}
+
+func TestDatasetFilesRefusesUnreadableFiles(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permissions do not stop this user reading")
+	}
+	root := filepath.Join(t.TempDir(), "run1")
+	writeFile(t, filepath.Join(root, "a.txt"), "x")
+	must(t, os.Chmod(filepath.Join(root, "a.txt"), 0))
+	if _, _, err := datasetFiles(root); err == nil || !strings.Contains(err.Error(), "run1/a.txt: cannot be read (permission denied)") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
+	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5, SHA256: "abc"}, {Rel: "run1/old.txt", Size: 3}}
+	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := crateFiles(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []crateFile{{"run1/a b#1%.csv", 5, "abc"}, {"run1/old.txt", 3, ""}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v", got)
+	}
+
+	problems := compareStored(want, map[string]int64{"run1/a b#1%.csv": 4, crateName: 9, "run1/extra": 1})
+	if got := strings.Join(problems, "\n"); got != "run1/a b#1%.csv: stored as 4 bytes, but the crate records 5\n"+
+		"run1/old.txt: listed in the crate but not stored\nrun1/extra: stored but not listed in the crate" {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestVerifyDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "run1", "a.txt"), "hello")
+	writeFile(t, filepath.Join(root, crateName), "crate")
+	sum := sha256.Sum256([]byte("hello"))
+	files := []crateFile{{"run1/a.txt", 5, hex.EncodeToString(sum[:])}}
+
+	if problem, err := verifyDir(root, files, []byte("crate")); problem != "" || err != nil {
+		t.Fatalf("intact copy: %q %v", problem, err)
+	}
+	writeFile(t, filepath.Join(root, "run1", "a.txt"), "jello")
+	if problem, _ := verifyDir(root, files, []byte("crate")); problem != "run1/a.txt has the wrong sha256" {
+		t.Fatalf("changed content: %q", problem)
+	}
+	writeFile(t, filepath.Join(root, "run1", "a.txt"), "hello")
+	writeFile(t, filepath.Join(root, "stray.txt"), "x")
+	if problem, _ := verifyDir(root, files, []byte("crate")); problem != "stray.txt is not part of the dataset" {
+		t.Fatalf("stray file: %q", problem)
+	}
+}
+
+func TestLocalNameProblems(t *testing.T) {
+	files := []crateFile{{Rel: "run1/A.txt"}, {Rel: "run1/a.txt"}, {Rel: "run1/x:y"}}
+	if got := localNameProblems(files, "linux"); len(got) != 0 {
+		t.Errorf("linux: %v", got)
+	}
+	if got := localNameProblems(files, "darwin"); len(got) != 1 {
+		t.Errorf("darwin: %v", got)
+	}
+	if got := localNameProblems(files, "windows"); len(got) != 2 {
+		t.Errorf("windows: %v", got)
+	}
+}
+
+func rels(files []localFile) string {
+	var out []string
+	for _, f := range files {
+		out = append(out, f.Rel)
+	}
+	return strings.Join(out, ",")
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
