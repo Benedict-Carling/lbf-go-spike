@@ -979,3 +979,36 @@ func TestUpgradeIntoReadOnlyFolderSaysWhatToDo(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestLockPathWaitsForTheHolder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "d.lock")
+	unlock, err := lockPath(t.Context(), path, func() { t.Error("first lock waited") })
+	must(t, err)
+
+	waited := make(chan struct{})
+	got := make(chan func())
+	go func() {
+		second, err := lockPath(t.Context(), path, func() { close(waited) })
+		if err != nil {
+			t.Error(err)
+		}
+		got <- second
+	}()
+	<-waited
+	select {
+	case <-got:
+		t.Fatal("second lock taken while the first was held")
+	case <-time.After(300 * time.Millisecond):
+	}
+	unlock()
+	(<-got)()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	unlock, err = lockPath(ctx, path, func() {})
+	must(t, err)
+	defer unlock()
+	cancel()
+	if _, err := lockPath(ctx, path, func() {}); err == nil {
+		t.Fatal("lock taken after cancel while held")
+	}
+}

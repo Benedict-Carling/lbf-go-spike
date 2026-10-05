@@ -280,6 +280,19 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	if err != nil {
 		return fetched{}, err
 	}
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return fetched{}, err
+	}
+	unlock, err := lockPath(ctx, root+".lock", func() {
+		logf("Waiting for another fetch of %s into %s to finish\n", id, filepath.Dir(root))
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return fetched{}, fmt.Errorf("interrupted while waiting for another fetch of %s", id)
+		}
+		return fetched{}, err
+	}
+	defer unlock()
 	if _, err := os.Lstat(root); err == nil {
 		status("Checking the existing " + root)
 		problem, err := verifyDir(root, files, crate)
