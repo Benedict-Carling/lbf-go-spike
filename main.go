@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -25,6 +26,7 @@ Usage:
   lbf mint-sas          write a pre-minted credential file
   lbf login             sign in with the browser and remember it
   lbf logout            forget the login saved by 'lbf login'
+  lbf upgrade           update lbf to the latest release
   lbf version
 
 Run 'lbf <command> --help' for its options.
@@ -52,8 +54,13 @@ func main() {
 	if runtime.GOOS == "windows" {
 		args = repairWindowsArgs(args)
 	}
-	if err := run(ctx, args); err != nil {
+	warnIfOutdated := startUpdateCheck(ctx, args)
+	err := run(ctx, args)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", sasSignature.ReplaceAllString(err.Error(), "sig=REDACTED"))
+	}
+	warnIfOutdated()
+	if err != nil {
 		os.Exit(1)
 	}
 }
@@ -141,6 +148,28 @@ func run(ctx context.Context, args []string) error {
 			fmt.Println("Forgot the login saved by 'lbf login' ('az login' is unaffected)")
 		} else {
 			fmt.Println("No saved lbf login ('az login' is unaffected)")
+		}
+		return nil
+
+	case "upgrade":
+		if version == "dev" {
+			return errors.New("this is a development build; install a release with the command in the README")
+		}
+		exe, err := os.Executable()
+		if err == nil {
+			exe, err = filepath.EvalSymlinks(exe)
+		}
+		if err != nil {
+			return err
+		}
+		latest, upgraded, err := upgrade(ctx, releasesURL, version, exe)
+		if err != nil {
+			return err
+		}
+		if upgraded {
+			fmt.Printf("Upgraded lbf %s -> %s\n", version, latest)
+		} else {
+			fmt.Printf("lbf %s is up to date\n", version)
 		}
 		return nil
 
@@ -239,6 +268,9 @@ func newCommand(cmd string, o *options) (*command, error) {
 		tenant()
 	case "logout":
 		c.synopsis = "logout"
+	case "upgrade":
+		c.synopsis = "upgrade"
+		c.notes = "lbf also warns after any command when a newer release exists; set LBF_NO_UPDATE_CHECK=1 to stop it checking.\n"
 	default:
 		return nil, fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
