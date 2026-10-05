@@ -164,7 +164,7 @@ func replaceExecutable(exe string, bin []byte) error {
 	tmp := exe + ".new"
 	_ = os.Remove(tmp)
 	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
-		return err
+		return fmt.Errorf("%w; lbf cannot write to its own folder, so ask whoever installed it to upgrade, or install your own copy with the command in the README", err)
 	}
 	if runtime.GOOS != "windows" {
 		if err := os.Rename(tmp, exe); err != nil {

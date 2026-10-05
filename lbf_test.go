@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -695,5 +696,37 @@ func TestUpgradeWarningNamesBothVersionsAndCommand(t *testing.T) {
 		if !strings.Contains(w, s) {
 			t.Errorf("warning lacks %q:\n%s", s, w)
 		}
+	}
+}
+
+func TestUpdateCheckGivesUpOnASilentServer(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	defer srv.Close()
+	defer close(release)
+
+	start := time.Now()
+	got := cachedLatestVersion(context.Background(), srv.URL+"/releases", filepath.Join(t.TempDir(), "latest-version"))
+	if took := time.Since(start); got != "" || took > updateCheckLimit+time.Second {
+		t.Fatalf("got %q after %v", got, took)
+	}
+}
+
+func TestUpgradeIntoReadOnlyFolderSaysWhatToDo(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs Unix permissions")
+	}
+	bin := []byte("new lbf")
+	sum := sha256.Sum256(bin)
+	srv := fakeReleases(t, "v0.2.0", bin, hex.EncodeToString(sum[:]))
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "lbf")
+	writeFile(t, exe, "old lbf")
+	os.Chmod(dir, 0o555)
+	defer os.Chmod(dir, 0o755)
+
+	_, _, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe)
+	if err == nil || !strings.Contains(err.Error(), "README") {
+		t.Fatalf("got %v", err)
 	}
 }
