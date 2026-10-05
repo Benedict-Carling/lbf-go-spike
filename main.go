@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "golang.org/x/crypto/x509roots/fallback"
@@ -46,7 +47,8 @@ var version = "dev"
 var sasSignature = regexp.MustCompile(`sig=[^&\s"]+`)
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// SIGTERM is what HPC schedulers send at a job's time limit.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// A second Ctrl-C exits at once instead of waiting for the first to unwind.
 	context.AfterFunc(ctx, stop)

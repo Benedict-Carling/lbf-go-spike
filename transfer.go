@@ -3,11 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +35,7 @@ const (
 	parallelFiles = 8
 	blockSize     = 8 << 20
 	blockWorkers  = 4
+	maxBlocks     = 50000
 	crateName     = "ro-crate-metadata.json"
 )
 
@@ -57,7 +68,7 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir stri
 }
 
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
-func (p publication) crate(t target) ([]byte, error) {
+func (p publication) validate(t target) (time.Time, []string, error) {
 	published := time.Now()
 	ids := p.Profile.ids()
 	conformsTo := ids
@@ -65,9 +76,17 @@ func (p publication) crate(t target) ([]byte, error) {
 		conformsTo = append([]string{processRunCrate}, ids...)
 	}
 	if err := p.Profile.validate(p.view(t, published, conformsTo)); err != nil {
-		return nil, err
+		return time.Time{}, nil, err
 	}
 	logf("[profile] meets %s\n", strings.Join(ids, ", "))
+	return published, conformsTo, nil
+}
+
+func (p publication) crate(t target) ([]byte, error) {
+	published, conformsTo, err := p.validate(t)
+	if err != nil {
+		return nil, err
+	}
 	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, conformsTo, published)
 }
 
@@ -97,7 +116,7 @@ func (p publication) view(t target, published time.Time, conformsTo []string) ma
 }
 
 func upload(ctx context.Context, t target, pub publication) error {
-	crate, err := pub.crate(t)
+	published, conformsTo, err := pub.validate(t)
 	if err != nil {
 		return err
 	}
@@ -121,52 +140,87 @@ func upload(ctx context.Context, t target, pub publication) error {
 
 	started := time.Now()
 	jobs := make([]job, len(pub.Files))
-	for i, f := range pub.Files {
+	for i := range pub.Files {
+		f := &pub.Files[i]
 		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
-			fh, err := os.Open(f.Path)
-			if err != nil {
-				return err
-			}
-			defer fh.Close()
-			// Left to the SDK, the block size grows with the file so it stays within 50,000 blocks.
-			_, err = cc.NewBlockBlobClient(id+"/"+f.Rel).UploadFile(ctx, fh, &blockblob.UploadFileOptions{
-				Concurrency: blockWorkers,
-				Progress:    progress,
-				AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
-					IfNoneMatch: to.Ptr(azcore.ETagAny),
-				}},
-			})
-			if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-				return fmt.Errorf("%s already exists in the container; refusing to overwrite", id+"/"+f.Rel)
-			}
-			if err != nil {
-				return fmt.Errorf("uploading %s: %w", f.Rel, err)
-			}
-			return nil
+			return uploadFile(ctx, cc, id+"/"+f.Rel, f, progress)
 		}}
 	}
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
+	if err == nil {
+		err = uploadCrate(ctx, cc, t, pub, published, conformsTo)
+	}
 	if ctx.Err() != nil {
 		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Publish again to get a new ID", id)
 	}
 	if err != nil {
+		return fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Publish again to get a new ID", err, id)
+	}
+	logDone(started, total)
+	return nil
+}
+
+// Hashes the bytes as they are sent, and refuses a file that changed meanwhile, so the crate records exactly what landed.
+func uploadFile(ctx context.Context, cc *container.Client, name string, f *localFile, progress func(int64)) error {
+	fh, err := os.Open(f.Path)
+	if err != nil {
 		return err
 	}
+	defer fh.Close()
+	h := sha256.New()
+	r := &countingReader{r: io.TeeReader(io.LimitReader(fh, f.Size), h), progress: progress}
+	_, err = cc.NewBlockBlobClient(name).UploadStream(ctx, r, &blockblob.UploadStreamOptions{
+		BlockSize:   max(blockSize, (f.Size+maxBlocks-1)/maxBlocks),
+		Concurrency: blockWorkers,
+		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+			IfNoneMatch: to.Ptr(azcore.ETagAny),
+		}},
+	})
+	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
+		return fmt.Errorf("%s already exists in the container; refusing to overwrite", name)
+	}
+	if err != nil {
+		return fmt.Errorf("uploading %s: %w", f.Rel, err)
+	}
+	after, err := os.Stat(f.Path)
+	if err != nil || r.n != f.Size || after.Size() != f.Size || !after.ModTime().Equal(f.ModTime) {
+		return fmt.Errorf("%s changed while it was being uploaded; wait until whatever writes it has finished, then publish again", f.Rel)
+	}
+	f.SHA256 = hex.EncodeToString(h.Sum(nil))
+	return nil
+}
 
-	_, err = cc.NewBlockBlobClient(id+"/"+crateName).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
+func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time, conformsTo []string) error {
+	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, conformsTo, published)
+	if err != nil {
+		return err
+	}
+	_, err = cc.NewBlockBlobClient(pub.ID+"/"+crateName).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
 		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: new("application/json")},
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 			IfNoneMatch: to.Ptr(azcore.ETagAny),
 		}},
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		return fmt.Errorf("%s/%s already exists in the container; refusing to overwrite", id, crateName)
+		return fmt.Errorf("%s/%s already exists in the container; refusing to overwrite", pub.ID, crateName)
 	}
 	if err != nil {
-		return fmt.Errorf("uploading ro-crate-metadata.json: %w", err)
+		return fmt.Errorf("uploading %s: %w", crateName, err)
 	}
-	logDone(started, total)
 	return nil
+}
+
+type countingReader struct {
+	r        io.Reader
+	n        int64
+	progress func(int64)
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	c.progress(c.n)
+	return n, err
 }
 
 func download(ctx context.Context, t target, id, outDir string) (string, error) {
@@ -178,7 +232,7 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 	prefix := id + "/"
 	status("Listing " + id)
 	defer status("")
-	var blobs []*container.BlobItem
+	stored := map[string]int64{}
 	pager := cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
 		Prefix:  new(prefix),
 		Include: container.ListBlobsInclude{Metadata: true},
@@ -190,70 +244,287 @@ func download(ctx context.Context, t target, id, outDir string) (string, error) 
 		}
 		for _, b := range page.Segment.BlobItems {
 			if !isDirectoryMarker(b) {
-				blobs = append(blobs, b)
+				stored[strings.TrimPrefix(*b.Name, prefix)] = deref(b.Properties.ContentLength)
 			}
 		}
 	}
-	status("")
-	if len(blobs) == 0 {
+	if len(stored) == 0 {
 		return "", fmt.Errorf("no dataset %s in %s", id, t.containerURL())
 	}
-	if !slices.ContainsFunc(blobs, func(b *container.BlobItem) bool { return *b.Name == prefix+crateName }) {
+	if _, ok := stored[crateName]; !ok {
 		return "", fmt.Errorf("dataset %s has no %s, so its upload never finished; nothing was downloaded", id, crateName)
+	}
+
+	status("Reading the crate of " + id)
+	crate, err := downloadBuffer(ctx, cc, prefix+crateName)
+	if err != nil {
+		return "", fmt.Errorf("downloading the crate of %s: %w", id, err)
+	}
+	status("")
+	files, err := crateFiles(crate)
+	if err != nil {
+		return "", fmt.Errorf("dataset %s: %w", id, err)
+	}
+	if problems := compareStored(files, stored); len(problems) > 0 {
+		return "", problemList(fmt.Sprintf("dataset %s does not match its crate, so nothing was downloaded:", id), problems)
+	}
+	if problems := localNameProblems(files, runtime.GOOS); len(problems) > 0 {
+		return "", problemList(fmt.Sprintf("dataset %s cannot be saved on this computer, so nothing was downloaded:", id), problems)
 	}
 
 	root, err := filepath.Abs(filepath.Join(outDir, id))
 	if err != nil {
 		return "", err
 	}
+	if _, err := os.Lstat(root); err == nil {
+		status("Checking the existing " + root)
+		problem, err := verifyDir(root, files, crate)
+		if err != nil {
+			return "", err
+		}
+		if problem != "" {
+			return "", fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
+		}
+		logf("%s is already here and matches its crate\n", root)
+		return root, nil
+	}
+	partial := root + ".partial"
+	if _, err := os.Lstat(partial); err == nil {
+		logf("Discarding %s, left by an earlier fetch that did not finish\n", partial)
+		if err := os.RemoveAll(partial); err != nil {
+			return "", err
+		}
+	}
 
 	var total int64
-	for _, b := range blobs {
-		total += deref(b.Properties.ContentLength)
+	hashed := 0
+	for _, f := range files {
+		total += f.Size
+		if f.SHA256 != "" {
+			hashed++
+		}
 	}
-	logf("Downloading %d files (%s) to %s\n", len(blobs), humanBytes(total), root)
+	logf("Downloading %d files (%s) to %s\n", len(files), humanBytes(total), root)
+	if hashed < len(files) {
+		logf("[verify] %d of %d files have no checksum in the crate (published before lbf recorded them); only their sizes are checked\n", len(files)-hashed, len(files))
+	}
 
-	if err := os.MkdirAll(root, 0o755); err != nil {
+	if err := os.MkdirAll(partial, 0o755); err != nil {
 		return "", err
 	}
+	dir, err := os.OpenRoot(partial)
+	if err != nil {
+		return "", err
+	}
+	started := time.Now()
+	jobs := make([]job, len(files))
+	for i, f := range files {
+		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
+			return downloadFile(ctx, cc, dir, prefix+f.Rel, f, progress)
+		}}
+	}
+	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
+	if err == nil {
+		err = dir.WriteFile(crateName, crate, 0o644)
+	}
+	dir.Close()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("interrupted; nothing was saved as %s, and the next fetch starts again", root)
+	}
+	if err != nil {
+		return "", err
+	}
+	if err := os.Rename(partial, root); err != nil {
+		return "", err
+	}
+	logDone(started, total)
+	return root, nil
+}
+
+func downloadFile(ctx context.Context, cc *container.Client, dir *os.Root, name string, f crateFile, progress func(int64)) error {
+	fh, err := createIn(dir, f.Rel)
+	if err != nil {
+		return err
+	}
+	_, err = cc.NewBlobClient(name).DownloadFile(ctx, fh, &blob.DownloadFileOptions{
+		BlockSize:   blockSize,
+		Concurrency: blockWorkers,
+		Progress:    progress,
+	})
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return fmt.Errorf("downloading %s: %w", name, err)
+	}
+	problem, err := checkFile(dir, f)
+	if err != nil {
+		return err
+	}
+	if problem != "" {
+		return fmt.Errorf("%s after download; fetch again, and if it recurs the stored copy differs from what was published", problem)
+	}
+	return nil
+}
+
+func downloadBuffer(ctx context.Context, cc *container.Client, name string) ([]byte, error) {
+	resp, err := cc.NewBlobClient(name).DownloadStream(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+type crateFile struct {
+	Rel    string
+	Size   int64
+	SHA256 string
+}
+
+// The crate, written last, is the record of what landed; fetch trusts it over the listing.
+func crateFiles(crate []byte) ([]crateFile, error) {
+	var doc struct {
+		Graph []map[string]any `json:"@graph"`
+	}
+	if err := json.Unmarshal(crate, &doc); err != nil {
+		return nil, fmt.Errorf("its %s is not valid JSON: %w", crateName, err)
+	}
+	entities := map[string]map[string]any{}
+	for _, e := range doc.Graph {
+		if id, ok := e["@id"].(string); ok {
+			entities[id] = e
+		}
+	}
+	var parts []any
+	switch hp := entities["./"]["hasPart"].(type) {
+	case []any:
+		parts = hp
+	case map[string]any:
+		parts = []any{hp}
+	}
+	files := make([]crateFile, 0, len(parts))
+	for _, p := range parts {
+		ref, _ := p.(map[string]any)
+		id, _ := ref["@id"].(string)
+		rel, err := url.PathUnescape(id)
+		if err != nil || rel == "" {
+			return nil, fmt.Errorf("its %s lists an unreadable file %q", crateName, id)
+		}
+		size, err := strconv.ParseInt(fmt.Sprint(entities[id]["contentSize"]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("its %s gives no size for %s", crateName, rel)
+		}
+		sum, _ := entities[id]["sha256"].(string)
+		files = append(files, crateFile{Rel: rel, Size: size, SHA256: sum})
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("its %s lists no files", crateName)
+	}
+	return files, nil
+}
+
+func compareStored(files []crateFile, stored map[string]int64) []string {
+	var problems []string
+	listed := map[string]bool{crateName: true}
+	for _, f := range files {
+		listed[f.Rel] = true
+		size, ok := stored[f.Rel]
+		switch {
+		case !ok:
+			problems = append(problems, f.Rel+": listed in the crate but not stored")
+		case size != f.Size:
+			problems = append(problems, fmt.Sprintf("%s: stored as %d bytes, but the crate records %d", f.Rel, size, f.Size))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(stored)) {
+		if !listed[name] {
+			problems = append(problems, name+": stored but not listed in the crate")
+		}
+	}
+	return problems
+}
+
+func localNameProblems(files []crateFile, goos string) []string {
+	var problems []string
+	seen := map[string]string{}
+	for _, f := range files {
+		if goos == "windows" {
+			if p := nameProblem(f.Rel); p != "" {
+				problems = append(problems, f.Rel+": "+p)
+			}
+		}
+		if goos == "windows" || goos == "darwin" {
+			folded := strings.ToLower(f.Rel)
+			if other, ok := seen[folded]; ok {
+				problems = append(problems, fmt.Sprintf("%s and %s differ only in case, so one would overwrite the other here", other, f.Rel))
+			}
+			seen[folded] = f.Rel
+		}
+	}
+	return problems
+}
+
+// Returns why root does not hold exactly these files and crate, or "" if it does.
+func verifyDir(root string, files []crateFile, crate []byte) (string, error) {
 	dir, err := os.OpenRoot(root)
 	if err != nil {
 		return "", err
 	}
 	defer dir.Close()
-
-	started := time.Now()
-	jobs := make([]job, len(blobs))
-	for i, b := range blobs {
-		rel := strings.TrimPrefix(*b.Name, prefix)
-		jobs[i] = job{name: rel, size: deref(b.Properties.ContentLength), run: func(ctx context.Context, progress func(int64)) error {
-			fh, err := createIn(dir, rel)
-			if err != nil {
-				return err
-			}
-			_, err = cc.NewBlobClient(*b.Name).DownloadFile(ctx, fh, &blob.DownloadFileOptions{
-				BlockSize:   blockSize,
-				Concurrency: blockWorkers,
-				Progress:    progress,
-			})
-			if cerr := fh.Close(); err == nil {
-				err = cerr
-			}
-			if err != nil {
-				return fmt.Errorf("downloading %s: %w", *b.Name, err)
-			}
-			return nil
-		}}
+	want := map[string]bool{crateName: true}
+	for _, f := range files {
+		want[f.Rel] = true
+		if problem, err := checkFile(dir, f); problem != "" || err != nil {
+			return problem, err
+		}
 	}
-	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
-	if ctx.Err() != nil {
-		return "", fmt.Errorf("interrupted; %s is incomplete", root)
+	local, err := dir.ReadFile(crateName)
+	if err != nil || !bytes.Equal(local, crate) {
+		return crateName + " differs", nil
+	}
+	extra := ""
+	err = fs.WalkDir(dir.FS(), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && !want[path] {
+			extra = path + " is not part of the dataset"
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return extra, err
+}
+
+// Returns why the local copy of f is wrong, or "" if it matches the crate.
+func checkFile(dir *os.Root, f crateFile) (string, error) {
+	fh, err := dir.Open(filepath.FromSlash(f.Rel))
+	if errors.Is(err, fs.ErrNotExist) {
+		return f.Rel + " is missing", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	logDone(started, total)
-	return root, nil
+	defer fh.Close()
+	info, err := fh.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Size() != f.Size {
+		return fmt.Sprintf("%s is %d bytes, not %d", f.Rel, info.Size(), f.Size), nil
+	}
+	if f.SHA256 == "" {
+		return "", nil
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, fh); err != nil {
+		return "", err
+	}
+	if hex.EncodeToString(h.Sum(nil)) != f.SHA256 {
+		return f.Rel + " has the wrong sha256", nil
+	}
+	return "", nil
 }
 
 type job struct {

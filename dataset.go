@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	petname "github.com/dustinkirkland/golang-petname"
 )
@@ -23,9 +25,11 @@ const licenseURL = "https://rightsstatements.org/vocab/InC/1.0/"
 var validID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type localFile struct {
-	Path string
-	Rel  string // slash-separated, relative to the upload root: <input name>/...
-	Size int64
+	Path    string
+	Rel     string // slash-separated, relative to the upload root: <input name>/...
+	Size    int64
+	ModTime time.Time
+	SHA256  string // set once uploaded
 }
 
 func excluded(name string) bool {
@@ -33,6 +37,7 @@ func excluded(name string) bool {
 }
 
 // Mirrors azcopy's layout: a directory lands as <id>/<dirname>/..., a file as <id>/<filename>.
+// Symlinks are followed, as cp -RL does.
 func datasetFiles(input string) (string, []localFile, error) {
 	abs, err := filepath.Abs(input)
 	if err != nil {
@@ -48,31 +53,120 @@ func datasetFiles(input string) (string, []localFile, error) {
 	}
 	base := filepath.Base(source)
 
-	if !info.IsDir() {
-		return source, []localFile{{source, base, info.Size()}}, nil
-	}
-
 	var files []localFile
-	err = filepath.WalkDir(source, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.Type().IsRegular() || excluded(d.Name()) {
-			return nil
-		}
-		fi, err := d.Info()
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		files = append(files, localFile{path, base + "/" + filepath.ToSlash(rel), fi.Size()})
-		return nil
-	})
+	var problems []string
+	if info.IsDir() {
+		walkDataset(source, base, nil, &files, &problems)
+	} else {
+		files = []localFile{{Path: source, Rel: base, Size: info.Size(), ModTime: info.ModTime()}}
+	}
 	slices.SortFunc(files, func(a, b localFile) int { return strings.Compare(a.Rel, b.Rel) })
-	return source, files, err
+	problems = append(problems, checkFiles(files)...)
+	if len(problems) > 0 {
+		return "", nil, problemList(fmt.Sprintf("%s cannot be published as it is, so nothing was uploaded:", input), problems)
+	}
+	return source, files, nil
+}
+
+func walkDataset(dir, rel string, ancestors []string, files *[]localFile, problems *[]string) {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err == nil && slices.Contains(ancestors, resolved) {
+		*problems = append(*problems, rel+": symlink loop back to a folder above it")
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		*problems = append(*problems, fmt.Sprintf("%s: cannot be read (%v)", rel, cause(err)))
+		return
+	}
+	ancestors = append(ancestors, resolved)
+	for _, e := range entries {
+		if excluded(e.Name()) {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		r := rel + "/" + e.Name()
+		info, err := os.Stat(path)
+		switch {
+		case err != nil && e.Type()&fs.ModeSymlink != 0:
+			dest, _ := os.Readlink(path)
+			*problems = append(*problems, fmt.Sprintf("%s: broken symlink to %s", r, dest))
+		case err != nil:
+			*problems = append(*problems, fmt.Sprintf("%s: %v", r, cause(err)))
+		case info.IsDir():
+			walkDataset(path, r, ancestors, files, problems)
+		case info.Mode().IsRegular():
+			*files = append(*files, localFile{Path: path, Rel: r, Size: info.Size(), ModTime: info.ModTime()})
+		default:
+			*problems = append(*problems, r+": not a regular file")
+		}
+	}
+}
+
+var windowsReserved = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$`)
+
+// Datasets never change once landed, so a name that cannot be fetched everywhere is refused up front.
+func checkFiles(files []localFile) []string {
+	var problems []string
+	seen := map[string]string{}
+	for _, f := range files {
+		if p := nameProblem(f.Rel); p != "" {
+			problems = append(problems, f.Rel+": "+p)
+		}
+		if f.Rel == crateName {
+			problems = append(problems, f.Rel+": would be replaced by the crate lbf writes; rename it or publish its folder")
+		}
+		folded := strings.ToLower(f.Rel)
+		if other, ok := seen[folded]; ok {
+			problems = append(problems, fmt.Sprintf("%s and %s differ only in case, so one would overwrite the other on macOS and Windows", other, f.Rel))
+		}
+		seen[folded] = f.Rel
+		fh, err := os.Open(f.Path)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: cannot be read (%v)", f.Rel, cause(err)))
+			continue
+		}
+		fh.Close()
+	}
+	return problems
+}
+
+func nameProblem(rel string) string {
+	for seg := range strings.SplitSeq(rel, "/") {
+		switch {
+		case strings.Contains(seg, `\`):
+			return `contains \, which Azure turns into a folder separator`
+		case strings.ContainsAny(seg, `:*?"<>|`):
+			return `contains one of : * ? " < > |, which Windows cannot store`
+		case strings.ContainsFunc(seg, unicode.IsControl):
+			return "contains a control character"
+		case strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " "):
+			return fmt.Sprintf("%q ends in a dot or space, which Windows drops", seg)
+		case windowsReserved.MatchString(seg):
+			return fmt.Sprintf("%q is a reserved name on Windows", seg)
+		}
+	}
+	return ""
+}
+
+func problemList(heading string, problems []string) error {
+	const shown = 10
+	var b strings.Builder
+	b.WriteString(heading)
+	for _, p := range problems[:min(len(problems), shown)] {
+		b.WriteString("\n  " + p)
+	}
+	if len(problems) > shown {
+		fmt.Fprintf(&b, "\n  ...and %d more", len(problems)-shown)
+	}
+	return errors.New(b.String())
+}
+
+func cause(err error) error {
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return pe.Err
+	}
+	return err
 }
 
 func newID() string {
@@ -178,7 +272,11 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 	}
 
 	for _, f := range files {
-		graph = append(graph, entity{"@id": fileID(f.Rel), "@type": "File", "contentSize": fmt.Sprint(f.Size)})
+		file := entity{"@id": fileID(f.Rel), "@type": "File", "contentSize": fmt.Sprint(f.Size)}
+		if f.SHA256 != "" {
+			file["sha256"] = f.SHA256
+		}
+		graph = append(graph, file)
 	}
 
 	return json.MarshalIndent(map[string]any{
