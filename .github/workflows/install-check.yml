@@ -3,6 +3,8 @@ name: install-check
 on:
   workflow_dispatch:
 
+permissions: {}
+
 jobs:
   windows:
     strategy:
