@@ -4,12 +4,14 @@ import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -19,6 +21,8 @@ import (
 )
 
 const processRunCrate = "https://w3id.org/ro/wfrun/process/0.5"
+
+var profileVersion = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+)*$`)
 
 var lbfProperties = []string{"subscription_name", "subscription_id", "source_path"}
 
@@ -93,10 +97,13 @@ func decodeStrict(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err = dec.Decode(v); err == nil && dec.More() {
-		err = errors.New("unexpected content after the JSON object")
+	err = jsonv2.Unmarshal(bytes.TrimPrefix(raw, []byte("\uFEFF")), v, jsonv2.RejectUnknownMembers(true))
+	if serr, ok := errors.AsType[*jsonv2.SemanticError](err); ok && serr.Err == jsonv2.ErrUnknownName {
+		field := serr.JSONPointer.LastToken()
+		if at := serr.JSONPointer.Parent(); at != "" {
+			return fmt.Errorf("unknown field %q in %s", field, at)
+		}
+		return fmt.Errorf("unknown field %q", field)
 	}
 	return err
 }
@@ -123,9 +130,10 @@ func (p provenance) check() error {
 	if (p.DerivedFrom == "") != (len(p.Instruments) == 0) {
 		return errors.New("derived_from and instruments are given together or not at all")
 	}
-	if p.DerivedFrom != "" && !validID.MatchString(p.DerivedFrom) {
-		return fmt.Errorf("derived_from %q is not a dataset ID", p.DerivedFrom)
+	if p.DerivedFrom != "" && !mintedID.MatchString(p.DerivedFrom) {
+		return fmt.Errorf("derived_from %q is not a dataset ID such as 20261001-fancy-dassie-eadb", p.DerivedFrom)
 	}
+	byURL := map[string]int{}
 	for i, in := range p.Instruments {
 		if in.Name == "" || in.Version == "" || in.URL == "" {
 			return fmt.Errorf("instruments[%d] needs a name, version and url", i)
@@ -133,6 +141,11 @@ func (p provenance) check() error {
 		if u, err := url.Parse(in.URL); err != nil || !u.IsAbs() {
 			return fmt.Errorf("instruments[%d] url %q is not an absolute URL", i, in.URL)
 		}
+		if j, ok := byURL[in.URL]; ok && p.Instruments[j] != in {
+			return fmt.Errorf("instruments[%d] (%s %s) and instruments[%d] (%s %s) share the url %s, which the crate uses to tell tools apart; give each its own url",
+				j, p.Instruments[j].Name, p.Instruments[j].Version, i, in.Name, in.Version, in.URL)
+		}
+		byURL[in.URL] = i
 	}
 	for _, k := range lbfProperties {
 		if _, ok := p.Properties[k]; ok {
@@ -166,6 +179,7 @@ func loadProfile(dir string) (*profile, error) {
 	}
 	docs := map[string][]byte{bronzeID: bronzeProfileJSON}
 	parents := map[string]string{}
+	paths := map[string]string{bronzeID: bronzeID}
 	targetID := bronzeID
 
 	if dir != "" {
@@ -177,9 +191,15 @@ func loadProfile(dir string) (*profile, error) {
 			target = dir
 		}
 		// Siblings are profiles/<name>/profile.json or, versioned, profiles/<name>/<version>/profile.json.
-		parent := filepath.Dir(filepath.Dir(target))
-		siblings, _ := filepath.Glob(filepath.Join(parent, "*", "profile.json"))
-		versioned, _ := filepath.Glob(filepath.Join(filepath.Dir(parent), "*", "*", "profile.json"))
+		root := filepath.Dir(filepath.Dir(target))
+		if profileVersion.MatchString(filepath.Base(filepath.Dir(target))) {
+			root = filepath.Dir(root)
+		}
+		siblings, _ := filepath.Glob(filepath.Join(root, "*", "profile.json"))
+		nested, _ := filepath.Glob(filepath.Join(root, "*", "*", "profile.json"))
+		versioned := slices.DeleteFunc(nested, func(path string) bool {
+			return !profileVersion.MatchString(filepath.Base(filepath.Dir(path)))
+		})
 		for _, path := range slices.Concat(siblings, versioned, []string{target}) {
 			var id, ref string
 			raw, err := os.ReadFile(path)
@@ -195,7 +215,7 @@ func loadProfile(dir string) (*profile, error) {
 			if id == bronzeID {
 				return nil, fmt.Errorf("%s: $id %s is lbf's bronze profile, which only lbf defines", path, id)
 			}
-			docs[id], parents[id] = raw, ref
+			docs[id], parents[id], paths[id] = raw, ref, path
 			if path == target {
 				targetID = id
 			}
@@ -213,17 +233,17 @@ func loadProfile(dir string) (*profile, error) {
 	for id, raw := range docs {
 		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", id, err)
+			return nil, fmt.Errorf("%s: %w", paths[id], err)
 		}
 		if err := c.AddResource(id, doc); err != nil {
-			return nil, fmt.Errorf("%s: %w", id, err)
+			return nil, fmt.Errorf("%s: %w", paths[id], err)
 		}
 	}
 	p := &profile{ID: targetID}
 	for _, id := range ids {
 		sch, err := c.Compile(id)
 		if err != nil {
-			return nil, fmt.Errorf("profile %s: %w", id, err)
+			return nil, fmt.Errorf("profile %s (%s): %w", id, paths[id], err)
 		}
 		p.rules = append(p.rules, rule{id, sch})
 	}
@@ -288,6 +308,9 @@ func schemaHead(raw []byte) (id, parent string, err error) {
 	}
 	if head.ID == "" {
 		return "", "", errors.New("no $id; it is recorded as the crate's conformsTo")
+	}
+	if u, err := url.Parse(head.ID); err != nil || u.Scheme == "" || u.Host == "" || u.Fragment != "" {
+		return "", "", fmt.Errorf("$id %q is not an absolute URL such as https://example.org/profiles/name/0.1.0; it is recorded as the crate's conformsTo", head.ID)
 	}
 	return head.ID, head.Ref, nil
 }

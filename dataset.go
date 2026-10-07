@@ -16,8 +16,11 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	petname "github.com/dustinkirkland/golang-petname"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const licenseURL = "https://rightsstatements.org/vocab/InC/1.0/"
@@ -40,28 +43,36 @@ func excluded(name string) bool {
 }
 
 // Mirrors azcopy's layout: a directory lands as <id>/<dirname>/..., a file as <id>/<filename>.
-// Symlinks are followed, as cp -RL does.
+// Symlinks are followed, as cp -RL does, but the dataset takes the name it was given by.
 func datasetFiles(input string) (string, []localFile, error) {
 	abs, err := filepath.Abs(input)
 	if err != nil {
 		return "", nil, err
 	}
-	source, err := filepath.EvalSymlinks(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", nil, fmt.Errorf("input %s: %w", input, err)
 	}
-	info, err := os.Stat(source)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", nil, fmt.Errorf("input %s: %w", input, err)
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
 		return "", nil, err
 	}
-	base := filepath.Base(source)
+	base := filepath.Base(abs)
+	source := filepath.Join(parent, base)
 
 	var files []localFile
 	var problems []string
-	if info.IsDir() {
-		walkDataset(source, base, nil, &files, &problems)
-	} else {
-		files = []localFile{{Path: source, Rel: base, Size: info.Size(), ModTime: info.ModTime()}}
+	switch {
+	case info.IsDir():
+		walkDataset(resolved, base, nil, &files, &problems)
+	case info.Mode().IsRegular():
+		files = []localFile{{Path: resolved, Rel: base, Size: info.Size(), ModTime: info.ModTime()}}
+	default:
+		problems = append(problems, base+": not a regular file")
 	}
 	slices.SortFunc(files, func(a, b localFile) int { return strings.Compare(a.Rel, b.Rel) })
 	problems = append(problems, checkFiles(files)...)
@@ -71,9 +82,10 @@ func datasetFiles(input string) (string, []localFile, error) {
 	return source, files, nil
 }
 
-func walkDataset(dir, rel string, ancestors []string, files *[]localFile, problems *[]string) {
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err == nil && slices.Contains(ancestors, resolved) {
+// EvalSymlinks does not follow Windows junctions, so loops are found by file identity.
+func walkDataset(dir, rel string, ancestors []os.FileInfo, files *[]localFile, problems *[]string) {
+	self, err := os.Stat(dir)
+	if err == nil && slices.ContainsFunc(ancestors, func(a os.FileInfo) bool { return os.SameFile(a, self) }) {
 		*problems = append(*problems, rel+": symlink loop back to a folder above it")
 		return
 	}
@@ -82,11 +94,8 @@ func walkDataset(dir, rel string, ancestors []string, files *[]localFile, proble
 		*problems = append(*problems, fmt.Sprintf("%s: cannot be read (%v)", rel, cause(err)))
 		return
 	}
-	ancestors = append(ancestors, resolved)
+	ancestors = append(ancestors, self)
 	for _, e := range entries {
-		if excluded(e.Name()) {
-			continue
-		}
 		path := filepath.Join(dir, e.Name())
 		r := rel + "/" + e.Name()
 		info, err := os.Stat(path)
@@ -98,6 +107,7 @@ func walkDataset(dir, rel string, ancestors []string, files *[]localFile, proble
 			*problems = append(*problems, fmt.Sprintf("%s: %v", r, cause(err)))
 		case info.IsDir():
 			walkDataset(path, r, ancestors, files, problems)
+		case excluded(e.Name()):
 		case info.Mode().IsRegular():
 			*files = append(*files, localFile{Path: path, Rel: r, Size: info.Size(), ModTime: info.ModTime()})
 		default:
@@ -106,24 +116,21 @@ func walkDataset(dir, rel string, ancestors []string, files *[]localFile, proble
 	}
 }
 
-var windowsReserved = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$`)
+var windowsReserved = regexp.MustCompile(`(?i)^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$)$`)
 
 // Datasets never change once landed, so a name that cannot be fetched everywhere is refused up front.
 func checkFiles(files []localFile) []string {
 	var problems []string
-	seen := map[string]string{}
-	for _, f := range files {
-		if p := nameProblem(f.Rel); p != "" {
+	if len(files) > 0 && clashesWithCrate(files[0].Rel, true) {
+		top, _, _ := strings.Cut(files[0].Rel, "/")
+		problems = append(problems, top+": would be replaced by the crate lbf writes; rename it or publish its folder")
+	}
+	rels := make([]string, len(files))
+	for i, f := range files {
+		rels[i] = f.Rel
+		if p := cmp.Or(encodingProblem(f.Rel), nameProblem(f.Rel)); p != "" {
 			problems = append(problems, f.Rel+": "+p)
 		}
-		if f.Rel == crateName {
-			problems = append(problems, f.Rel+": would be replaced by the crate lbf writes; rename it or publish its folder")
-		}
-		folded := strings.ToLower(f.Rel)
-		if other, ok := seen[folded]; ok {
-			problems = append(problems, fmt.Sprintf("%s and %s differ only in case, so one would overwrite the other on macOS and Windows", other, f.Rel))
-		}
-		seen[folded] = f.Rel
 		fh, err := os.Open(f.Path)
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s: cannot be read (%v)", f.Rel, cause(err)))
@@ -131,11 +138,40 @@ func checkFiles(files []localFile) []string {
 		}
 		fh.Close()
 	}
+	return append(problems, sameNameProblems(rels, "macOS and Windows")...)
+}
+
+// Azure's limits on a blob name, which is <id>/<rel>.
+func blobNameProblems(id string, files []localFile) []string {
+	var problems []string
+	for _, f := range files {
+		name := id + "/" + f.Rel
+		switch {
+		case len(name) > 1024:
+			problems = append(problems, fmt.Sprintf("%s: too long for Azure, which allows 1024 characters including the dataset ID (this is %d)", f.Rel, len(name)))
+		case strings.Count(name, "/")+1 > 254:
+			problems = append(problems, fmt.Sprintf("%s: nested too deeply for Azure, which allows 254 path segments including the dataset ID", f.Rel))
+		}
+	}
 	return problems
+}
+
+// Linux allows 255 bytes per name, and Azure blob names must be UTF-8.
+func encodingProblem(rel string) string {
+	if !utf8.ValidString(rel) {
+		return "is not valid UTF-8, which Azure blob names must be"
+	}
+	for seg := range strings.SplitSeq(rel, "/") {
+		if len(seg) > 255 {
+			return fmt.Sprintf("%q is %d bytes long, but Linux allows at most 255 per name", seg, len(seg))
+		}
+	}
+	return ""
 }
 
 func nameProblem(rel string) string {
 	for seg := range strings.SplitSeq(rel, "/") {
+		stem, _, _ := strings.Cut(seg, ".")
 		switch {
 		case strings.Contains(seg, `\`):
 			return `contains \, which Azure turns into a folder separator`
@@ -145,11 +181,55 @@ func nameProblem(rel string) string {
 			return "contains a control character"
 		case strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " "):
 			return fmt.Sprintf("%q ends in a dot or space, which Windows drops", seg)
-		case windowsReserved.MatchString(seg):
+		case windowsReserved.MatchString(strings.TrimRight(stem, " ")):
 			return fmt.Sprintf("%q is a reserved name on Windows", seg)
 		}
 	}
 	return ""
+}
+
+// The name macOS and Windows store a path under: one Unicode form, and case folded.
+func nameKey(rel string) string {
+	return cases.Fold().String(norm.NFC.String(rel))
+}
+
+func clashesWithCrate(rel string, fold bool) bool {
+	top, _, _ := strings.Cut(rel, "/")
+	return top == crateName || fold && nameKey(top) == nameKey(crateName)
+}
+
+// Every file and folder must keep its own name where names are case and normalisation insensitive.
+func sameNameProblems(rels []string, where string) []string {
+	var problems []string
+	seen := map[string]string{}
+	reported := map[string]bool{}
+	for _, rel := range rels {
+		for i := 0; i <= len(rel); i++ {
+			if i < len(rel) && rel[i] != '/' {
+				continue
+			}
+			path := rel[:i]
+			key := nameKey(path)
+			other, ok := seen[key]
+			if !ok {
+				seen[key] = path
+				continue
+			}
+			if other == path {
+				continue
+			}
+			how := "differ only in case"
+			if norm.NFC.String(other) == norm.NFC.String(path) {
+				how = "are the same name in different Unicode forms"
+			}
+			if p := fmt.Sprintf("%s and %s %s, so %s cannot hold both", other, path, how, where); !reported[p] {
+				reported[p] = true
+				problems = append(problems, p)
+			}
+			break
+		}
+	}
+	return problems
 }
 
 func problemList(heading string, problems []string) error {
