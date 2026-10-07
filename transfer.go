@@ -147,7 +147,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 		return err
 	}
 	if _, ok := stored[crateName]; ok {
-		return confirmPublished(ctx, cc, pub, conformsTo)
+		return confirmPublished(ctx, cc, pub, conformsTo, stored)
 	}
 
 	if len(stored) > 0 {
@@ -178,7 +178,10 @@ func upload(ctx context.Context, t target, pub publication) error {
 		err = uploadCrate(ctx, cc, t, pub, published, conformsTo)
 	}
 	if ctx.Err() != nil {
-		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
+		return interrupted(context.WithoutCancel(ctx), cc, id)
+	}
+	if errors.Is(err, errAnotherCrate) {
+		return fmt.Errorf("%s: %w. Run the same publish with --id %s to check it records these files", id, err, id)
 	}
 	if _, ok := errors.AsType[idTaken](err); ok {
 		return idTaken{fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Publish without --id, or with a new ID from 'lbf new-id'", err, id)}
@@ -191,6 +194,21 @@ func upload(ctx context.Context, t target, pub publication) error {
 	}
 	logDone(started, total)
 	return nil
+}
+
+// The crate can land even though its response never arrives.
+func interrupted(ctx context.Context, cc *container.Client, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := cc.NewBlobClient(id+"/"+crateName).GetProperties(ctx, nil)
+	switch {
+	case err == nil:
+		return fmt.Errorf("interrupted, but %s was published; run the same publish with --id %s to check what landed", id, id)
+	case bloberror.HasCode(err, bloberror.BlobNotFound):
+		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
+	default:
+		return fmt.Errorf("interrupted before lbf could tell whether %s was published; run the same publish with --id %s to finish or check it", id, id)
+	}
 }
 
 // The ID holds other files or another crate, so retrying cannot help; lbf exits with exitIDTaken.
@@ -221,7 +239,7 @@ func listStored(ctx context.Context, cc *container.Client, id string) (map[strin
 }
 
 // A rerun of a publish that already finished succeeds only if it would have published the same thing.
-func confirmPublished(ctx context.Context, cc *container.Client, pub publication, conformsTo []string) error {
+func confirmPublished(ctx context.Context, cc *container.Client, pub publication, conformsTo []string, stored map[string]crateFile) error {
 	id := pub.ID
 	status("Reading the crate of " + id)
 	crate, err := downloadBuffer(ctx, cc, id+"/"+crateName)
@@ -232,6 +250,9 @@ func confirmPublished(ctx context.Context, cc *container.Client, pub publication
 	files, err := crateFiles(crate)
 	if err != nil {
 		return fmt.Errorf("dataset %s: %w", id, err)
+	}
+	if problems := landedProblems(files, stored); len(problems) > 0 {
+		return idTaken{problemList(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
 	}
 	stated, statedConformsTo, err := crateProvenance(crate)
 	if err != nil {
@@ -390,12 +411,29 @@ func uploadFile(ctx context.Context, cc *container.Client, name string, f *local
 		}},
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		return idTaken{fmt.Errorf("%s changed while this publish was writing it; is another publish of the same ID running?", name)}
+		err = storedAs(ctx, bb, f.Size, sum)
+		if errors.Is(err, errStoredDiffers) {
+			return idTaken{fmt.Errorf("%s changed while this publish was writing it; is another publish of the same ID running?", name)}
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("uploading %s: %w", f.Rel, err)
 	}
 	f.SHA256 = sum
+	return nil
+}
+
+var errStoredDiffers = errors.New("a different blob is stored under this name")
+
+// A commit whose response was lost is retried and refused, as is one that an earlier attempt sending the same bytes beat.
+func storedAs(ctx context.Context, bb *blockblob.Client, size int64, sum string) error {
+	props, err := bb.GetProperties(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if deref(props.ContentLength) != size || metadata(props.Metadata, "sha256") != sum {
+		return errStoredDiffers
+	}
 	return nil
 }
 
@@ -409,31 +447,45 @@ func verifyLanded(ctx context.Context, cc *container.Client, pub publication) er
 	for i, f := range pub.Files {
 		files[i] = crateFile{Rel: f.Rel, Size: f.Size, SHA256: f.SHA256}
 	}
-	problems := compareStored(files, stored)
-	for _, f := range files {
-		if s, ok := stored[f.Rel]; ok && s.SHA256 != f.SHA256 {
-			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %s", f.Rel, s.SHA256, f.SHA256))
-		}
-	}
-	if len(problems) > 0 {
+	if problems := landedProblems(files, stored); len(problems) > 0 {
 		return idTaken{problemList(fmt.Sprintf("%s was published, but something else changed its files meanwhile, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", pub.ID), problems)}
 	}
 	return nil
 }
+
+func landedProblems(files []crateFile, stored map[string]crateFile) []string {
+	problems := compareStored(files, stored)
+	for _, f := range files {
+		if s, ok := stored[f.Rel]; ok && s.SHA256 != f.SHA256 {
+			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %q", f.Rel, s.SHA256, f.SHA256))
+		}
+	}
+	return problems
+}
+
+var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")
 
 func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time, conformsTo []string) error {
 	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, conformsTo, published)
 	if err != nil {
 		return err
 	}
-	_, err = cc.NewBlockBlobClient(pub.ID+"/"+crateName).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
+	name := pub.ID + "/" + crateName
+	_, err = cc.NewBlockBlobClient(name).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
 		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: new("application/json")},
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 			IfNoneMatch: to.Ptr(azcore.ETagAny),
 		}},
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		return fmt.Errorf("%s/%s already exists in the container; refusing to overwrite", pub.ID, crateName)
+		stored, err := downloadBuffer(ctx, cc, name)
+		if err != nil {
+			return fmt.Errorf("reading the crate already stored as %s: %w", name, err)
+		}
+		if !bytes.Equal(stored, crate) {
+			return errAnotherCrate
+		}
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("uploading %s: %w", crateName, err)
@@ -457,6 +509,8 @@ func (c *countingReader) Read(p []byte) (int, error) {
 type fetched struct {
 	path, dataPath string
 }
+
+var fetchHook = func(ctx context.Context, stage string) {}
 
 func download(ctx context.Context, t target, id, outDir string) (fetched, error) {
 	cc, err := t.client()
@@ -501,22 +555,11 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	}
 	if _, err := os.Lstat(root); err == nil {
 		status("Checking the existing " + root)
-		problem, err := verifyDir(root, files, crate)
-		if err != nil {
+		if err := verifyExisting(root, id, files, crate); err != nil {
 			return fetched{}, err
-		}
-		if problem != "" {
-			return fetched{}, fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
 		}
 		logf("%s is already here and matches its crate\n", root)
 		return fetched{root, dataDir(root, files)}, nil
-	}
-	partial := root + ".partial"
-	if _, err := os.Lstat(partial); err == nil {
-		logf("Discarding %s, left by an earlier fetch that did not finish\n", partial)
-		if err := os.RemoveAll(partial); err != nil {
-			return fetched{}, err
-		}
 	}
 
 	var total int64
@@ -532,9 +575,16 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 		logf("[verify] %d of %d files have no checksum in the crate (published before lbf recorded them); only their sizes are checked\n", len(files)-hashed, len(files))
 	}
 
-	if err := os.MkdirAll(partial, 0o755); err != nil {
+	partial, err := makePartial(root)
+	if err != nil {
 		return fetched{}, err
 	}
+	renamed := false
+	defer func() {
+		if !renamed {
+			os.RemoveAll(partial)
+		}
+	}()
 	dir, err := os.OpenRoot(partial)
 	if err != nil {
 		return fetched{}, err
@@ -543,7 +593,11 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	jobs := make([]job, len(files))
 	for i, f := range files {
 		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
-			return downloadFile(ctx, cc, dir, prefix+f.Rel, f, progress)
+			if err := downloadFile(ctx, cc, dir, prefix+f.Rel, f, progress); err != nil {
+				return err
+			}
+			fetchHook(ctx, "downloaded")
+			return nil
 		}}
 	}
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
@@ -557,11 +611,42 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	if err != nil {
 		return fetched{}, err
 	}
-	if err := os.Rename(partial, root); err != nil {
+	fetchHook(ctx, "renaming")
+	if err := os.Rename(partial, root); err == nil {
+		renamed = true
+	} else if _, serr := os.Lstat(root); serr != nil {
 		return fetched{}, err
+	} else if err := verifyExisting(root, id, files, crate); err != nil {
+		return fetched{}, err
+	} else {
+		logf("%s was saved meanwhile by another fetch, and matches its crate\n", root)
 	}
 	logDone(started, total)
 	return fetched{root, dataDir(root, files)}, nil
+}
+
+// Each fetch downloads into a folder of its own, so several fetches of one dataset into one place never touch each other's.
+func makePartial(root string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return "", err
+	}
+	for {
+		partial := root + ".partial-" + strings.ToLower(rand.Text()[:8])
+		if err := os.Mkdir(partial, 0o755); !errors.Is(err, fs.ErrExist) {
+			return partial, err
+		}
+	}
+}
+
+func verifyExisting(root, id string, files []crateFile, crate []byte) error {
+	problem, err := verifyDir(root, files, crate)
+	if err != nil {
+		return err
+	}
+	if problem != "" {
+		return fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
+	}
+	return nil
 }
 
 // The folder that was published, which every file sits under; root itself if they do not share one.
