@@ -300,7 +300,7 @@ func compareRecorded(ctx context.Context, files []localFile, recorded map[string
 		case r.Size != f.Size:
 			problems = append(problems, fmt.Sprintf("%s: %d bytes here, %d stored", f.Rel, f.Size, r.Size))
 		case r.SHA256 == "":
-			problems = append(problems, f.Rel+": stored without a sha256 to compare with")
+			problems = append(problems, f.Rel+": stored without a sha256 (published before lbf recorded them), so it cannot be confirmed to match")
 		default:
 			total += f.Size
 			jobs = append(jobs, job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
@@ -629,6 +629,9 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 func makePartial(root string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
 		return "", err
+	}
+	if left, _ := filepath.Glob(root + ".partial-*"); len(left) > 0 {
+		logf("%d unfinished download folders of %s are here (%s); fetches that were killed leave them, and they can be deleted once no fetch of it is running\n", len(left), filepath.Base(root), strings.Join(left, ", "))
 	}
 	for {
 		partial := root + ".partial-" + strings.ToLower(rand.Text()[:8])

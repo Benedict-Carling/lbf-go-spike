@@ -89,7 +89,7 @@ func readSASEnv(path, mode, expectContainer string) (target, error) {
 		return target{}, fmt.Errorf("%s grants %q and cannot be used to upload; re-mint with --mode upload", path, values["AZURE_SAS_PERMISSIONS"])
 	}
 	if values["AZURE_CONTAINER"] != expectContainer {
-		return target{}, fmt.Errorf("%s targets container %q, but this run asked for %q", path, values["AZURE_CONTAINER"], expectContainer)
+		return target{}, fmt.Errorf("%s was minted for container %q, not %q; pass --container %s, or mint a file for %s", path, values["AZURE_CONTAINER"], expectContainer, values["AZURE_CONTAINER"], expectContainer)
 	}
 
 	logf("[sas] using %s -> %s/%s (permissions=%s, expires %s)\n",
