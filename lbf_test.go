@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -857,6 +858,17 @@ func TestNewerVersion(t *testing.T) {
 		{"v0.1.4", "v0.1.5", false},
 		{"v0.1.6", "dev", false},
 		{"", "v0.1.5", false},
+		{"v0.2.0", "v0.2.0-rc1", true},
+		{"v0.2.1", "v0.2.0-rc1", true},
+		{"v0.1.9", "v0.2.0-rc1", false},
+		{"v0.2.0-rc1", "v0.2.0", false},
+		{"v0.2.0-rc1", "v0.1.9", false},
+		{"v0.2.0-rc2", "v0.2.0-rc1", false},
+		{"v0.1.6x", "v0.1.5", false},
+		{"v0.1.6", "v0.1.5x", false},
+		{"v0.1", "v0.0.9", false},
+		{"v0.1.6.1", "v0.1.5", false},
+		{"v0.1.-6", "v0.1.5", false},
 	} {
 		if got := newerVersion(c.latest, c.current); got != c.want {
 			t.Errorf("newerVersion(%q, %q) = %v", c.latest, c.current, got)
@@ -980,5 +992,61 @@ func TestUpgradeIntoReadOnlyFolderSaysWhatToDo(t *testing.T) {
 	_, _, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe)
 	if err == nil || !strings.Contains(err.Error(), "README") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestUpgradeKeepsPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs Unix permissions")
+	}
+	bin := []byte("new lbf")
+	sum := sha256.Sum256(bin)
+	srv := fakeReleases(t, "v0.2.0", bin, hex.EncodeToString(sum[:]))
+	exe := filepath.Join(t.TempDir(), "lbf")
+	writeFile(t, exe, "old lbf")
+	os.Chmod(exe, 0o751)
+
+	if _, _, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(exe); err != nil || info.Mode().Perm() != 0o751 {
+		t.Fatalf("mode %v, err %v; want -rwxr-x--x", info.Mode(), err)
+	}
+}
+
+func TestAssetNameIsForTheNativeArch(t *testing.T) {
+	want := runtime.GOARCH
+	switch runtime.GOOS {
+	case "darwin":
+		if out, _ := exec.Command("sysctl", "-n", "hw.optional.arm64").Output(); strings.TrimSpace(string(out)) == "1" {
+			want = "arm64"
+		}
+	case "windows":
+		out, _ := exec.Command("reg", "query", `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`, "/v", "PROCESSOR_ARCHITECTURE").Output()
+		if strings.Contains(string(out), "ARM64") {
+			want = "arm64"
+		}
+	}
+	if got := assetName(); !strings.HasPrefix(got, "lbf-"+runtime.GOOS+"-"+want) {
+		t.Fatalf("assetName() = %q, want the %s build", got, want)
+	}
+}
+
+func TestStartupRemovesTheExeAnUpgradeSetAside(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only a Windows upgrade sets the old exe aside")
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, exe+".old", "old lbf")
+
+	startUpdateCheck(context.Background(), []string{"upgrade"})()
+	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
+		t.Fatalf("%s.old is still there: %v", exe, err)
 	}
 }
