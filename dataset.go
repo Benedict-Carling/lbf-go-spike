@@ -40,28 +40,36 @@ func excluded(name string) bool {
 }
 
 // Mirrors azcopy's layout: a directory lands as <id>/<dirname>/..., a file as <id>/<filename>.
-// Symlinks are followed, as cp -RL does.
+// Symlinks are followed, as cp -RL does, but the dataset takes the name it was given by.
 func datasetFiles(input string) (string, []localFile, error) {
 	abs, err := filepath.Abs(input)
 	if err != nil {
 		return "", nil, err
 	}
-	source, err := filepath.EvalSymlinks(abs)
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return "", nil, fmt.Errorf("input %s: %w", input, err)
 	}
-	info, err := os.Stat(source)
+	parent, err := filepath.EvalSymlinks(filepath.Dir(abs))
+	if err != nil {
+		return "", nil, fmt.Errorf("input %s: %w", input, err)
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
 		return "", nil, err
 	}
-	base := filepath.Base(source)
+	base := filepath.Base(abs)
+	source := filepath.Join(parent, base)
 
 	var files []localFile
 	var problems []string
-	if info.IsDir() {
-		walkDataset(source, base, nil, &files, &problems)
-	} else {
-		files = []localFile{{Path: source, Rel: base, Size: info.Size(), ModTime: info.ModTime()}}
+	switch {
+	case info.IsDir():
+		walkDataset(resolved, base, nil, &files, &problems)
+	case info.Mode().IsRegular():
+		files = []localFile{{Path: resolved, Rel: base, Size: info.Size(), ModTime: info.ModTime()}}
+	default:
+		problems = append(problems, base+": not a regular file")
 	}
 	slices.SortFunc(files, func(a, b localFile) int { return strings.Compare(a.Rel, b.Rel) })
 	problems = append(problems, checkFiles(files)...)
@@ -71,9 +79,10 @@ func datasetFiles(input string) (string, []localFile, error) {
 	return source, files, nil
 }
 
-func walkDataset(dir, rel string, ancestors []string, files *[]localFile, problems *[]string) {
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err == nil && slices.Contains(ancestors, resolved) {
+// EvalSymlinks does not follow Windows junctions, so loops are found by file identity.
+func walkDataset(dir, rel string, ancestors []os.FileInfo, files *[]localFile, problems *[]string) {
+	self, err := os.Stat(dir)
+	if err == nil && slices.ContainsFunc(ancestors, func(a os.FileInfo) bool { return os.SameFile(a, self) }) {
 		*problems = append(*problems, rel+": symlink loop back to a folder above it")
 		return
 	}
@@ -82,11 +91,8 @@ func walkDataset(dir, rel string, ancestors []string, files *[]localFile, proble
 		*problems = append(*problems, fmt.Sprintf("%s: cannot be read (%v)", rel, cause(err)))
 		return
 	}
-	ancestors = append(ancestors, resolved)
+	ancestors = append(ancestors, self)
 	for _, e := range entries {
-		if excluded(e.Name()) {
-			continue
-		}
 		path := filepath.Join(dir, e.Name())
 		r := rel + "/" + e.Name()
 		info, err := os.Stat(path)
@@ -98,6 +104,7 @@ func walkDataset(dir, rel string, ancestors []string, files *[]localFile, proble
 			*problems = append(*problems, fmt.Sprintf("%s: %v", r, cause(err)))
 		case info.IsDir():
 			walkDataset(path, r, ancestors, files, problems)
+		case excluded(e.Name()):
 		case info.Mode().IsRegular():
 			*files = append(*files, localFile{Path: path, Rel: r, Size: info.Size(), ModTime: info.ModTime()})
 		default:
