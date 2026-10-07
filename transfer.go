@@ -97,7 +97,7 @@ func (p publication) crate(t target) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, conformsTo, published)
+	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, conformsTo, p.Profile.titles(), published)
 }
 
 func (p publication) view(t target, published time.Time, conformsTo []string) map[string]any {
@@ -466,7 +466,7 @@ func landedProblems(files []crateFile, stored map[string]crateFile) []string {
 var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")
 
 func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time, conformsTo []string) error {
-	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, conformsTo, published)
+	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, conformsTo, pub.Profile.titles(), published)
 	if err != nil {
 		return err
 	}

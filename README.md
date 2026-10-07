@@ -64,6 +64,7 @@ lbf login                          # optional: browser sign-in to Imperial, reme
 lbf publish <path>                 # land in bronze; prints the new dataset ID (alias: upload)
 lbf fetch <id> [--out DIR]         # alias: download
 lbf new-id                         # an ID to publish under later, with publish --id
+lbf browse                         # search every dataset's crate in your browser
 lbf check --mode upload            # proves the credential works, before a long job
 lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
 lbf logout                         # signs out of lbf and deletes its tokens; says if az login still signs you in
@@ -129,6 +130,15 @@ the storage account (default `tag=storage`, production; the test account is
 `tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and
 otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
 uses a pre-minted credential instead of `az login`.
+
+## Browsing datasets
+
+`lbf browse` lists every container in the storage account (or only `--container a,b`), reads each
+dataset's `ro-crate-metadata.json`, and opens a page on this computer to search, filter and look
+through them, with each dataset's provenance, files and fetch command. It reads crates only, never
+data, using your own sign-in, so you see what you can read. Crates never change once published, so
+each is downloaded once and cached under the user cache directory (`lbf/crates`); a dataset without
+a crate is not shown. Listing containers needs read access to the whole account. Ctrl-C stops it.
 
 ## Resuming a publish
 

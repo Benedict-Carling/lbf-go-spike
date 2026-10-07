@@ -291,7 +291,7 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		Properties:  map[string]string{"sample_id": "S1"},
 	}
 	conformsTo := []string{processRunCrate, "https://example.org/p"}
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{SubscriptionName: "sub"}, prov, conformsTo, time.Now())
+	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{SubscriptionName: "sub"}, prov, conformsTo, nil, time.Now())
 	must(t, err)
 	got, gotConformsTo, err := crateProvenance(raw)
 	must(t, err)
@@ -299,7 +299,7 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		t.Fatalf("got %+v %v", got, gotConformsTo)
 	}
 
-	raw, err = buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, time.Now())
+	raw, err = buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, nil, time.Now())
 	must(t, err)
 	got, gotConformsTo, err = crateProvenance(raw)
 	must(t, err)
