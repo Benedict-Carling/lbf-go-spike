@@ -177,6 +177,9 @@ func upload(ctx context.Context, t target, pub publication) error {
 	if ctx.Err() != nil {
 		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
 	}
+	if errors.Is(err, errAnotherCrate) {
+		return fmt.Errorf("%s: %w. Run the same publish with --id %s to check it records these files", id, err, id)
+	}
 	if _, ok := errors.AsType[idTaken](err); ok {
 		return idTaken{fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Publish without --id, or with a new ID from 'lbf new-id'", err, id)}
 	}
@@ -387,12 +390,29 @@ func uploadFile(ctx context.Context, cc *container.Client, name string, f *local
 		}},
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		return idTaken{fmt.Errorf("%s changed while this publish was writing it; is another publish of the same ID running?", name)}
+		err = storedAs(ctx, bb, f.Size, sum)
+		if errors.Is(err, errStoredDiffers) {
+			return idTaken{fmt.Errorf("%s changed while this publish was writing it; is another publish of the same ID running?", name)}
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("uploading %s: %w", f.Rel, err)
 	}
 	f.SHA256 = sum
+	return nil
+}
+
+var errStoredDiffers = errors.New("a different blob is stored under this name")
+
+// A commit whose response was lost is retried and refused, as is one that an earlier attempt sending the same bytes beat.
+func storedAs(ctx context.Context, bb *blockblob.Client, size int64, sum string) error {
+	props, err := bb.GetProperties(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if deref(props.ContentLength) != size || metadata(props.Metadata, "sha256") != sum {
+		return errStoredDiffers
+	}
 	return nil
 }
 
@@ -418,19 +438,29 @@ func verifyLanded(ctx context.Context, cc *container.Client, pub publication) er
 	return nil
 }
 
+var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")
+
 func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time, conformsTo []string) error {
 	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, conformsTo, published)
 	if err != nil {
 		return err
 	}
-	_, err = cc.NewBlockBlobClient(pub.ID+"/"+crateName).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
+	name := pub.ID + "/" + crateName
+	_, err = cc.NewBlockBlobClient(name).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
 		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: new("application/json")},
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 			IfNoneMatch: to.Ptr(azcore.ETagAny),
 		}},
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		return fmt.Errorf("%s/%s already exists in the container; refusing to overwrite", pub.ID, crateName)
+		stored, err := downloadBuffer(ctx, cc, name)
+		if err != nil {
+			return fmt.Errorf("reading the crate already stored as %s: %w", name, err)
+		}
+		if !bytes.Equal(stored, crate) {
+			return errAnotherCrate
+		}
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("uploading %s: %w", crateName, err)
