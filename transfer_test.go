@@ -290,17 +290,20 @@ func TestInterruptedPublishSaysWhetherTheCrateLanded(t *testing.T) {
 
 func TestFetchPointsOutFoldersLeftByKilledFetches(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "20261007-brave-otter-1a2b")
-	must(t, os.Mkdir(root+".partial-deadbeef", 0o755))
+	old, live := root+".partial-deadbeef", root+".partial-0b5e55ed"
+	must(t, os.Mkdir(old, 0o755))
+	must(t, os.Mkdir(live, 0o755))
+	must(t, os.Chtimes(old, time.Now().Add(-48*time.Hour), time.Now().Add(-48*time.Hour)))
 	var partial string
 	logged := captureStderr(t, func() {
 		var err error
 		partial, err = makePartial(root)
 		must(t, err)
 	})
-	if !strings.Contains(logged, root+".partial-deadbeef") || strings.Contains(logged, partial) {
-		t.Fatalf("logged %q; want the leftover folder named and not this fetch's own %s", logged, partial)
+	if !strings.Contains(logged, old) || strings.Contains(logged, live) || strings.Contains(logged, partial) {
+		t.Fatalf("logged %q; want only the day-old %s, not a running fetch's folder", logged, old)
 	}
-	if _, err := os.Stat(root + ".partial-deadbeef"); err != nil {
+	if _, err := os.Stat(old); err != nil {
 		t.Fatal("a leftover folder was removed; another fetch may still be using it")
 	}
 }
