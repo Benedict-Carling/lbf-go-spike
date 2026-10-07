@@ -18,6 +18,9 @@ func isolateHome(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
 	t.Setenv("AppData", filepath.Join(dir, "AppData"))
+	old := tokenCache
+	t.Cleanup(func() { tokenCache = old })
+	tokenCache = hermeticTokenCache
 }
 
 func captureStderr(t *testing.T, fn func()) string {
