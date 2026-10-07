@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1010,5 +1011,42 @@ func TestUpgradeKeepsPermissions(t *testing.T) {
 	}
 	if info, err := os.Stat(exe); err != nil || info.Mode().Perm() != 0o751 {
 		t.Fatalf("mode %v, err %v; want -rwxr-x--x", info.Mode(), err)
+	}
+}
+
+func TestAssetNameIsForTheNativeArch(t *testing.T) {
+	want := runtime.GOARCH
+	switch runtime.GOOS {
+	case "darwin":
+		if out, _ := exec.Command("sysctl", "-n", "hw.optional.arm64").Output(); strings.TrimSpace(string(out)) == "1" {
+			want = "arm64"
+		}
+	case "windows":
+		out, _ := exec.Command("reg", "query", `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`, "/v", "PROCESSOR_ARCHITECTURE").Output()
+		if strings.Contains(string(out), "ARM64") {
+			want = "arm64"
+		}
+	}
+	if got := assetName(); !strings.HasPrefix(got, "lbf-"+runtime.GOOS+"-"+want) {
+		t.Fatalf("assetName() = %q, want the %s build", got, want)
+	}
+}
+
+func TestStartupRemovesTheExeAnUpgradeSetAside(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only a Windows upgrade sets the old exe aside")
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, exe+".old", "old lbf")
+
+	startUpdateCheck(context.Background(), []string{"upgrade"})()
+	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
+		t.Fatalf("%s.old is still there: %v", exe, err)
 	}
 }

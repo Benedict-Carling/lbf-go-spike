@@ -28,6 +28,7 @@ const (
 
 // startUpdateCheck looks up the latest release while the command runs; the returned func prints a warning if lbf is out of date.
 func startUpdateCheck(ctx context.Context, args []string) func() {
+	removeExeSetAside()
 	if version == "dev" || os.Getenv("LBF_NO_UPDATE_CHECK") != "" || (len(args) > 0 && args[0] == "upgrade") {
 		return func() {}
 	}
@@ -43,6 +44,18 @@ func startUpdateCheck(ctx context.Context, args []string) func() {
 	return func() {
 		if latest := <-done; newerVersion(latest, version) {
 			fmt.Fprint(os.Stderr, upgradeWarning(version, latest))
+		}
+	}
+}
+
+// removeExeSetAside deletes the lbf.exe.old a Windows upgrade leaves, once nothing is running it.
+func removeExeSetAside() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if exe, err := os.Executable(); err == nil {
+		if exe, err = filepath.EvalSymlinks(exe); err == nil {
+			_ = os.Remove(exe + ".old")
 		}
 	}
 }
@@ -115,7 +128,7 @@ func newerVersion(latest, current string) bool {
 }
 
 func assetName() string {
-	name := "lbf-" + runtime.GOOS + "-" + runtime.GOARCH
+	name := "lbf-" + runtime.GOOS + "-" + nativeArch()
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
