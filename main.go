@@ -156,7 +156,7 @@ func run(ctx context.Context, args []string) error {
 		if err := checkAccess(ctx, t, o.mode); err != nil {
 			return err
 		}
-		fmt.Printf("%s can %s %s/%s until %s\n", orUnknown(t.User), o.mode, t.Account, t.Container, t.Expiry.Format(time.RFC3339))
+		fmt.Println(checkSummary(t, o.mode))
 		return nil
 
 	case "login":
@@ -223,6 +223,14 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
+}
+
+// Without --sas-env the expiry is that of a throwaway SAS, not of the sign-in a later command uses.
+func checkSummary(t target, mode string) string {
+	if t.Source == "" {
+		return fmt.Sprintf("%s can %s %s/%s until %s", orUnknown(t.User), mode, t.Account, t.Container, t.Expiry.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("%s can %s %s/%s, signed in via %s", orUnknown(t.User), mode, t.Account, t.Container, t.Source)
 }
 
 func loginMessage(user string, storeErr error) string {

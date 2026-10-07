@@ -26,6 +26,7 @@ type target struct {
 	User             string
 	SubscriptionName string
 	SubscriptionID   string
+	Source           string // the sign-in that minted it; empty for --sas-env
 	endpoint         string // an emulator's account URL, in tests
 }
 
@@ -71,8 +72,7 @@ func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mo
 	}
 
 	status("Getting a " + mode + " key for " + account)
-	start := time.Now().UTC()
-	expiry := start.Add(sasLifetime)
+	start, expiry := sasWindow(time.Now().UTC())
 	udc, err := svc.GetUserDelegationCredential(ctx, service.KeyInfo{
 		Start:  new(start.Format(sas.TimeFormat)),
 		Expiry: new(expiry.Format(sas.TimeFormat)),
@@ -106,7 +106,13 @@ func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mo
 		User:             user,
 		SubscriptionName: subName,
 		SubscriptionID:   deref(sub.SubscriptionID),
+		Source:           source,
 	}, nil
+}
+
+// Azure refuses a start time ahead of its own clock, so allow for a local clock that runs fast.
+func sasWindow(now time.Time) (start, expiry time.Time) {
+	return now.Add(-15 * time.Minute), now.Add(sasLifetime)
 }
 
 type accountMatch struct {

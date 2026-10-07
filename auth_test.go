@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // lbf's saved login lives under the user config directory; keep tests away from the real one.
@@ -82,6 +83,33 @@ func TestNoBrowserReasons(t *testing.T) {
 		if got := browserUnavailable(c.stdin, c.stderr, c.goos, env(c.env)); (got == "") != (c.want == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%s: got %q, want it to mention %q", c.name, got, c.want)
 		}
+	}
+}
+
+func TestSASWindowToleratesAFastClock(t *testing.T) {
+	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	start, expiry := sasWindow(now)
+	if !start.Equal(now.Add(-15 * time.Minute)) {
+		t.Errorf("start %s, want 15 minutes before %s", start, now)
+	}
+	if !expiry.Equal(now.Add(sasLifetime)) {
+		t.Errorf("expiry %s, want %s after now", expiry, sasLifetime)
+	}
+	if expiry.Sub(start) > 7*24*time.Hour {
+		t.Errorf("a delegation key cannot last %s", expiry.Sub(start))
+	}
+}
+
+func TestCheckSaysWhichSignInRatherThanAThrowawayExpiry(t *testing.T) {
+	expiry := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	minted := target{Account: "acct", Container: "bronze", User: "u@ic.ac.uk", Expiry: expiry, Source: "az login"}
+	got := checkSummary(minted, "upload")
+	if strings.Contains(got, "2026-10-13") || !strings.Contains(got, "az login") {
+		t.Errorf("signed-in check: %q", got)
+	}
+	fromFile := target{Account: "acct", Container: "bronze", User: "u@ic.ac.uk", Expiry: expiry}
+	if got := checkSummary(fromFile, "upload"); !strings.Contains(got, "until 2026-10-13T12:00:00Z") {
+		t.Errorf("--sas-env check: %q", got)
 	}
 }
 
