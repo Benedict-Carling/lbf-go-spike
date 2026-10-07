@@ -3,15 +3,24 @@
 package main
 
 import (
+	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity/cache"
 )
 
-var tokenCache = sync.OnceValues(func() (azidentity.Cache, bool) {
+var tokenCache = sync.OnceValues(func() (azidentity.Cache, error) {
 	c, err := cache.New(&cache.Options{Name: tokenCacheName})
-	return c, err == nil
+	if err != nil {
+		store := "macOS keychain"
+		if runtime.GOOS == "windows" {
+			store = "Windows token store"
+		}
+		return c, fmt.Errorf("the %s is not available: %w", store, err)
+	}
+	return c, nil
 })
 
 // azidentity/cache keeps CAE tokens apart under name+".cae" and exposes no way to delete either.

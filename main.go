@@ -156,7 +156,7 @@ func run(ctx context.Context, args []string) error {
 		if err := checkAccess(ctx, t, o.mode); err != nil {
 			return err
 		}
-		fmt.Printf("%s can %s %s/%s until %s\n", orUnknown(t.User), o.mode, t.Account, t.Container, t.Expiry.Format(time.RFC3339))
+		fmt.Println(checkSummary(t, o.mode))
 		return nil
 
 	case "login":
@@ -168,11 +168,8 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if hasPersistentCache() {
-			fmt.Printf("Signed in as %s; lbf will reuse this login until 'lbf logout'\n", user)
-		} else {
-			fmt.Printf("Signed in as %s, but this build cannot remember logins; use 'az login' or --sas-env\n", user)
-		}
+		_, storeErr := tokenCache()
+		fmt.Println(loginMessage(user, storeErr))
 		return nil
 
 	case "logout":
@@ -180,16 +177,8 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		switch {
-		case hadTokens:
-			fmt.Printf("Signed %s out of lbf and deleted its saved tokens\n", cmp.Or(user, "you"))
-		case hadRecord:
-			fmt.Printf("Signed %s out of lbf\n", cmp.Or(user, "you"))
-		case hasPersistentCache():
-			fmt.Println("lbf had no saved login")
-		default:
-			fmt.Println("This build of lbf never saves a login, so there was nothing to sign out of")
-		}
+		_, storeErr := tokenCache()
+		fmt.Println(logoutMessage(user, hadRecord, hadTokens, storeErr))
 		if user, err := azCLIUser(ctx, o.tenant); err == nil {
 			fmt.Printf("Still signed in as %s through 'az login', which lbf uses next; run 'az logout' to sign out of that too\n", user)
 		}
@@ -234,6 +223,38 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown command %q\n\n%s", args[0], usage)
+}
+
+// Without --sas-env the expiry is that of a throwaway SAS, not of the sign-in a later command uses.
+func checkSummary(t target, mode string) string {
+	if t.Source == "" {
+		return fmt.Sprintf("%s can %s %s/%s until %s", orUnknown(t.User), mode, t.Account, t.Container, t.Expiry.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("%s can %s %s/%s, signed in via %s", orUnknown(t.User), mode, t.Account, t.Container, t.Source)
+}
+
+func loginMessage(user string, storeErr error) string {
+	switch {
+	case storeErr == nil:
+		return fmt.Sprintf("Signed in as %s; lbf will reuse this login until 'lbf logout'", user)
+	case errors.Is(storeErr, errNoCredentialStore):
+		return fmt.Sprintf("Signed in as %s, but this build cannot remember logins; use 'az login' or --sas-env", user)
+	default:
+		return fmt.Sprintf("Signed in as %s, but lbf could not remember this login because %v; use 'az login' or --sas-env", user, storeErr)
+	}
+}
+
+func logoutMessage(user string, hadRecord, hadTokens bool, storeErr error) string {
+	switch {
+	case hadTokens:
+		return fmt.Sprintf("Signed %s out of lbf and deleted its saved tokens", cmp.Or(user, "you"))
+	case hadRecord:
+		return fmt.Sprintf("Signed %s out of lbf", cmp.Or(user, "you"))
+	case errors.Is(storeErr, errNoCredentialStore):
+		return "This build of lbf never saves a login, so there was nothing to sign out of"
+	default:
+		return "lbf had no saved login"
+	}
 }
 
 type options struct {
