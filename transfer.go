@@ -630,8 +630,8 @@ func makePartial(root string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
 		return "", err
 	}
-	if left, _ := filepath.Glob(root + ".partial-*"); len(left) > 0 {
-		logf("%d unfinished download folders of %s are here (%s); fetches that were killed leave them, and they can be deleted once no fetch of it is running\n", len(left), filepath.Base(root), strings.Join(left, ", "))
+	if stale := stalePartials(root, 24*time.Hour); len(stale) > 0 {
+		logf("%d download folders of %s are over a day old (%s); fetches that were killed leave them, and they can be deleted once no fetch of it is running\n", len(stale), filepath.Base(root), strings.Join(stale, ", "))
 	}
 	for {
 		partial := root + ".partial-" + strings.ToLower(rand.Text()[:8])
@@ -639,6 +639,17 @@ func makePartial(root string) (string, error) {
 			return partial, err
 		}
 	}
+}
+
+func stalePartials(root string, age time.Duration) []string {
+	var stale []string
+	matches, _ := filepath.Glob(root + ".partial-*")
+	for _, m := range matches {
+		if info, err := os.Stat(m); err == nil && info.IsDir() && time.Since(info.ModTime()) > age {
+			stale = append(stale, m)
+		}
+	}
+	return stale
 }
 
 func verifyExisting(root, id string, files []crateFile, crate []byte) error {
