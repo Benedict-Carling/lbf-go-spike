@@ -27,6 +27,7 @@ func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "stderr")
 	must(t, err)
+	defer f.Close()
 	old := os.Stderr
 	os.Stderr = f
 	defer func() { os.Stderr = old }()
