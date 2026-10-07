@@ -175,7 +175,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 		err = uploadCrate(ctx, cc, t, pub, published, conformsTo)
 	}
 	if ctx.Err() != nil {
-		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
+		return interrupted(context.WithoutCancel(ctx), cc, id)
 	}
 	if errors.Is(err, errAnotherCrate) {
 		return fmt.Errorf("%s: %w. Run the same publish with --id %s to check it records these files", id, err, id)
@@ -191,6 +191,21 @@ func upload(ctx context.Context, t target, pub publication) error {
 	}
 	logDone(started, total)
 	return nil
+}
+
+// The crate can land even though its response never arrives.
+func interrupted(ctx context.Context, cc *container.Client, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := cc.NewBlobClient(id+"/"+crateName).GetProperties(ctx, nil)
+	switch {
+	case err == nil:
+		return fmt.Errorf("interrupted, but %s was published; run the same publish with --id %s to check what landed", id, id)
+	case bloberror.HasCode(err, bloberror.BlobNotFound):
+		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
+	default:
+		return fmt.Errorf("interrupted before lbf could tell whether %s was published; run the same publish with --id %s to finish or check it", id, id)
+	}
 }
 
 // The ID holds other files or another crate, so retrying cannot help; lbf exits with exitIDTaken.
