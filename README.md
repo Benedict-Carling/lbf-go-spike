@@ -100,7 +100,9 @@ for several. The same provenance can instead be given as one file with
 ```
 
 Every field is optional, but `derived_from` and `instruments` come together.
-Unknown fields are rejected.
+`derived_from` must be an ID lbf minted, and instruments that share a `url`
+must be the same instrument. Field names are exact: unknown or differently
+cased fields are rejected, as is anything after the closing brace.
 
 A profile is a directory holding a JSON Schema `profile.json`, describing both
 the data given as `<path>` and the crate lbf writes for it. Its `$id` is
@@ -118,7 +120,8 @@ validates this view of the dataset, once the uploader is known:
 
 File paths are relative to `<path>`. `crate` uses the RO-Crate's own names.
 
-`--dry-run` validates and prints the crate without signing in, as uploader `dry-run`. Progress goes to
+`--dry-run` validates and prints the crate without signing in, as uploader `dry-run`;
+with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
 publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path"}` as one line, where
 `path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it. `--tag KEY=VALUE` picks
@@ -164,7 +167,9 @@ lands.
 Publish follows symlinks, and refuses, before uploading anything, a dataset with
 a broken symlink, an unreadable file, or a name that could not be fetched
 everywhere: one Windows cannot store (`\ : * ? " < > |`, a trailing dot or
-space, `CON`, `NUL` and the like) or two that differ only in case. Each file's
+space, `CON`, `NUL`, `CONIN$` and the like), one longer than Linux allows, two
+that macOS or Windows would store as one (differing only in case or Unicode
+form, or a file named like a folder), or one named like the crate. Each file's
 sha256 is computed as it is sent, recorded in the crate, and stored with the
 file as blob metadata, which is how a resumed publish knows what is already
 there. A file that changes while it is being sent stops the publish.
