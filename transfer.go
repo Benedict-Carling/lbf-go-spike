@@ -71,6 +71,9 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir, id 
 	if len(files) == 0 {
 		return publication{}, fmt.Errorf("%s contains no files to upload", input)
 	}
+	if problems := blobNameProblems(id, files); len(problems) > 0 {
+		return publication{}, problemList(fmt.Sprintf("%s cannot be published as it is, so nothing was uploaded:", input), problems)
+	}
 	return publication{ID: id, Source: source, Files: files, Provenance: prov, Profile: prof}, nil
 }
 
@@ -683,20 +686,21 @@ func compareStored(files []crateFile, stored map[string]crateFile) []string {
 
 func localNameProblems(files []crateFile, goos string) []string {
 	var problems []string
-	seen := map[string]string{}
-	for _, f := range files {
+	fold := goos == "windows" || goos == "darwin"
+	rels := make([]string, len(files))
+	for i, f := range files {
+		rels[i] = f.Rel
 		if goos == "windows" {
 			if p := nameProblem(f.Rel); p != "" {
 				problems = append(problems, f.Rel+": "+p)
 			}
 		}
-		if goos == "windows" || goos == "darwin" {
-			folded := strings.ToLower(f.Rel)
-			if other, ok := seen[folded]; ok {
-				problems = append(problems, fmt.Sprintf("%s and %s differ only in case, so one would overwrite the other here", other, f.Rel))
-			}
-			seen[folded] = f.Rel
+		if clashesWithCrate(f.Rel, fold) {
+			problems = append(problems, f.Rel+": would be replaced by the dataset's crate, which is saved beside it")
 		}
+	}
+	if fold {
+		problems = append(problems, sameNameProblems(rels, "this computer")...)
 	}
 	return problems
 }
