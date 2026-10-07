@@ -33,7 +33,6 @@ sha256_of() {
 download() {
     asset="lbf-$os-$arch"
     base="https://github.com/$repo/releases/latest/download"
-    mkdir -p "$dir"
     echo "Downloading lbf for $os $arch..."
     curl -fsSL "$base/$asset" -o "$dir/lbf.new"
     want=$(curl -fsSL "$base/SHA256SUMS" | awk -v n="$asset" '$2 == n || $2 == "*" n {print $1}')
@@ -55,12 +54,23 @@ download() {
 
 # Same env script and rc lines as uv and rustup, so installing several of them does not stack duplicates.
 write_env() {
-    if [ ! -f "$env_sh" ]; then
-        { printf '#!/bin/sh\ncase ":${PATH}:" in\n    *:"%s":*) ;;\n    *) export PATH="%s:$PATH" ;;\nesac\n' "$dir_expr" "$dir_expr" > "$env_sh"; } 2>/dev/null || failed=1
+    sh_path_line="export PATH=\"$dir_expr:\$PATH\""
+    fish_path_line="set -x PATH \"$dir_expr\" \$PATH"
+    if ! ours "$env_sh" "$sh_path_line" "export PATH=\"$dir:" || ! ours "$env_fish" "$fish_path_line" "set -x PATH \"$dir\" "; then
+        echo "lbf: $dir already holds an env or env.fish script that does not add $dir to PATH, so your shell startup files were left alone." >&2
+        return 1
     fi
-    if [ ! -f "$env_fish" ]; then
-        { printf 'if not contains "%s" $PATH\n    set -x PATH "%s" $PATH\nend\n' "$dir_expr" "$dir_expr" > "$env_fish"; } 2>/dev/null || failed=1
+    if [ ! -e "$env_sh" ]; then
+        { printf '#!/bin/sh\ncase ":${PATH}:" in\n    *:"%s":*) ;;\n    *) %s ;;\nesac\n' "$dir_expr" "$sh_path_line" > "$env_sh"; } 2>/dev/null || return 1
     fi
+    if [ ! -e "$env_fish" ]; then
+        { printf 'if not contains "%s" $PATH\n    %s\nend\n' "$dir_expr" "$fish_path_line" > "$env_fish"; } 2>/dev/null || return 1
+    fi
+}
+
+# An existing script is reused only if it is one of these for this folder, as uv's and rustup's are.
+ours() {
+    [ ! -e "$1" ] || { [ -f "$1" ] && grep -qF -e "$2" -e "$3" "$1"; }
 }
 
 add_line() {
@@ -75,7 +85,10 @@ add_line() {
 }
 
 modify_path() {
-    write_env
+    if ! write_env; then
+        failed=1
+        return 0
+    fi
     sh_line=". \"$dir_expr/env\""
     add_line "$HOME/.profile" "$sh_line"
     for f in .bashrc .bash_profile .bash_login; do
@@ -129,6 +142,12 @@ get_started() {
 main() {
     detect_platform
     dir=${LBF_INSTALL_DIR:-$HOME/.local/bin}
+    mkdir -p "$dir"
+    # Startup files are read from other folders, so they need an absolute path.
+    case $dir in
+        /*) ;;
+        *) dir=$(CDPATH='' cd -- "$dir" && pwd) ;;
+    esac
     download
     "$dir/lbf" version
     echo "Installed to $dir/lbf"

@@ -9,14 +9,16 @@ Linux and Windows.
 Windows: open PowerShell (Start menu, type "PowerShell") and paste:
 
 ```powershell
-irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
 ```
 
 Nothing needs installing first: `irm` and `iex` are built into PowerShell
 (short for `Invoke-RestMethod` and `Invoke-Expression`), and both Windows
-PowerShell 5.1 and PowerShell 7 work. No admin rights are needed. The script
-puts `lbf.exe` in `%LOCALAPPDATA%\lbf` and adds it to your PATH, so `lbf` works
-straight away in that window and in new ones. Then run `lbf login`.
+PowerShell 5.1 and PowerShell 7 work. The first part turns on TLS 1.2, which
+GitHub requires and older Windows PowerShell does not use by default. No admin
+rights are needed. The script puts `lbf.exe` in `%LOCALAPPDATA%\lbf` and adds it
+to your PATH, so `lbf` works straight away in that window and in new ones. Run
+it again to reinstall, even while lbf is running. Then run `lbf login`.
 
 If your organisation blocks scripts this way, download `lbf-windows-amd64.exe`
 (or `-arm64.exe` on Arm laptops) from the releases page, rename it to `lbf.exe`
@@ -30,11 +32,16 @@ curl -fsSL https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/down
 
 This puts `lbf` in `~/.local/bin` (override with `LBF_INSTALL_DIR`) and, if
 that folder is not already on your PATH, adds it via `~/.profile` and your
-bash, zsh and fish startup files, the same way uv and rustup do. Open a new
-terminal afterwards. Set `LBF_NO_MODIFY_PATH=1` to leave startup files alone.
+bash, zsh and fish startup files, the same way uv and rustup do, sharing their
+`env` script when they use the same folder. If the folder already holds an
+`env` or `env.fish` that is not such a script, the startup files are left
+alone. Open a new terminal afterwards. Set `LBF_NO_MODIFY_PATH=1` to leave
+startup files alone.
 
 Both installers check the download against the release's `SHA256SUMS` before
-installing it, as `lbf upgrade` does.
+installing it, as `lbf upgrade` does. They and `lbf upgrade` fetch the build
+for the machine's own processor, even from an x64 PowerShell or terminal
+emulated on Arm.
 
 Binaries are also attached to each
 [release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
@@ -47,7 +54,8 @@ lbf upgrade
 
 lbf checks for a newer release at most once an hour and prints a warning after
 any command when it is out of date. Set `LBF_NO_UPDATE_CHECK=1` to turn the
-check off.
+check off. Pre-releases (tags such as `v0.2.0-rc1`) are never offered; anyone
+running one is offered the release that follows it.
 
 ## Use
 
