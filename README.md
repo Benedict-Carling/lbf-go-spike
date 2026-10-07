@@ -163,10 +163,13 @@ there. A file that changes while it is being sent stops the publish.
 
 Fetch downloads exactly the files the crate lists, refusing a dataset whose
 stored files differ from it, and checks each file's size and sha256 (size only
-for datasets published before lbf recorded checksums). It works in
-`<id>.partial` and renames it to `<id>` only once everything has checked out,
-so `<id>` is always complete. Fetching into a folder that already holds the
-dataset verifies it instead of downloading again.
+for datasets published before lbf recorded checksums). It works in a folder
+of its own, `<id>.partial-<random>`, and renames it to `<id>` only once
+everything has checked out, so `<id>` is always complete. Fetching into a folder
+that already holds the dataset verifies it instead of downloading again, and
+several fetches of one dataset into one folder can run at once. A fetch removes
+its own `.partial-` folder if it fails; one that is killed can leave it behind,
+and it is safe to delete once no fetch is running.
 
 Blob layout, RO-Crate sidecar and `azure_sas.env` format match the Nextflow
 pipelines, so either tool can read the other's output; crates written by the
