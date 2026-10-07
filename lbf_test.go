@@ -727,38 +727,38 @@ func TestPickArrows(t *testing.T) {
 		{"\x1b[B\x1b[A\x1b[A\r", 0},
 		{"jjk\r", 1},
 		{"\x1bOB\r", 1},
-		{"x\r", 0},
+		{"\x1b[C\r", 0},
 	} {
-		got, err := pickArrows(strings.NewReader(tc.keys), io.Discard, "Choose:", items)
+		got, err := pickArrows(context.Background(), strings.NewReader(tc.keys), io.Discard, "Choose:", items)
 		if err != nil || got != tc.want {
 			t.Errorf("%q: got %d %v, want %d", tc.keys, got, err, tc.want)
 		}
 	}
 	for _, keys := range []string{"\x03", "q", "\x1b", "", "\x1b[B"} {
-		if _, err := pickArrows(strings.NewReader(keys), io.Discard, "Choose:", items); !errors.Is(err, errNoChoice) {
+		if _, err := pickArrows(context.Background(), strings.NewReader(keys), io.Discard, "Choose:", items); !errors.Is(err, errNoChoice) {
 			t.Errorf("%q: got %v, want cancel", keys, err)
 		}
 	}
 	var out strings.Builder
-	got, err := pickArrows(io.MultiReader(strings.NewReader("\x1b["), strings.NewReader("B"), strings.NewReader("\r")), &out, "Choose:", items)
+	got, err := pickArrows(context.Background(), io.MultiReader(strings.NewReader("\x1b["), strings.NewReader("B"), strings.NewReader("\r")), &out, "Choose:", items)
 	if err != nil || got != 1 {
 		t.Errorf("keys split across reads: got %d %v", got, err)
 	}
-	if s := out.String(); !strings.HasPrefix(s, "Choose:") || !strings.Contains(s, "(*) a") || !strings.Contains(s, "\x1b[3A") || !strings.Contains(s[strings.LastIndex(s, "\x1b[3A"):], "(*) b") {
+	if s := out.String(); !strings.HasPrefix(s, "Choose:") || !strings.Contains(s, "(*) 1. a") || !strings.Contains(s, "\x1b[3A") || !strings.Contains(s[strings.LastIndex(s, "\x1b[3A"):], "(*) 2. b") {
 		t.Errorf("render:\n%q", out.String())
 	}
 }
 
 func TestPickNumbered(t *testing.T) {
 	var out strings.Builder
-	got, err := pickNumbered(strings.NewReader("x\n9\n\n 2 \r\n"), &out, "Choose:", []string{"a", "b"})
+	got, err := pickNumbered(context.Background(), strings.NewReader("x\n9\n\n 2 \r\n"), &out, "Choose:", []string{"a", "b"})
 	if err != nil || got != 1 {
 		t.Errorf("got %d %v", got, err)
 	}
 	if !strings.Contains(out.String(), "1) a") || strings.Count(out.String(), "Choose [1-2]: ") != 4 {
 		t.Errorf("render:\n%s", out.String())
 	}
-	if _, err := pickNumbered(strings.NewReader("9\n"), io.Discard, "Choose:", []string{"a", "b"}); !errors.Is(err, errNoChoice) {
+	if _, err := pickNumbered(context.Background(), strings.NewReader("9\n"), io.Discard, "Choose:", []string{"a", "b"}); !errors.Is(err, errNoChoice) {
 		t.Errorf("eof: %v", err)
 	}
 }
