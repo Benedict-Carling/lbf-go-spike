@@ -17,6 +17,7 @@ const (
 	imperialTenant = "2b897507-ee8c-4575-830b-4f8267c3d307"
 	// The Azure CLI's public client ID: Imperial's sign-in policies already allow it.
 	azureCLIClientID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+	tokenCacheName   = "lbf"
 )
 
 var armScope = policy.TokenRequestOptions{Scopes: []string{"https://management.azure.com/.default"}}
@@ -60,16 +61,29 @@ func login(ctx context.Context, tenant string) (azcore.TokenCredential, error) {
 	return cred, nil
 }
 
-func logout() (bool, error) {
+func logout() (user string, hadRecord, hadTokens bool, err error) {
 	path, err := recordPath()
 	if err != nil {
-		return false, err
+		return "", false, false, err
+	}
+	rec, _ := loadRecord()
+	hadTokens, err = clearTokenCache(tokenCacheName)
+	if err != nil {
+		return rec.Username, false, hadTokens, fmt.Errorf("could not delete lbf's saved tokens, so you are still signed in: %w", err)
 	}
 	err = os.Remove(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return rec.Username, false, hadTokens, nil
 	}
-	return err == nil, err
+	return rec.Username, true, hadTokens, err
+}
+
+func azCLIUser(ctx context.Context, tenant string) (string, error) {
+	cli, err := azidentity.NewAzureCLICredential(&azidentity.AzureCLICredentialOptions{TenantID: tenant})
+	if err != nil {
+		return "", err
+	}
+	return signedInUser(ctx, cli)
 }
 
 func browserCredential(tenant string, rec azidentity.AuthenticationRecord, silentOnly bool) (*azidentity.InteractiveBrowserCredential, error) {

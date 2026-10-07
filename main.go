@@ -29,7 +29,7 @@ Usage:
   lbf check             prove a credential can publish or fetch, without changing anything
   lbf mint-sas          write a pre-minted credential file
   lbf login             sign in with the browser and remember it
-  lbf logout            forget the login saved by 'lbf login'
+  lbf logout            sign out of lbf and delete its saved tokens
   lbf upgrade           update lbf to the latest release
   lbf version
 
@@ -176,14 +176,22 @@ func run(ctx context.Context, args []string) error {
 		return nil
 
 	case "logout":
-		removed, err := logout()
+		user, hadRecord, hadTokens, err := logout()
 		if err != nil {
 			return err
 		}
-		if removed {
-			fmt.Println("Forgot the login saved by 'lbf login' ('az login' is unaffected)")
-		} else {
-			fmt.Println("No saved lbf login ('az login' is unaffected)")
+		switch {
+		case hadTokens:
+			fmt.Printf("Signed %s out of lbf and deleted its saved tokens\n", cmp.Or(user, "you"))
+		case hadRecord:
+			fmt.Printf("Signed %s out of lbf\n", cmp.Or(user, "you"))
+		case hasPersistentCache():
+			fmt.Println("lbf had no saved login")
+		default:
+			fmt.Println("This build of lbf never saves a login, so there was nothing to sign out of")
+		}
+		if user, err := azCLIUser(ctx, o.tenant); err == nil {
+			fmt.Printf("Still signed in as %s through 'az login', which lbf uses next; run 'az logout' to sign out of that too\n", user)
 		}
 		return nil
 
@@ -330,7 +338,9 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.synopsis = "login [options]"
 		tenant()
 	case "logout":
-		c.synopsis = "logout"
+		c.synopsis = "logout [options]"
+		c.notes = "lbf also signs in through 'az login'; logout says if that still signs you in, and 'az logout' ends it.\n"
+		tenant()
 	case "upgrade":
 		c.synopsis = "upgrade"
 		c.notes = "lbf also warns after any command when a newer release exists; set LBF_NO_UPDATE_CHECK=1 to stop it checking.\n"

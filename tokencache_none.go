@@ -8,3 +8,7 @@ import "github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 func tokenCache() (azidentity.Cache, bool) {
 	return azidentity.Cache{}, false
 }
+
+func clearTokenCache(string) (bool, error) {
+	return false, nil
+}

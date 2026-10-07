@@ -58,7 +58,7 @@ lbf fetch <id> [--out DIR]         # alias: download
 lbf new-id                         # an ID to publish under later, with publish --id
 lbf check --mode upload            # proves the credential works, before a long job
 lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
-lbf logout
+lbf logout                         # signs out of lbf and deletes its tokens; says if az login still signs you in
 ```
 
 Sign-in order: a login saved by `lbf login`, an existing `az login`, then the
