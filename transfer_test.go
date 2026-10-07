@@ -287,3 +287,20 @@ func TestInterruptedPublishSaysWhetherTheCrateLanded(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchPointsOutFoldersLeftByKilledFetches(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "20261007-brave-otter-1a2b")
+	must(t, os.Mkdir(root+".partial-deadbeef", 0o755))
+	var partial string
+	logged := captureStderr(t, func() {
+		var err error
+		partial, err = makePartial(root)
+		must(t, err)
+	})
+	if !strings.Contains(logged, root+".partial-deadbeef") || strings.Contains(logged, partial) {
+		t.Fatalf("logged %q; want the leftover folder named and not this fetch's own %s", logged, partial)
+	}
+	if _, err := os.Stat(root + ".partial-deadbeef"); err != nil {
+		t.Fatal("a leftover folder was removed; another fetch may still be using it")
+	}
+}

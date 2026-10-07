@@ -331,7 +331,7 @@ func newCommand(cmd string, o *options) (*command, error) {
 		str(&o.prov.file, "provenance", "FILE", "", "all of the above as one JSON file, instead of those flags")
 		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
 		str(&o.id, "id", "ID", "", "publish under this ID from 'lbf new-id'; run again with the same ID to finish a failed publish")
-		c.notes += "Exits with 3 when the ID already holds different files or crate, which retrying cannot fix; use a new ID.\n"
+		c.notes += "Exits with 3 when the ID already holds different files or provenance, which retrying cannot fix; use a new ID.\n"
 		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})
 		jsonFlag("print {\"id\", \"url\"} as JSON instead of text, or instead of the crate with --dry-run (its url names the placeholder account dryrun)")
