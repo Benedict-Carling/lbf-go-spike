@@ -47,6 +47,7 @@ func emulator(t *testing.T, perms sas.ContainerPermissions) target {
 	must(t, err)
 	_, err = cc.Create(context.Background(), nil)
 	must(t, err)
+	t.Cleanup(func() { cc.Delete(context.Background(), nil) })
 
 	expiry := time.Now().Add(time.Hour)
 	qp, err := sas.BlobSignatureValues{
