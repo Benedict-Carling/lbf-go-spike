@@ -88,6 +88,8 @@ func run(ctx context.Context, args []string) error {
 
 	o, positional, err := parseArgs(args[0], args[1:])
 	if errors.Is(err, flag.ErrHelp) {
+		c, _ := newCommand(args[0], new(options))
+		c.usage(os.Stdout)
 		return nil
 	}
 	if err != nil {
@@ -101,11 +103,19 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		if o.dryRun {
-			crate, err := pub.crate(target{Account: "dryrun", Container: o.container, User: "dry-run"})
+			t := target{Account: "dryrun", Container: o.container, User: "dry-run"}
+			crate, err := pub.crate(t)
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(crate))
+			if o.json {
+				err = printJSON(map[string]string{"id": pub.ID, "url": t.containerURL() + "/" + pub.ID})
+			} else {
+				_, err = fmt.Println(string(crate))
+			}
+			if err != nil {
+				return fmt.Errorf("could not write the dry run's result to stdout: %w", err)
+			}
 			return nil
 		}
 		t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.account, o.container)
@@ -115,12 +125,7 @@ func run(ctx context.Context, args []string) error {
 		if err := upload(ctx, t, pub); err != nil {
 			return err
 		}
-		url := t.containerURL() + "/" + pub.ID
-		if o.json {
-			return printJSON(map[string]string{"id": pub.ID, "url": url})
-		}
-		fmt.Printf("Uploaded as %s\n%s\n", pub.ID, url)
-		return nil
+		return printPublished(o.json, pub.ID, t.containerURL()+"/"+pub.ID)
 
 	case "fetch", "download":
 		id := positional[0]
@@ -135,14 +140,12 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if o.json {
-			return printJSON(map[string]string{"id": id, "url": t.containerURL() + "/" + id, "path": got.path, "data_path": got.dataPath})
-		}
-		fmt.Println(got.path)
-		return nil
+		return printFetched(o.json, id, t.containerURL()+"/"+id, got)
 
 	case "new-id":
-		fmt.Println(newID())
+		if _, err := fmt.Println(newID()); err != nil {
+			return fmt.Errorf("could not write the new ID to stdout: %w", err)
+		}
 		return nil
 
 	case "check":
@@ -263,16 +266,18 @@ type command struct {
 }
 
 type commandFlag struct {
-	name, arg string
-	required  bool
+	name, arg     string
+	required, str bool
 }
 
 func newCommand(cmd string, o *options) (*command, error) {
 	c := &command{fs: flag.NewFlagSet("lbf "+cmd, flag.ContinueOnError)}
 	fs := c.fs
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	str := func(p *string, name, arg, def, desc string) {
 		fs.StringVar(p, name, def, desc)
-		c.flags = append(c.flags, commandFlag{name: name, arg: arg})
+		c.flags = append(c.flags, commandFlag{name: name, arg: arg, str: true})
 	}
 	tenant := func() {
 		str(&o.tenant, "tenant", "ID", "", "Entra tenant to sign in to (default Imperial College London)")
@@ -308,7 +313,7 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.notes += "Exits with 3 when the ID already holds different files or crate, which retrying cannot fix; use a new ID.\n"
 		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})
-		jsonFlag("print {\"id\", \"url\"} as JSON instead of text")
+		jsonFlag("print {\"id\", \"url\"} as JSON instead of text, or instead of the crate with --dry-run (its url names the placeholder account dryrun)")
 		storage()
 		sasEnv()
 	case "fetch", "download":
@@ -347,14 +352,35 @@ func newCommand(cmd string, o *options) (*command, error) {
 	default:
 		return nil, fmt.Errorf("unknown command %q\n\n%s", cmd, usage)
 	}
-	fs.Usage = func() { c.usage(fs.Output()) }
 	return c, nil
 }
 
+var flagErrorName = regexp.MustCompile(`^(flag provided but not defined: |flag needs an argument: |invalid value ".*" for flag |invalid boolean value ".*" for )-`)
+
 func (c *command) parse(args []string) ([]string, error) {
 	positional, err := parseInterspersed(c.fs, args)
-	if err != nil {
+	if errors.Is(err, flag.ErrHelp) {
 		return nil, err
+	}
+	if err != nil {
+		return nil, c.usageError(flagErrorName.ReplaceAllString(err.Error(), "$1--"))
+	}
+	set := map[string]bool{}
+	c.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	for _, f := range c.flags {
+		if f.str && set[f.name] && c.fs.Lookup(f.name).Value.String() == "" {
+			return nil, fmt.Errorf("--%s is empty; give it a value, or leave it out for the default", f.name)
+		}
+	}
+	if set["sas-env"] {
+		for _, name := range []string{"tag", "account"} {
+			if set[name] {
+				return nil, fmt.Errorf("--%s cannot be used with --sas-env, whose file already names the storage account; choose the account when minting the file with 'lbf mint-sas'", name)
+			}
+		}
+		if set["tenant"] {
+			return nil, errors.New("--tenant cannot be used with --sas-env, which needs no sign-in")
+		}
 	}
 	want := 0
 	if c.arg != "" {
@@ -422,6 +448,32 @@ func (c *command) usage(out io.Writer) {
 
 func printJSON(v any) error {
 	return json.NewEncoder(os.Stdout).Encode(v)
+}
+
+func printPublished(asJSON bool, id, url string) error {
+	var err error
+	if asJSON {
+		err = printJSON(map[string]string{"id": id, "url": url})
+	} else {
+		_, err = fmt.Printf("Uploaded as %s\n%s\n", id, url)
+	}
+	if err != nil {
+		return fmt.Errorf("published %s at %s, but could not write that to stdout: %w", id, url, err)
+	}
+	return nil
+}
+
+func printFetched(asJSON bool, id, url string, got fetched) error {
+	var err error
+	if asJSON {
+		err = printJSON(map[string]string{"id": id, "url": url, "path": got.path, "data_path": got.dataPath})
+	} else {
+		_, err = fmt.Println(got.path)
+	}
+	if err != nil {
+		return fmt.Errorf("fetched %s into %s, but could not write that to stdout: %w", id, got.path, err)
+	}
+	return nil
 }
 
 func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, accountName, containerName string) (target, error) {

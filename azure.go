@@ -59,7 +59,7 @@ func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mo
 	if err != nil {
 		return target{}, err
 	}
-	chosen, err := chooseAccount(matches, tag, accountName, terminalPicker())
+	chosen, err := chooseAccount(matches, tag, accountName, terminalPicker(ctx))
 	if err != nil {
 		return target{}, err
 	}
@@ -165,7 +165,10 @@ func chooseAccount(matches []accountMatch, tag, want string, pick picker) (accou
 	}
 	slices.SortFunc(matches, func(a, b accountMatch) int { return strings.Compare(a.Name, b.Name) })
 	labels := accountLabels(matches)
-	choices := "  --account " + strings.Join(labels, "\n  --account ")
+	choices := "  " + strings.Join(labels, "\n  ") + "\nChoose one by adding one of:"
+	for _, m := range matches {
+		choices += "\n  --account " + m.Name
+	}
 
 	if want != "" {
 		for _, m := range matches {
@@ -173,13 +176,13 @@ func chooseAccount(matches []accountMatch, tag, want string, pick picker) (accou
 				return m, nil
 			}
 		}
-		return accountMatch{}, fmt.Errorf("no storage account named %q is tagged %q; use one of:\n%s", want, tag, choices)
+		return accountMatch{}, fmt.Errorf("no storage account named %q is tagged %q; those that are:\n%s", want, tag, choices)
 	}
 	if len(matches) == 1 {
 		return matches[0], nil
 	}
 	if pick == nil {
-		return accountMatch{}, fmt.Errorf("%d storage accounts are tagged %q; choose one by adding:\n%s", len(matches), tag, choices)
+		return accountMatch{}, fmt.Errorf("%d storage accounts are tagged %q:\n%s", len(matches), tag, choices)
 	}
 	i, err := pick(fmt.Sprintf("%d storage accounts are tagged %q. Choose one", len(matches), tag), labels)
 	if err != nil {
