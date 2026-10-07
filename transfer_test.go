@@ -256,3 +256,34 @@ func TestPublishAgainChecksWhatIsStoredAgainstTheCrate(t *testing.T) {
 		t.Fatalf("rerun of a publish that fetch refuses: %v", err)
 	}
 }
+
+func TestInterruptedPublishSaysWhetherTheCrateLanded(t *testing.T) {
+	for _, c := range []struct {
+		name, path, want string
+		published        bool
+	}{
+		{"before the crate", "/run1/a.txt", "left without a crate", false},
+		{"once the crate landed", "/" + crateName, "interrupted, but", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tg := emulator(t, uploadPerms)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			interruptOnceStored := func(r *http.Request) bool {
+				if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, c.path) && r.URL.Query().Get("comp") != "block" {
+					cancel()
+					return true
+				}
+				return false
+			}
+			pub := prepared(t, dataset(t, map[string]string{"a.txt": "a"}), newID(), provenanceFlags{})
+			err := upload(ctx, lossy(t, tg, interruptOnceStored), pub)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v", err)
+			}
+			if _, err := download(context.Background(), tg, pub.ID, t.TempDir()); (err == nil) != c.published {
+				t.Fatalf("fetch: %v", err)
+			}
+		})
+	}
+}
