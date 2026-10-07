@@ -262,8 +262,10 @@ type entity map[string]any
 
 func ref(id string) entity { return entity{"@id": id} }
 
-// Same graph as rocrate_generator.py; encoding/json sorts keys, matching its output.
-func buildCrate(id, source string, files []localFile, t target, prov provenance, conformsTo []string, published time.Time) ([]byte, error) {
+var profileVersion = regexp.MustCompile(`/v?[0-9]+(\.[0-9]+)*$`)
+
+// Same graph as rocrate_generator.py, but profiles are named by title; encoding/json sorts keys, matching its output.
+func buildCrate(id, source string, files []localFile, t target, prov provenance, conformsTo []string, titles map[string]string, published time.Time) ([]byte, error) {
 	stamp := timestamp(published)
 
 	parts := make([]entity, len(files))
@@ -349,7 +351,11 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 		refs := make([]entity, len(conformsTo))
 		for i, uri := range conformsTo {
 			refs[i] = ref(uri)
-			graph = append(graph, entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": uri})
+			profile := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": cmp.Or(titles[uri], uri)}
+			if v := profileVersion.FindString(uri); v != "" {
+				profile["version"] = strings.TrimPrefix(v, "/")
+			}
+			graph = append(graph, profile)
 		}
 		root["conformsTo"] = refs
 	}
