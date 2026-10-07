@@ -455,6 +455,8 @@ type fetched struct {
 	path, dataPath string
 }
 
+var fetchHook = func(ctx context.Context, stage string) {}
+
 func download(ctx context.Context, t target, id, outDir string) (fetched, error) {
 	cc, err := t.client()
 	if err != nil {
@@ -498,22 +500,11 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	}
 	if _, err := os.Lstat(root); err == nil {
 		status("Checking the existing " + root)
-		problem, err := verifyDir(root, files, crate)
-		if err != nil {
+		if err := verifyExisting(root, id, files, crate); err != nil {
 			return fetched{}, err
-		}
-		if problem != "" {
-			return fetched{}, fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
 		}
 		logf("%s is already here and matches its crate\n", root)
 		return fetched{root, dataDir(root, files)}, nil
-	}
-	partial := root + ".partial"
-	if _, err := os.Lstat(partial); err == nil {
-		logf("Discarding %s, left by an earlier fetch that did not finish\n", partial)
-		if err := os.RemoveAll(partial); err != nil {
-			return fetched{}, err
-		}
 	}
 
 	var total int64
@@ -529,9 +520,16 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 		logf("[verify] %d of %d files have no checksum in the crate (published before lbf recorded them); only their sizes are checked\n", len(files)-hashed, len(files))
 	}
 
-	if err := os.MkdirAll(partial, 0o755); err != nil {
+	partial, err := makePartial(root)
+	if err != nil {
 		return fetched{}, err
 	}
+	renamed := false
+	defer func() {
+		if !renamed {
+			os.RemoveAll(partial)
+		}
+	}()
 	dir, err := os.OpenRoot(partial)
 	if err != nil {
 		return fetched{}, err
@@ -540,7 +538,11 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	jobs := make([]job, len(files))
 	for i, f := range files {
 		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
-			return downloadFile(ctx, cc, dir, prefix+f.Rel, f, progress)
+			if err := downloadFile(ctx, cc, dir, prefix+f.Rel, f, progress); err != nil {
+				return err
+			}
+			fetchHook(ctx, "downloaded")
+			return nil
 		}}
 	}
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
@@ -554,11 +556,42 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	if err != nil {
 		return fetched{}, err
 	}
-	if err := os.Rename(partial, root); err != nil {
+	fetchHook(ctx, "renaming")
+	if err := os.Rename(partial, root); err == nil {
+		renamed = true
+	} else if _, serr := os.Lstat(root); serr != nil {
 		return fetched{}, err
+	} else if err := verifyExisting(root, id, files, crate); err != nil {
+		return fetched{}, err
+	} else {
+		logf("%s was saved meanwhile by another fetch, and matches its crate\n", root)
 	}
 	logDone(started, total)
 	return fetched{root, dataDir(root, files)}, nil
+}
+
+// Each fetch downloads into a folder of its own, so several fetches of one dataset into one place never touch each other's.
+func makePartial(root string) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return "", err
+	}
+	for {
+		partial := root + ".partial-" + strings.ToLower(rand.Text()[:8])
+		if err := os.Mkdir(partial, 0o755); !errors.Is(err, fs.ErrExist) {
+			return partial, err
+		}
+	}
+}
+
+func verifyExisting(root, id string, files []crateFile, crate []byte) error {
+	problem, err := verifyDir(root, files, crate)
+	if err != nil {
+		return err
+	}
+	if problem != "" {
+		return fmt.Errorf("%s already exists but is not dataset %s (%s); move it aside or fetch with another --out", root, id, problem)
+	}
+	return nil
 }
 
 // The folder that was published, which every file sits under; root itself if they do not share one.
