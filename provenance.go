@@ -148,8 +148,8 @@ func (p provenance) check() error {
 }
 
 type rule struct {
-	id     string
-	schema *jsonschema.Schema
+	id, title string
+	schema    *jsonschema.Schema
 }
 
 // The chosen profile and every profile it builds on through $ref, bronze first; ID is the chosen one.
@@ -165,6 +165,7 @@ func loadProfile(dir string) (*profile, error) {
 		return nil, err
 	}
 	docs := map[string][]byte{bronzeID: bronzeProfileJSON}
+	titles := map[string]string{}
 	parents := map[string]string{}
 	targetID := bronzeID
 
@@ -211,6 +212,11 @@ func loadProfile(dir string) (*profile, error) {
 	c := jsonschema.NewCompiler()
 	c.AssertFormat()
 	for id, raw := range docs {
+		var head struct {
+			Title string `json:"title"`
+		}
+		_ = json.Unmarshal(raw, &head)
+		titles[id] = head.Title
 		doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", id, err)
@@ -225,9 +231,20 @@ func loadProfile(dir string) (*profile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("profile %s: %w", id, err)
 		}
-		p.rules = append(p.rules, rule{id, sch})
+		p.rules = append(p.rules, rule{id, titles[id], sch})
 	}
 	return p, nil
+}
+
+// Names for the profiles a crate may declare, by $id.
+func (p *profile) titles() map[string]string {
+	titles := map[string]string{processRunCrate: "Process Run Crate"}
+	for _, r := range p.rules {
+		if r.title != "" {
+			titles[r.id] = r.title
+		}
+	}
+	return titles
 }
 
 func (p *profile) ids() []string {

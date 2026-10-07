@@ -130,7 +130,7 @@ func TestDatasetFilesRefusesUnreadableFiles(t *testing.T) {
 
 func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5, SHA256: "abc"}, {Rel: "run1/old.txt", Size: 3}}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, time.Now())
+	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestRepairWindowsArgs(t *testing.T) {
 func TestCrateMatchesPythonShape(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5}, {Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,4 +981,38 @@ func TestUpgradeIntoReadOnlyFolderSaysWhatToDo(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "README") {
 		t.Fatalf("got %v", err)
 	}
+}
+
+func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "profiles", "untitled", "1.2")
+	writeFile(t, filepath.Join(dir, "profile.json"), `{"$id": "https://example.org/profiles/untitled/1.2", "$ref": "`+bronzeProfileID(t)+`"}`)
+	prof, err := loadProfile(dir)
+	must(t, err)
+	conformsTo := append([]string{processRunCrate}, prof.ids()...)
+	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, conformsTo, prof.titles(), time.Now())
+	must(t, err)
+	var doc struct {
+		Graph []map[string]any `json:"@graph"`
+	}
+	must(t, json.Unmarshal(raw, &doc))
+	got := map[string][2]any{}
+	for _, e := range doc.Graph {
+		got[fmt.Sprint(e["@id"])] = [2]any{e["name"], e["version"]}
+	}
+	for id, want := range map[string][2]any{
+		processRunCrate:    {"Process Run Crate", "0.5"},
+		bronzeProfileID(t): {"Bronze dataset", "0.4.0"},
+		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2"},
+	} {
+		if got[id] != want {
+			t.Errorf("%s: got %v, want %v", id, got[id], want)
+		}
+	}
+}
+
+func bronzeProfileID(t *testing.T) string {
+	t.Helper()
+	id, _, err := schemaHead(bronzeProfileJSON)
+	must(t, err)
+	return id
 }
