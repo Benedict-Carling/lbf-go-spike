@@ -2,11 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func crateOf(t *testing.T, tg target, id string) ([]crateFile, []byte) {
@@ -123,4 +131,105 @@ func TestFetchNeverReportsAnotherFetchsUnfinishedFolder(t *testing.T) {
 	if entries, _ := os.ReadDir(out); len(entries) != 1 {
 		t.Errorf("left %d entries in --out, not just %s", len(entries), pub.ID)
 	}
+}
+
+// Reaches Azurite through a proxy that, for requests lost picks, lets Azurite act but drops its response.
+func lossy(t *testing.T, tg target, lost func(*http.Request) bool) target {
+	t.Helper()
+	backend, err := url.Parse("http://127.0.0.1:10000")
+	must(t, err)
+	forward := httputil.NewSingleHostReverseProxy(backend)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !lost(r) {
+			forward.ServeHTTP(w, r)
+			return
+		}
+		forward.ServeHTTP(httptest.NewRecorder(), r)
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	tg.endpoint = srv.URL + "/" + emulatorAccount
+	return tg
+}
+
+func once(match func(*http.Request) bool) func(*http.Request) bool {
+	var done atomic.Bool
+	return func(r *http.Request) bool {
+		return match(r) && done.CompareAndSwap(false, true)
+	}
+}
+
+func TestPublishSurvivesALostCommitResponse(t *testing.T) {
+	for name, commit := range map[string]func(*http.Request) bool{
+		"file": func(r *http.Request) bool {
+			return r.Method == http.MethodPut && r.URL.Query().Get("comp") == "blocklist"
+		},
+		"crate": func(r *http.Request) bool {
+			return r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/"+crateName)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tg := emulator(t, uploadPerms)
+			ctx := context.Background()
+			pub := prepared(t, dataset(t, map[string]string{"a.txt": "a"}), newID(), provenanceFlags{})
+			if err := upload(ctx, lossy(t, tg, once(commit)), pub); err != nil {
+				t.Fatalf("a commit that landed was reported as failed: %v", err)
+			}
+			got, err := download(ctx, tg, pub.ID, t.TempDir())
+			must(t, err)
+			body, err := os.ReadFile(filepath.Join(got.dataPath, "a.txt"))
+			must(t, err)
+			if string(body) != "a" {
+				t.Fatalf("fetched %q", body)
+			}
+		})
+	}
+}
+
+func TestUploadingIdenticalBytesTwiceIsNotAnotherPublish(t *testing.T) {
+	tg := emulator(t, uploadPerms)
+	ctx := context.Background()
+	cc, err := tg.client()
+	must(t, err)
+	id := newID()
+	for range 2 {
+		pub := prepared(t, dataset(t, map[string]string{"a.txt": "a"}), id, provenanceFlags{})
+		if err := uploadFile(ctx, cc, id+"/run1/a.txt", &pub.Files[0], tg.User, func(int64) {}); err != nil {
+			t.Fatal(err)
+		}
+		if len(pub.Files[0].SHA256) != 64 {
+			t.Fatalf("sha256 not recorded: %q", pub.Files[0].SHA256)
+		}
+	}
+}
+
+func TestAnotherPublishsCrateLandingFirstIsNotCalledMissing(t *testing.T) {
+	tg := emulator(t, uploadPerms)
+	ctx := context.Background()
+	cc, err := tg.client()
+	must(t, err)
+	dir := dataset(t, map[string]string{"a.txt": "a"})
+	id := newID()
+	other := prepared(t, dir, id, provenanceFlags{})
+	other.Files[0].SHA256 = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+	_, conformsTo, err := other.validate(tg)
+	must(t, err)
+
+	beatIt := func(r *http.Request) bool {
+		if r.Method == http.MethodPut && r.URL.Query().Get("comp") == "blocklist" {
+			must(t, uploadCrate(ctx, cc, tg, other, time.Now().Add(-time.Minute), conformsTo))
+		}
+		return false
+	}
+	err = upload(ctx, lossy(t, tg, beatIt), prepared(t, dir, id, provenanceFlags{}))
+	if err == nil || strings.Contains(err.Error(), "without a crate") || !strings.Contains(err.Error(), "another publish of the same ID stored its crate first") {
+		t.Fatalf("got %v", err)
+	}
+	if _, ok := errors.AsType[idTaken](err); ok {
+		t.Fatalf("refused with exit code 3, though the other publish may have stored the same dataset: %v", err)
+	}
+	must(t, upload(ctx, tg, prepared(t, dir, id, provenanceFlags{})))
 }
