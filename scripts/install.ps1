@@ -66,7 +66,7 @@ try {
         $userPath = if ($userPath) { "$userPath;$dir" } else { $dir }
         $key.SetValue('Path', $userPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
         # Deleting a variable through .NET broadcasts WM_SETTINGCHANGE, so Explorer gives new terminals the new Path.
-        [Environment]::SetEnvironmentVariable('LBF_INSTALL_REFRESH', $null, 'User')
+        [Environment]::SetEnvironmentVariable('LBF_INSTALL_REFRESH', [NullString]::Value, 'User')
     }
 } finally {
     $key.Close()
