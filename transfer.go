@@ -144,7 +144,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 		return err
 	}
 	if _, ok := stored[crateName]; ok {
-		return confirmPublished(ctx, cc, pub, conformsTo)
+		return confirmPublished(ctx, cc, pub, conformsTo, stored)
 	}
 
 	if len(stored) > 0 {
@@ -221,7 +221,7 @@ func listStored(ctx context.Context, cc *container.Client, id string) (map[strin
 }
 
 // A rerun of a publish that already finished succeeds only if it would have published the same thing.
-func confirmPublished(ctx context.Context, cc *container.Client, pub publication, conformsTo []string) error {
+func confirmPublished(ctx context.Context, cc *container.Client, pub publication, conformsTo []string, stored map[string]crateFile) error {
 	id := pub.ID
 	status("Reading the crate of " + id)
 	crate, err := downloadBuffer(ctx, cc, id+"/"+crateName)
@@ -232,6 +232,9 @@ func confirmPublished(ctx context.Context, cc *container.Client, pub publication
 	files, err := crateFiles(crate)
 	if err != nil {
 		return fmt.Errorf("dataset %s: %w", id, err)
+	}
+	if problems := landedProblems(files, stored); len(problems) > 0 {
+		return idTaken{problemList(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
 	}
 	stated, statedConformsTo, err := crateProvenance(crate)
 	if err != nil {
@@ -426,16 +429,20 @@ func verifyLanded(ctx context.Context, cc *container.Client, pub publication) er
 	for i, f := range pub.Files {
 		files[i] = crateFile{Rel: f.Rel, Size: f.Size, SHA256: f.SHA256}
 	}
-	problems := compareStored(files, stored)
-	for _, f := range files {
-		if s, ok := stored[f.Rel]; ok && s.SHA256 != f.SHA256 {
-			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %s", f.Rel, s.SHA256, f.SHA256))
-		}
-	}
-	if len(problems) > 0 {
+	if problems := landedProblems(files, stored); len(problems) > 0 {
 		return idTaken{problemList(fmt.Sprintf("%s was published, but something else changed its files meanwhile, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", pub.ID), problems)}
 	}
 	return nil
+}
+
+func landedProblems(files []crateFile, stored map[string]crateFile) []string {
+	problems := compareStored(files, stored)
+	for _, f := range files {
+		if s, ok := stored[f.Rel]; ok && s.SHA256 != f.SHA256 {
+			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %q", f.Rel, s.SHA256, f.SHA256))
+		}
+	}
+	return problems
 }
 
 var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")

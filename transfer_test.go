@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -133,22 +134,24 @@ func TestFetchNeverReportsAnotherFetchsUnfinishedFolder(t *testing.T) {
 	}
 }
 
-// Reaches Azurite through a proxy that, for requests lost picks, lets Azurite act but drops its response.
+// Reaches Azurite through a proxy that drops the response to each request lost picks once Azurite has acted on it.
 func lossy(t *testing.T, tg target, lost func(*http.Request) bool) target {
 	t.Helper()
 	backend, err := url.Parse("http://127.0.0.1:10000")
 	must(t, err)
 	forward := httputil.NewSingleHostReverseProxy(backend)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !lost(r) {
-			forward.ServeHTTP(w, r)
+		resp := httptest.NewRecorder()
+		forward.ServeHTTP(resp, r)
+		if lost(r) {
+			if conn, _, err := http.NewResponseController(w).Hijack(); err == nil {
+				conn.Close()
+			}
 			return
 		}
-		forward.ServeHTTP(httptest.NewRecorder(), r)
-		conn, _, err := http.NewResponseController(w).Hijack()
-		if err == nil {
-			conn.Close()
-		}
+		maps.Copy(w.Header(), resp.Header())
+		w.WriteHeader(resp.Code)
+		w.Write(resp.Body.Bytes())
 	}))
 	t.Cleanup(srv.Close)
 	tg.endpoint = srv.URL + "/" + emulatorAccount
@@ -232,4 +235,24 @@ func TestAnotherPublishsCrateLandingFirstIsNotCalledMissing(t *testing.T) {
 		t.Fatalf("refused with exit code 3, though the other publish may have stored the same dataset: %v", err)
 	}
 	must(t, upload(ctx, tg, prepared(t, dir, id, provenanceFlags{})))
+}
+
+func TestPublishAgainChecksWhatIsStoredAgainstTheCrate(t *testing.T) {
+	tg := emulator(t, uploadPerms)
+	ctx := context.Background()
+	cc, err := tg.client()
+	must(t, err)
+	id := newID()
+	dir := dataset(t, map[string]string{"a.txt": "a"})
+	must(t, upload(ctx, tg, prepared(t, dir, id, provenanceFlags{})))
+	late := prepared(t, dataset(t, map[string]string{"a.txt": "a", "b.txt": "b"}), id, provenanceFlags{})
+	must(t, uploadFile(ctx, cc, id+"/run1/b.txt", &late.Files[1], tg.User, func(int64) {}))
+	if _, err := download(ctx, tg, id, t.TempDir()); err == nil {
+		t.Fatal("fetch accepted a dataset with a file its crate does not list")
+	}
+
+	err = upload(ctx, tg, prepared(t, dir, id, provenanceFlags{}))
+	if _, ok := errors.AsType[idTaken](err); !ok || !strings.Contains(err.Error(), "run1/b.txt: stored but not listed in the crate") || !strings.Contains(err.Error(), "fetch will refuse it") {
+		t.Fatalf("rerun of a publish that fetch refuses: %v", err)
+	}
 }
