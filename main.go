@@ -26,6 +26,7 @@ Usage:
   lbf publish <path>    upload a dataset (alias: upload)
   lbf fetch <id>        download a dataset (alias: download)
   lbf new-id            print a dataset ID to publish under later
+  lbf browse            search and look through every dataset in your browser
   lbf check             prove a credential can publish or fetch, without changing anything
   lbf mint-sas          write a pre-minted credential file
   lbf login             sign in with the browser and remember it
@@ -145,6 +146,9 @@ func run(ctx context.Context, args []string) error {
 		fmt.Println(newID())
 		return nil
 
+	case "browse":
+		return browse(ctx, o)
+
 	case "check":
 		if o.mode != "upload" && o.mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
@@ -238,7 +242,7 @@ func run(ctx context.Context, args []string) error {
 
 type options struct {
 	tag, account, tenant, container, sasEnv string
-	out, mode                               string
+	out, mode, port                         string
 	profile, id                             string
 	prov                                    provenanceFlags
 	dryRun, json                            bool
@@ -318,6 +322,14 @@ func newCommand(cmd string, o *options) (*command, error) {
 		jsonFlag("print {\"id\", \"url\", \"path\", \"data_path\"} as JSON instead of the path; data_path is the uploaded folder inside path")
 		storage()
 		sasEnv()
+	case "browse":
+		c.synopsis = "browse [options]"
+		c.notes = "Reads every dataset's crate, caching each one since crates never change, and serves them on this computer only.\n"
+		str(&o.container, "container", "NAMES", "", "comma-separated containers to read (default every container you can list)")
+		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
+		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
+		str(&o.port, "port", "PORT", "0", "local port to serve on (0 picks a free one)")
+		tenant()
 	case "new-id":
 		c.synopsis = "new-id"
 		c.notes = "Prints a new dataset ID without signing in. Pass it to 'lbf publish --id' once the data is ready.\n"

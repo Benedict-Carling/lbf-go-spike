@@ -11,6 +11,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.1
 	github.com/dustinkirkland/golang-petname v0.0.0-20260929120758-6e3915f1a6a8
 	github.com/mattn/go-isatty v0.0.24
+	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260929172509-b39ff6d641ec
 	golang.org/x/sync v0.22.0
@@ -33,7 +34,6 @@ require (
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.28 // indirect
-	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
