@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -85,16 +87,31 @@ func latestVersion(ctx context.Context, base string) (string, error) {
 	return tag, nil
 }
 
-func parseVersion(v string) ([]int, bool) {
-	p := make([]int, 3)
-	_, err := fmt.Sscanf(v, "v%d.%d.%d", &p[0], &p[1], &p[2])
-	return p, err == nil
+// parseVersion reads vX.Y.Z or a pre-release vX.Y.Z-suffix, which sorts below vX.Y.Z.
+func parseVersion(v string) (p []int, ok bool) {
+	core, pre, isPre := strings.Cut(strings.TrimPrefix(v, "v"), "-")
+	parts := strings.Split(core, ".")
+	if !strings.HasPrefix(v, "v") || len(parts) != 3 || (isPre && pre == "") {
+		return nil, false
+	}
+	for _, s := range parts {
+		n, err := strconv.Atoi(s)
+		if err != nil || strings.Trim(s, "0123456789") != "" {
+			return nil, false
+		}
+		p = append(p, n)
+	}
+	if isPre {
+		return append(p, 0), true
+	}
+	return append(p, 1), true
 }
 
+// newerVersion never offers a pre-release, but moves a pre-release user on to the release.
 func newerVersion(latest, current string) bool {
 	l, okL := parseVersion(latest)
 	c, okC := parseVersion(current)
-	return okL && okC && slices.Compare(l, c) > 0
+	return okL && okC && l[3] == 1 && slices.Compare(l, c) > 0
 }
 
 func assetName() string {
@@ -163,9 +180,19 @@ func checksumFor(sums []byte, name string) (string, error) {
 func replaceExecutable(exe string, bin []byte) error {
 	tmp := exe + ".new"
 	_ = os.Remove(tmp)
-	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
-		return fmt.Errorf("%w; lbf cannot write to its own folder, so ask whoever installed it to upgrade, or install your own copy with the command in the README", err)
+	mode := fs.FileMode(0o755)
+	if info, err := os.Stat(exe); err == nil {
+		mode = info.Mode().Perm()
 	}
+	if err := os.WriteFile(tmp, bin, mode); err != nil {
+		_ = os.Remove(tmp)
+		if errors.Is(err, fs.ErrPermission) {
+			return fmt.Errorf("%w; lbf cannot write to its own folder, so ask whoever installed it to upgrade, or install your own copy with the command in the README", err)
+		}
+		return err
+	}
+	// WriteFile applies the umask.
+	_ = os.Chmod(tmp, mode)
 	if runtime.GOOS != "windows" {
 		if err := os.Rename(tmp, exe); err != nil {
 			_ = os.Remove(tmp)

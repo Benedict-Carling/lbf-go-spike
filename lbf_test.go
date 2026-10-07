@@ -857,6 +857,17 @@ func TestNewerVersion(t *testing.T) {
 		{"v0.1.4", "v0.1.5", false},
 		{"v0.1.6", "dev", false},
 		{"", "v0.1.5", false},
+		{"v0.2.0", "v0.2.0-rc1", true},
+		{"v0.2.1", "v0.2.0-rc1", true},
+		{"v0.1.9", "v0.2.0-rc1", false},
+		{"v0.2.0-rc1", "v0.2.0", false},
+		{"v0.2.0-rc1", "v0.1.9", false},
+		{"v0.2.0-rc2", "v0.2.0-rc1", false},
+		{"v0.1.6x", "v0.1.5", false},
+		{"v0.1.6", "v0.1.5x", false},
+		{"v0.1", "v0.0.9", false},
+		{"v0.1.6.1", "v0.1.5", false},
+		{"v0.1.-6", "v0.1.5", false},
 	} {
 		if got := newerVersion(c.latest, c.current); got != c.want {
 			t.Errorf("newerVersion(%q, %q) = %v", c.latest, c.current, got)
@@ -980,5 +991,24 @@ func TestUpgradeIntoReadOnlyFolderSaysWhatToDo(t *testing.T) {
 	_, _, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe)
 	if err == nil || !strings.Contains(err.Error(), "README") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestUpgradeKeepsPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs Unix permissions")
+	}
+	bin := []byte("new lbf")
+	sum := sha256.Sum256(bin)
+	srv := fakeReleases(t, "v0.2.0", bin, hex.EncodeToString(sum[:]))
+	exe := filepath.Join(t.TempDir(), "lbf")
+	writeFile(t, exe, "old lbf")
+	os.Chmod(exe, 0o751)
+
+	if _, _, err := upgrade(context.Background(), srv.URL+"/releases", "v0.1.5", exe); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(exe); err != nil || info.Mode().Perm() != 0o751 {
+		t.Fatalf("mode %v, err %v; want -rwxr-x--x", info.Mode(), err)
 	}
 }
