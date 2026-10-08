@@ -25,6 +25,8 @@ import (
 // A profile version is semantic, as 1, 1.2 or 1.2.3, with or without a leading v.
 var versionFolder = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){0,2}$`)
 
+var profileSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
 //go:embed profiles/bronze/profile.json
 var bronzeProfileJSON []byte
 
@@ -414,4 +416,19 @@ func schemaHead(raw []byte) (id, parent string, err error) {
 		return "", "", fmt.Errorf("$id %q is not an absolute URL such as https://example.org/profiles/name/0.1.0; it is recorded as the crate's conformsTo", head.ID)
 	}
 	return head.ID, head.Ref, nil
+}
+
+// A published profile: its name, and its version unless the latest is meant.
+type published struct{ name, version string }
+
+// The name and version a profile is published under: the last two segments of its $id.
+func publishedAs(id string) (published, error) {
+	u, err := url.Parse(id)
+	if err == nil {
+		segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(segs) >= 2 && profileSlug.MatchString(segs[len(segs)-2]) && versionFolder.MatchString(segs[len(segs)-1]) {
+			return published{segs[len(segs)-2], segs[len(segs)-1]}, nil
+		}
+	}
+	return published{}, fmt.Errorf("$id %s does not end in /<name>/<version>, such as https://w3id.org/lbf/profiles/plate-read/0.1.0, so it cannot be published", id)
 }

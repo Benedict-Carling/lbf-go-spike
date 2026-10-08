@@ -138,91 +138,9 @@ func TestProfileErrorsSayWhichFlagFixesThem(t *testing.T) {
 	}
 }
 
-func TestRegistryRef(t *testing.T) {
-	t.Chdir(t.TempDir())
-	writeFile(t, filepath.Join("plate-local", "profile.json"), "{}")
-	must(t, os.MkdirAll(filepath.Join("plate-read", "0.1.0"), 0o755))
-	for arg, want := range map[string][2]string{
-		"plate-read":       {"plate-read", ""},
-		"plate-read@0.2.0": {"plate-read", "0.2.0"},
-		"plate-read@v1":    {"plate-read", "v1"},
-	} {
-		ref, ok := publishedRef(arg)
-		if !ok || ref.name != want[0] || ref.version != want[1] {
-			t.Errorf("%s: got %v %v", arg, ref, ok)
-		}
-	}
-	for _, arg := range []string{"", "plate-local", "./plate-read", `profiles\plate-read`, "Plate-Read", "plate-read@latest"} {
-		if _, ok := publishedRef(arg); ok {
-			t.Errorf("%q taken as a published profile", arg)
-		}
-	}
-}
-
 func profileJSON(name, version, parent, extra string) string {
 	return `{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://w3id.org/lbf/profiles/` + name + `/` + version +
 		`", "$ref": "` + parent + `", "title": "` + name + `"` + extra + `}`
-}
-
-func TestRegistryPublishesResolvesShowsAndPulls(t *testing.T) {
-	tg := emulator(t, uploadPerms)
-	ctx := context.Background()
-	cache := t.TempDir()
-	cacheRoot = func() (string, error) { return cache, nil }
-	t.Cleanup(func() { cacheRoot = os.UserCacheDir })
-
-	bronze := bronzeProfileID(t)
-	src := t.TempDir()
-	plate := `, "required": ["additionalProperty"], "properties": {"additionalProperty": {"required": ["plate_id"], "properties": {"plate_id": {"title": "Plate barcode", "examples": ["P-0001"]}}}}`
-	writeFile(t, filepath.Join(src, "plate-read", "0.1.0", "profile.json"), profileJSON("plate-read", "0.1.0", bronze, plate))
-	writeFile(t, filepath.Join(src, "plate-read", "0.2.0", "profile.json"), profileJSON("plate-read", "0.2.0", bronze, plate))
-	writeFile(t, filepath.Join(src, "plate-summary", "0.1.0", "profile.json"), profileJSON("plate-summary", "0.1.0", "https://w3id.org/lbf/profiles/plate-read/0.2.0", ""))
-
-	if _, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-summary", "0.1.0"))); err == nil || !strings.Contains(err.Error(), "publish it first") {
-		t.Fatalf("published before what it builds on: %v", err)
-	}
-	for _, v := range []string{"0.1.0", "0.2.0"} {
-		msg, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-read", v)))
-		must(t, err)
-		t.Log(msg)
-	}
-	msg, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-read", "0.2.0")))
-	if err != nil || !strings.Contains(msg, "unchanged") {
-		t.Fatalf("republishing the same profile: %s %v", msg, err)
-	}
-	writeFile(t, filepath.Join(src, "plate-read", "0.2.0", "profile.json"), profileJSON("plate-read", "0.2.0", bronze, ""))
-	if _, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-read", "0.2.0"))); err == nil || !strings.Contains(err.Error(), "never changes") {
-		t.Fatalf("a published version was replaced: %v", err)
-	}
-	if _, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-summary", "0.1.0"))); err == nil || !strings.Contains(err.Error(), "differs") {
-		t.Fatalf("published on top of a local copy that differs from the published one: %v", err)
-	}
-
-	latest, err := publishedProfile(ctx, tg, published{"plate-read", ""})
-	must(t, err)
-	if filepath.Base(latest) != "0.2.0" {
-		t.Fatalf("latest is %s", latest)
-	}
-	if _, err := publishedProfile(ctx, tg, published{"plate-read", "0.3.0"}); err == nil || !strings.Contains(err.Error(), "0.1.0, 0.2.0") {
-		t.Fatalf("missing version: %v", err)
-	}
-	prof, err := loadProfile(latest)
-	must(t, err)
-	shown := describeProfile(prof, "plate-read@0.2.0")
-	for _, want := range []string{"--property plate_id=...", "required", "Plate barcode; e.g. P-0001", "lbf publish <folder> --profile plate-read@0.2.0 --property plate_id=..."} {
-		if !strings.Contains(shown, want) {
-			t.Errorf("show lacks %q:\n%s", want, shown)
-		}
-	}
-
-	pulled, err := writeProfiles(prof, t.TempDir())
-	must(t, err)
-	data := dataset(t, map[string]string{"readings.csv": "well,abs\nA1,0.5\n"})
-	pub, err := preparePublication(data, provenanceFlags{props: []string{"plate_id=P-0001"}}, []string{pulled}, "")
-	must(t, err)
-	if _, err := pub.crate(tg); err != nil {
-		t.Fatalf("a published profile does not check a dataset: %v", err)
-	}
 }
 
 func TestResumeRefusesAnotherSchemaUnderTheSameID(t *testing.T) {
@@ -245,19 +163,6 @@ func TestResumeRefusesAnotherSchemaUnderTheSameID(t *testing.T) {
 	err = upload(ctx, tg, pub)
 	if _, ok := errors.AsType[idTaken](err); !ok || !strings.Contains(err.Error(), "other versions of their schemas") {
 		t.Fatalf("got %v", err)
-	}
-}
-
-func TestDryRunUsesACachedProfileWithoutSigningIn(t *testing.T) {
-	cache := t.TempDir()
-	cacheRoot = func() (string, error) { return cache, nil }
-	t.Cleanup(func() { cacheRoot = os.UserCacheDir })
-	dir := filepath.Join(cache, "lbf", "profiles", "someaccount", "plate-read", "0.1.0")
-	writeFile(t, filepath.Join(dir, "profile.json"), profileJSON("plate-read", "0.1.0", bronzeProfileID(t), ""))
-
-	got, err := profileDir(context.Background(), options{}, "plate-read@0.1.0", true)
-	if err != nil || got != dir {
-		t.Fatalf("got %s %v", got, err)
 	}
 }
 
@@ -419,15 +324,6 @@ func TestPropertyNamesAreSafeInTheCrate(t *testing.T) {
 	}
 }
 
-func TestEmptyVersionFoldersAreNotPublished(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "plate-read", "0.1.0", "profile.json"), "{}")
-	must(t, os.MkdirAll(filepath.Join(dir, "plate-read", "0.9.0"), 0o755))
-	if got := publishedVersions(dir, "plate-read"); len(got) != 1 || got[0] != "0.1.0" {
-		t.Fatalf("got %v", got)
-	}
-}
-
 func TestADatasetCanMeetSeveralProfiles(t *testing.T) {
 	root := t.TempDir()
 	bronze := bronzeProfileID(t)
@@ -515,14 +411,10 @@ func TestShowSaysWhatNoFlagCanGive(t *testing.T) {
 	if _, ok := got["license"]; ok {
 		t.Errorf("a term lbf sets is asked for: %+v", got)
 	}
-}
-
-func TestProfileVersionsSortAsSemanticVersions(t *testing.T) {
-	dir := t.TempDir()
-	for _, v := range []string{"0.10.0", "0.9.0", "v1", "0.9", "1.0.0.1"} {
-		writeFile(t, published{"plate-read", v}.in(dir), "{}")
-	}
-	if got := publishedVersions(dir, "plate-read"); !slices.Equal(got, []string{"0.9", "0.9.0", "0.10.0", "v1"}) {
-		t.Fatalf("got %v", got)
+	shown := describeProfile(loaded(t, dir), dir)
+	for _, want := range []string{"Strict", "Builds on https://w3id.org/lbf/profiles/bronze/0.5.0", "lbf publish <folder> --profile " + dir + " --name ... --description ..."} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("show lacks %q:\n%s", want, shown)
+		}
 	}
 }

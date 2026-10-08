@@ -65,7 +65,7 @@ lbf publish <path>                 # land in bronze; prints the new dataset ID (
 lbf fetch <id> [--out DIR]         # alias: download
 lbf new-id                         # an ID to publish under later, with publish --id
 lbf browse                         # search every dataset's crate in your browser
-lbf profiles                       # the profiles datasets can meet; see Profiles
+lbf profiles show DIR              # what a profile asks for, as flags; see Profiles
 lbf check --mode upload            # proves the credential works, before a long job
 lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
 lbf logout                         # signs out of lbf and deletes its tokens; says if az login still signs you in
@@ -86,7 +86,7 @@ lbf publish results/ --container silver \
     --derived-from 20261001-fancy-dassie-eadb \
     --instrument name=my-pipeline,version=0.1.0,url=https://... \
     --property sample_id=SAM-0001 \
-    --profile minimal-silver@0.1.0
+    --profile profiles/minimal-silver/0.1.0
 ```
 
 `--profile` repeats when a dataset must meet several profiles, and
@@ -121,10 +121,10 @@ A profile is a JSON Schema `profile.json` whose `$id`, such as
 `https://w3id.org/lbf/profiles/plate-read/0.1.0`, ends in its name and a
 semantic version (`1`, `1.2` or `1.2.3`, with or without a leading `v`).
 It builds on another with `$ref`, and every chain ends at bronze,
-`https://w3id.org/lbf/profiles/bronze/0.5.0`. `--profile` takes a profile
-published in the storage account, as `NAME` (the latest) or `NAME@VERSION`, or
-a folder holding `profile.json`; sibling profiles (`profiles/<name>/profile.json`
-or, versioned, `profiles/<name>/<version>/profile.json`) resolve locally.
+`https://w3id.org/lbf/profiles/bronze/0.5.0`. `--profile` takes a folder
+holding `profile.json`; the profiles it builds on are found beside it
+(`profiles/<name>/profile.json` or, versioned,
+`profiles/<name>/<version>/profile.json`).
 
 A profile checks the crate's root, laid out by bronze's JSON-LD frame
 (`profiles/bronze/frame.json`): what the root refers to is embedded, and
@@ -148,18 +148,10 @@ checked against, and Process Run Crate when the dataset is derived.
 `examples/profile-skeleton` walks through writing and using profiles.
 
 ```
-lbf profiles                          # the profiles published in the storage account
-lbf profiles show NAME[@VERSION]|DIR  # what one asks for, as flags
-lbf profiles publish DIR              # publish a profile; a published version never changes
-lbf profiles pull NAME[@VERSION]      # copy one into --out, for a machine that cannot sign in
+lbf profiles show DIR    # what the profile asks for, as flags, and the publish command that gives it
 ```
 
-Published profiles live in the account's `profiles` container as
-`<name>/<version>/profile.json`, readable by whoever can read the account, and
-are cached locally once fetched; `--dry-run` with `NAME@VERSION` uses the cache
-without signing in.
-
-`--dry-run` validates and prints the crate, as uploader `dry-run`, signing in only to read a `--profile NAME@VERSION` not yet cached, or to find the latest version of a `--profile NAME`;
+`--dry-run` validates and prints the crate, as uploader `dry-run`, without signing in;
 with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
 publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path", "provenance"}` as one line, where
@@ -205,15 +197,11 @@ and record a new decision here.
   of what bronze's schema means. A derived dataset also lists Process Run Crate
   0.6, which lbf declares by how it writes the run rather than checks, so it
   carries no schema. Resuming a publish requires the same schemas.
-- **A profile's version is a semantic version, and a published one never
-  changes.** `NAME` without a version takes the latest, ordered as semantic
-  versions are, so `0.10.0` follows `0.9.0`.
-- **Profiles are published in the storage account they describe, as
-  `profiles/<name>/<version>/profile.json`, named
-  `https://w3id.org/lbf/profiles/<name>/<version>`.** They need no sign-in but
-  the one publishing already uses, a published version never changes, and
-  anyone who can read a dataset can read its rules. Bronze is compiled in;
-  authors and pipelines may use a folder.
+- **A profile is a folder, `profiles/<name>/<version>/profile.json`, named
+  `https://w3id.org/lbf/profiles/<name>/<version>`, and its version is a
+  semantic version that never changes once a dataset has met it.** A dataset's
+  crate carries the schema it met, so a changed rule is a new version, not an
+  edit. Bronze is compiled in; a pipeline keeps its profiles beside it.
 - **What a publisher states is one record: a name, description, parent,
   instruments and properties.** The flags, the `--provenance` file and
   `lbf fetch --json` all use it. Flags give values (`--property`) and links

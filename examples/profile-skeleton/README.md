@@ -26,16 +26,11 @@ lbf publish example/plate1 --profile profiles/plate-read/0.1.0 \
     --dry-run
 ```
 
-To share the profiles, publish them to the storage account once. Anyone can
-then name them, with no copy of this folder:
+`lbf profiles show profiles/plate-read/0.1.0` says what the profile asks for.
+To publish the plate read for real:
 
 ```bash
-lbf profiles publish profiles/plate-read/0.1.0 --tag tag=storage-test
-lbf profiles publish profiles/plate-summary/0.1.0 --tag tag=storage-test
-lbf profiles --tag tag=storage-test                      # what is published
-lbf profiles show plate-read --tag tag=storage-test      # what it asks for
-
-lbf publish example/plate1 --profile plate-read@0.1.0 \
+lbf publish example/plate1 --profile profiles/plate-read/0.1.0 \
     --properties example/plate1.properties.json --tag tag=storage-test
 ```
 
@@ -47,7 +42,7 @@ lbf publish example/plate-summary --container silver \
     --derived-from 20261007-causal-bison-9ece \
     --instrument name=plate-summary,version=0.1.0,url=https://github.com/ImperialCollegeLondon/lbf-profile-skeleton/releases/tag/v0.1.0 \
     --properties example/summary.properties.json \
-    --profile plate-summary@0.1.0 --tag tag=storage-test
+    --profile profiles/plate-summary/0.1.0 --tag tag=storage-test
 ```
 
 In a real pipeline the summary would be computed from the fetched plate read;
@@ -89,12 +84,10 @@ A profile is a JSON Schema in `profiles/<name>/<version>/profile.json`. It
 needs:
 
 - `$id`: `https://w3id.org/lbf/profiles/<name>/<version>`. It is recorded in
-  the crate's `conformsTo`, and its last two parts are the name and version it
-  is published under.
+  the crate's `conformsTo`, and ends in the profile's name and version.
 - `$ref`: the profile it builds on. Every chain ends at lbf's bronze profile,
   `https://w3id.org/lbf/profiles/bronze/0.5.0`, which is compiled into lbf.
-  A profile beside it can be built on by its `$id`; to build on a published
-  one, `lbf profiles pull` it beside yours.
+  A profile beside it can be built on by its `$id`.
 - `title` and `description`.
 - Its rules, written against the crate's root as lbf lays it out (bronze's
   `frame.json`, a JSON-LD frame): what the root refers to is embedded, and
@@ -149,14 +142,3 @@ profile is described in the crate by what it builds on (`isProfileOf`) and by
 the exact schema it was checked against, carried as the `text` of a
 `ResourceDescriptor`'s artifact with the role `schema`. So a dataset says not
 only which profiles it meets, but what their rules were when it was published.
-
-## Machines that cannot sign in
-
-A `--profile` name is read from the storage account. On a machine that cannot
-sign in to it (HPC with `--sas-env`), copy the profile first and give its
-folder:
-
-```bash
-lbf profiles pull plate-read@0.1.0 --out profiles --tag tag=storage-test
-lbf publish run1 --profile profiles/plate-read/0.1.0 --sas-env bronze.env
-```
