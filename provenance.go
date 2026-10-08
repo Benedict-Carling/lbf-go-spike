@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	_ "embed"
 	"encoding/json"
 	jsonv2 "encoding/json/v2"
@@ -16,11 +17,12 @@ import (
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 )
 
-const processRunCrate = "https://w3id.org/ro/wfrun/process/0.5"
+const processRunCrate = "https://w3id.org/ro/wfrun/process/0.6"
 
 var versionFolder = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+)*$`)
 
@@ -35,27 +37,34 @@ type instrument struct {
 	URL     string `json:"url"`
 }
 
-// The --provenance file: how a dataset was produced.
+// The --provenance file: what the publisher states about a dataset.
 type provenance struct {
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
 	DerivedFrom string            `json:"derived_from,omitempty"`
 	Instruments []instrument      `json:"instruments,omitempty"`
 	Properties  map[string]string `json:"properties"`
 }
 
-// Where publish takes its provenance from: a --provenance file, or the flags that spell it out.
+// Where publish takes its provenance from: a --provenance file, the flags that spell it out, or both.
 type provenanceFlags struct {
 	file, derivedFrom, properties string
+	name, description             string
 	instruments                   []instrument
+	props                         []string
 }
 
 func (f provenanceFlags) load() (provenance, error) {
+	p := provenance{DerivedFrom: f.derivedFrom, Instruments: f.instruments, Properties: map[string]string{}}
 	if f.file != "" {
 		if f.derivedFrom != "" || len(f.instruments) > 0 || f.properties != "" {
 			return provenance{}, errors.New("--provenance cannot be combined with --derived-from, --instrument or --properties")
 		}
-		return readProvenance(f.file)
+		var err error
+		if p, err = readProvenance(f.file); err != nil {
+			return provenance{}, err
+		}
 	}
-	p := provenance{DerivedFrom: f.derivedFrom, Instruments: f.instruments, Properties: map[string]string{}}
 	if f.properties != "" {
 		err := decodeStrict(f.properties, &p.Properties)
 		if err == nil && p.Properties == nil {
@@ -65,14 +74,42 @@ func (f provenanceFlags) load() (provenance, error) {
 			return provenance{}, fmt.Errorf("%s is not a valid properties file: %w", f.properties, err)
 		}
 	}
+	for _, kv := range f.props {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || name == "" {
+			return provenance{}, fmt.Errorf("--property %q is not NAME=VALUE", kv)
+		}
+		if _, dup := p.Properties[name]; dup {
+			return provenance{}, fmt.Errorf("property %q is given twice", name)
+		}
+		p.Properties[name] = value
+	}
+	for _, field := range []struct {
+		flag, value string
+		into        *string
+	}{{"name", f.name, &p.Name}, {"description", f.description, &p.Description}} {
+		if field.value != "" && *field.into != "" {
+			return provenance{}, fmt.Errorf("--%s is also given in %s", field.flag, f.file)
+		}
+		*field.into = cmp.Or(*field.into, field.value)
+	}
 	if err := p.check(); err != nil {
 		return provenance{}, err
 	}
 	return p, nil
 }
 
+// Instruments are a set in the crate, so neither their order nor a repeat is part of what was stated.
 func (p provenance) sameAs(q provenance) bool {
-	return p.DerivedFrom == q.DerivedFrom && slices.Equal(p.Instruments, q.Instruments) && maps.Equal(p.Properties, q.Properties)
+	set := func(ins []instrument) []instrument {
+		ins = slices.Clone(ins)
+		slices.SortFunc(ins, func(a, b instrument) int {
+			return cmp.Or(cmp.Compare(a.URL, b.URL), cmp.Compare(a.Name, b.Name), cmp.Compare(a.Version, b.Version))
+		})
+		return slices.Compact(ins)
+	}
+	return p.Name == q.Name && p.Description == q.Description && p.DerivedFrom == q.DerivedFrom &&
+		slices.Equal(set(p.Instruments), set(q.Instruments)) && maps.Equal(p.Properties, q.Properties)
 }
 
 func readProvenance(path string) (provenance, error) {
@@ -153,16 +190,17 @@ func (p provenance) check() error {
 		}
 	}
 	for k := range p.Properties {
-		if k == "uploader" || k == "blob-location" || k == "run" || strings.HasPrefix(k, "source-") {
-			return fmt.Errorf("property %q would clash with an entity in the crate; choose another name", k)
+		if k == "uploader" || k == "blob-location" || k == "run" || strings.HasPrefix(k, "source-") || strings.HasPrefix(k, "profile-") || strings.HasPrefix(k, "@") {
+			return fmt.Errorf("property %q would clash with an entity or keyword in the crate; choose another name", k)
 		}
 	}
 	return nil
 }
 
 type rule struct {
-	id, title string
-	schema    *jsonschema.Schema
+	id, title, parent string
+	raw               []byte
+	schema            *jsonschema.Schema
 }
 
 // The chosen profile and every profile it builds on through $ref, bronze first; ID is the chosen one.
@@ -180,6 +218,7 @@ func loadProfile(dir string) (*profile, error) {
 	docs := map[string][]byte{bronzeID: bronzeProfileJSON}
 	titles := map[string]string{}
 	parents := map[string]string{}
+	var skipped []string
 	paths := map[string]string{bronzeID: bronzeID}
 	targetID := bronzeID
 
@@ -208,13 +247,20 @@ func loadProfile(dir string) (*profile, error) {
 				id, ref, err = schemaHead(raw)
 			}
 			if err != nil && path != target {
+				skipped = append(skipped, fmt.Sprintf("%s (%v)", path, err))
 				continue
 			}
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
+			if id == bronzeID && path != target {
+				continue
+			}
 			if id == bronzeID {
 				return nil, fmt.Errorf("%s: $id %s is lbf's bronze profile, which only lbf defines", path, id)
+			}
+			if have, ok := docs[id]; ok && paths[id] != path && !bytes.Equal(have, raw) {
+				return nil, fmt.Errorf("%s and %s both have the $id %s but differ; a profile version never changes, so give one a new version", paths[id], path, id)
 			}
 			docs[id], parents[id], paths[id] = raw, ref, path
 			if path == target {
@@ -225,6 +271,13 @@ func loadProfile(dir string) (*profile, error) {
 
 	var chain []string
 	for id := targetID; id != "" && id != bronzeID && !slices.Contains(chain, id); id = parents[id] {
+		if parent := parents[id]; parent != "" && docs[parent] == nil {
+			err := fmt.Errorf("%s builds on %s, which is neither lbf's bronze profile %s nor a profile beside it", paths[id], parent, bronzeID)
+			if len(skipped) > 0 {
+				err = fmt.Errorf("%w; these could not be read: %s", err, strings.Join(skipped, ", "))
+			}
+			return nil, err
+		}
 		chain = append([]string{id}, chain...)
 	}
 	ids := append([]string{bronzeID}, chain...)
@@ -251,20 +304,33 @@ func loadProfile(dir string) (*profile, error) {
 		if err != nil {
 			return nil, fmt.Errorf("profile %s (%s): %w", id, paths[id], err)
 		}
-		p.rules = append(p.rules, rule{id, titles[id], sch})
+		p.rules = append(p.rules, rule{id, titles[id], parents[id], docs[id], sch})
 	}
 	return p, nil
 }
 
-// Names for the profiles a crate may declare, by $id.
-func (p *profile) titles() map[string]string {
-	titles := map[string]string{processRunCrate: "Process Run Crate"}
-	for _, r := range p.rules {
-		if r.title != "" {
-			titles[r.id] = r.title
-		}
+// Every profile named and those each builds on, once each and bronze first; ID is the last named.
+func loadProfiles(dirs []string) (*profile, error) {
+	merged, err := loadProfile("")
+	if err != nil {
+		return nil, err
 	}
-	return titles
+	for _, dir := range dirs {
+		p, err := loadProfile(dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range p.rules {
+			i := slices.IndexFunc(merged.rules, func(m rule) bool { return m.id == r.id })
+			if i < 0 {
+				merged.rules = append(merged.rules, r)
+			} else if !bytes.Equal(merged.rules[i].raw, r.raw) {
+				return nil, fmt.Errorf("two copies of %s differ; a profile version never changes", r.id)
+			}
+		}
+		merged.ID = p.ID
+	}
+	return merged, nil
 }
 
 func (p *profile) ids() []string {
@@ -285,33 +351,98 @@ func (p *profile) validate(view map[string]any) error {
 		return err
 	}
 	for _, r := range p.rules {
-		if err := validateJSON(r.schema, inst); err != nil {
+		if err := p.validateJSON(r.schema, inst); err != nil {
 			return fmt.Errorf("dataset does not meet profile %s:\n%w", r.id, err)
 		}
 	}
 	return nil
 }
 
-func validateJSON(sch *jsonschema.Schema, inst any) error {
+func (p *profile) validateJSON(sch *jsonschema.Schema, inst any) error {
 	err := sch.Validate(inst)
 	verr, ok := errors.AsType[*jsonschema.ValidationError](err)
 	if !ok {
 		return err
 	}
-	problems := collectLeaves(verr, message.NewPrinter(language.English))
+	problems := p.collectLeaves(verr, message.NewPrinter(language.English))
 	slices.Sort(problems)
-	return errors.New(strings.Join(problems, "\n"))
+	return errors.New(strings.Join(slices.Compact(problems), "\n"))
 }
 
-func collectLeaves(e *jsonschema.ValidationError, p *message.Printer) []string {
-	if len(e.Causes) == 0 {
-		return []string{fmt.Sprintf("  /%s: %s", strings.Join(e.InstanceLocation, "/"), e.ErrorKind.LocalizedString(p))}
+// Each problem is said in the terms of the flag that fixes it, with the profile's own title, description and examples.
+func (p *profile) collectLeaves(e *jsonschema.ValidationError, pr *message.Printer) []string {
+	if _, ok := e.ErrorKind.(*kind.Contains); !ok && len(e.Causes) > 0 {
+		var out []string
+		for _, c := range e.Causes {
+			out = append(out, p.collectLeaves(c, pr)...)
+		}
+		return out
 	}
-	var out []string
-	for _, c := range e.Causes {
-		out = append(out, collectLeaves(c, p)...)
+	loc := e.InstanceLocation
+	at := "/" + strings.Join(loc, "/")
+	if req, ok := e.ErrorKind.(*kind.Required); ok {
+		var out []string
+		derived, derivedHint := false, ""
+		for _, name := range req.Missing {
+			hint := p.hint(e.SchemaURL + "/properties/" + name)
+			switch {
+			case len(loc) == 1 && loc[0] == "additionalProperty":
+				out = append(out, "  missing --property "+name+"=..."+hint)
+			case len(loc) == 0 && (name == "isBasedOn" || name == "mentions"):
+				derived, derivedHint = true, cmp.Or(derivedHint, hint)
+			default:
+				out = append(out, fmt.Sprintf("  %s: missing %s%s", at, name, hint))
+			}
+		}
+		if derived {
+			out = append(out, "  missing --derived-from ID and --instrument, saying what it was made from and with"+derivedHint)
+		}
+		return out
 	}
-	return out
+	msg := e.ErrorKind.LocalizedString(pr)
+	if _, ok := e.ErrorKind.(*kind.Contains); ok {
+		msg = map[string]string{
+			"/hasPart":  "no file is what the profile asks for",
+			"/mentions": "the --instrument flags do not give what the profile asks for",
+		}[at]
+		msg = cmp.Or(msg, "nothing here is what the profile asks for")
+	}
+	if len(loc) >= 2 && loc[0] == "additionalProperty" {
+		return []string{fmt.Sprintf("  --property %s: %s%s", loc[1], msg, p.hint(strings.TrimSuffix(e.SchemaURL, "/properties/value")))}
+	}
+	return []string{fmt.Sprintf("  %s: %s%s", at, msg, p.hint(e.SchemaURL))}
+}
+
+// The title, description and examples a profile gives at a schema location, if any.
+func (p *profile) hint(schemaURL string) string {
+	base, pointer, _ := strings.Cut(schemaURL, "#")
+	var doc any
+	for _, r := range p.rules {
+		if r.id == base {
+			_ = json.Unmarshal(r.raw, &doc)
+		}
+	}
+	for tok := range strings.SplitSeq(strings.TrimPrefix(pointer, "/"), "/") {
+		m, ok := doc.(map[string]any)
+		if !ok || tok == "" {
+			break
+		}
+		doc = m[strings.ReplaceAll(strings.ReplaceAll(tok, "~1", "/"), "~0", "~")]
+	}
+	m, _ := doc.(map[string]any)
+	var parts []string
+	for _, k := range []string{"title", "description"} {
+		if s, ok := m[k].(string); ok && s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if ex, ok := m["examples"].([]any); ok && len(ex) > 0 {
+		parts = append(parts, fmt.Sprintf("e.g. %v", ex[0]))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "\n      " + strings.Join(parts, "; ")
 }
 
 // A profile's $id, recorded as the crate's conformsTo, and the profile it builds on, if any.

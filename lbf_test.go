@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -131,7 +132,7 @@ func TestDatasetFilesRefusesUnreadableFiles(t *testing.T) {
 
 func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5, SHA256: "abc"}, {Rel: "run1/old.txt", Size: 3}}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, nil, time.Now())
+	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +274,7 @@ func TestRepairWindowsArgs(t *testing.T) {
 func TestCrateMatchesPythonShape(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5}, {Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,14 +285,14 @@ func TestCrateMatchesPythonShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Context != "https://w3id.org/ro/crate/1.2/context" || doc.Graph[0]["datePublished"] != "2026-01-01T00:00:00Z" {
+	if doc.Context != "https://w3id.org/ro/crate/1.3/context" || doc.Graph[0]["datePublished"] != "2026-01-01T00:00:00Z" {
 		t.Fatalf("unexpected crate: %s", raw)
 	}
 	last := doc.Graph[len(doc.Graph)-1]
-	if last["@id"] != "run1/a.txt" || last["contentSize"] != "3" {
+	if last["@id"] != "run1/a.txt" || last["contentSize"] != "3" || last["name"] != "a.txt" || last["encodingFormat"] != "text/plain" {
 		t.Fatalf("file entity: %v", last)
 	}
-	if !strings.Contains(string(raw), `"run1/a%20b%231%25.csv"`) || strings.Contains(string(raw), "a b#1") {
+	if !strings.Contains(string(raw), `"run1/a%20b%231%25.csv"`) || strings.Contains(string(raw), `"@id": "run1/a b#1`) || !strings.Contains(string(raw), `"name": "a b#1%.csv"`) {
 		t.Fatalf("file @id not percent-encoded like ro-crate-py: %s", raw)
 	}
 }
@@ -299,7 +300,7 @@ func TestCrateMatchesPythonShape(t *testing.T) {
 func TestProfileCannotReplaceBronze(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "fake", "profile.json"),
-		`{"$id": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0"}`)
+		`{"$id": "`+bronzeProfileID(t)+`"}`)
 	if _, err := loadProfile(filepath.Join(root, "fake")); err == nil || !strings.Contains(err.Error(), "bronze") {
 		t.Fatalf("profile reusing bronze's $id accepted: %v", err)
 	}
@@ -401,13 +402,9 @@ func writeFile(t *testing.T, path, body string) {
 const minimalSilverProfile = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.org/profiles/minimal-silver",
-  "$ref": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0",
-  "properties": {
-    "crate": {
-      "required": ["wasDerivedFrom", "instrument"],
-      "properties": {"additionalProperty": {"required": ["sample_id"]}}
-    }
-  }
+  "$ref": "https://w3id.org/lbf/profiles/bronze/0.5.0",
+  "required": ["isBasedOn", "mentions"],
+  "properties": {"additionalProperty": {"required": ["sample_id"]}}
 }`
 
 const cellPaintingProfile = `{
@@ -415,15 +412,16 @@ const cellPaintingProfile = `{
   "$id": "https://example.org/profiles/cell-painting",
   "$ref": "https://example.org/profiles/minimal-silver",
   "properties": {
-    "data": {"properties": {"files": {"allOf": [
-      {"contains": {"properties": {"path": {"const": "plate_map.csv"}}}},
-      {"contains": {"properties": {"path": {"pattern": "^features/.+\\.parquet$"}}}},
-      {"items": {"properties": {"path": {"pattern": "^(plate_map\\.csv|features/.+|qc/.+)$"}}}}
-    ]}}},
-    "crate": {"properties": {
-      "instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}},
-      "additionalProperty": {"required": ["plate_id"]}
-    }}
+    "hasPart": {"allOf": [
+      {"contains": {"properties": {"@id": {"pattern": "^[^/]+/plate_map\\.csv$"}}}},
+      {"contains": {"properties": {"@id": {"pattern": "^[^/]+/features/.+\\.parquet$"}}}},
+      {"items": {"properties": {"@id": {"pattern": "^[^/]+/(plate_map\\.csv|features/.+|qc/.+)$"}}}}
+    ]},
+    "mentions": {"contains": {"properties": {"instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}}}}},
+    "additionalProperty": {
+      "required": ["plate_id"],
+      "properties": {"plate_id": {"title": "Plate barcode", "examples": ["P001"]}}
+    }
   }
 }`
 
@@ -460,8 +458,8 @@ func TestProfileChecksDataAndCrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"/profiles/bronze/0.4.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
-		`"wasDerivedFrom": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
+		"/profiles/bronze/0.5.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
+		`"isBasedOn": {`, `"mentions": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
 	} {
 		if !strings.Contains(string(crate), want) {
 			t.Errorf("crate missing %s", want)
@@ -527,7 +525,7 @@ func TestProvenanceRules(t *testing.T) {
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		_, err := preparePublication(data, provenanceFlags{file: path}, "", "")
+		_, err := preparePublication(data, provenanceFlags{file: path}, nil, "")
 		if err == nil {
 			t.Errorf("%s: accepted", name)
 			continue
@@ -1056,23 +1054,23 @@ func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "profile.json"), `{"$id": "https://example.org/profiles/untitled/1.2", "$ref": "`+bronzeProfileID(t)+`"}`)
 	prof, err := loadProfile(dir)
 	must(t, err)
-	conformsTo := append([]string{processRunCrate}, prof.ids()...)
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, conformsTo, prof.titles(), time.Now())
+	prov := provenance{DerivedFrom: "20260101-x-y-0000", Instruments: []instrument{{"pipe", "1", "https://example.org/pipe"}}, Properties: map[string]string{}}
+	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, prov, prof, time.Now())
 	must(t, err)
 	var doc struct {
 		Graph []map[string]any `json:"@graph"`
 	}
 	must(t, json.Unmarshal(raw, &doc))
-	got := map[string][2]any{}
+	got := map[string][3]any{}
 	for _, e := range doc.Graph {
-		got[fmt.Sprint(e["@id"])] = [2]any{e["name"], e["version"]}
+		got[fmt.Sprint(e["@id"])] = [3]any{e["name"], e["version"], e["isProfileOf"]}
 	}
-	for id, want := range map[string][2]any{
-		processRunCrate:    {"Process Run Crate", "0.5"},
-		bronzeProfileID(t): {"Bronze dataset", "0.4.0"},
-		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2"},
+	for id, want := range map[string][3]any{
+		processRunCrate:    {"Process Run Crate", "0.6", nil},
+		bronzeProfileID(t): {"Bronze dataset", "0.5.0", nil},
+		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2", map[string]any{"@id": bronzeProfileID(t)}},
 	} {
-		if got[id] != want {
+		if !reflect.DeepEqual(got[id], want) {
 			t.Errorf("%s: got %v, want %v", id, got[id], want)
 		}
 	}

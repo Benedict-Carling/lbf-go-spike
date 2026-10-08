@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -24,6 +26,15 @@ import (
 )
 
 const licenseURL = "https://rightsstatements.org/vocab/InC/1.0/"
+
+// A fixed table, not the OS's, so a crate is the same wherever it is written.
+var mediaTypes = map[string]string{
+	".csv": "text/csv", ".tsv": "text/tab-separated-values", ".txt": "text/plain", ".md": "text/markdown",
+	".json": "application/json", ".xml": "application/xml", ".pdf": "application/pdf",
+	".tif": "image/tiff", ".tiff": "image/tiff", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".zip": "application/zip", ".gz": "application/gzip", ".parquet": "application/vnd.apache.parquet",
+	".h5": "application/x-hdf5", ".hdf5": "application/x-hdf5",
+}
 
 var (
 	validID  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -262,10 +273,39 @@ type entity map[string]any
 
 func ref(id string) entity { return entity{"@id": id} }
 
+// RO-Crate 1.3 writes one value on its own, not as a list of one.
+func refs(ids []entity) any {
+	if len(ids) == 1 {
+		return ids[0]
+	}
+	return ids
+}
+
 var profileVersion = regexp.MustCompile(`/v?[0-9]+(\.[0-9]+)*$`)
 
-// Same graph as rocrate_generator.py, but profiles are named by title; encoding/json sorts keys, matching its output.
-func buildCrate(id, source string, files []localFile, t target, prov provenance, conformsTo []string, titles map[string]string, published time.Time) ([]byte, error) {
+const (
+	roCrateSpec = "https://w3id.org/ro/crate/1.3"
+	roleSchema  = "http://www.w3.org/ns/dx/prof/role/schema"
+	roleMapping = "http://www.w3.org/ns/dx/prof/role/mapping"
+)
+
+// What lbf names a dataset and says of it when the publisher does not.
+func defaultName(source string) string { return filepath.Base(source) }
+
+func defaultDescription(source string, files int, derivedFrom string) string {
+	noun := "files"
+	if files == 1 {
+		noun = "file"
+	}
+	d := fmt.Sprintf("Dataset of %d %s from %s", files, noun, filepath.Base(source))
+	if derivedFrom != "" {
+		d += ", derived from " + derivedFrom
+	}
+	return d
+}
+
+// RO-Crate 1.3, flattened; encoding/json sorts keys.
+func buildCrate(id, source string, files []localFile, t target, prov provenance, prof *profile, published time.Time) ([]byte, error) {
 	stamp := timestamp(published)
 
 	parts := make([]entity, len(files))
@@ -283,44 +323,47 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 	}
 	propRefs := make([]entity, len(props))
 	for i, p := range props {
-		propRefs[i] = ref("#" + p.name)
+		propRefs[i] = ref("#" + fileID(p.name))
 	}
 
-	description := "Dataset " + id
-	if t.Container == "bronze" {
-		description = "Bronze-layer dataset " + id
-	}
 	root := entity{
 		"@id":                "./",
 		"@type":              "Dataset",
 		"identifier":         id,
-		"name":               id,
-		"description":        description,
+		"name":               cmp.Or(prov.Name, defaultName(source)),
+		"description":        cmp.Or(prov.Description, defaultDescription(source, len(files), prov.DerivedFrom)),
 		"datePublished":      stamp,
-		"license":            licenseURL,
-		"creator":            ref("#uploader"),
+		"license":            ref(licenseURL),
 		"distribution":       ref("#blob-location"),
-		"additionalProperty": propRefs,
-		"hasPart":            parts,
+		"additionalProperty": refs(propRefs),
+		"hasPart":            refs(parts),
 	}
 	graph := []entity{
 		root,
 		{
-			"@id":        "ro-crate-metadata.json",
+			"@id":        crateName,
 			"@type":      "CreativeWork",
 			"about":      ref("./"),
-			"conformsTo": ref("https://w3id.org/ro/crate/1.2"),
+			"conformsTo": ref(roCrateSpec),
 		},
-		{"@id": "#uploader", "@type": "Person", "name": orUnknown(t.User)},
-		{"@id": "#blob-location", "@type": "DataDownload", "contentUrl": t.containerURL() + "/" + id},
+		{"@id": "#blob-location", "@type": "DataDownload", "name": "Where " + id + " is stored", "contentUrl": t.containerURL() + "/" + id},
+		{"@id": licenseURL, "@type": "CreativeWork", "name": "In Copyright",
+			"description": "This item is protected by copyright and/or related rights; uses beyond those the law permits need the rights-holders' permission."},
+	}
+	// Without a known uploader there is no creator, which bronze refuses.
+	uploader := strings.TrimSpace(t.User)
+	if uploader != "" {
+		root["creator"] = ref("#uploader")
+		graph = append(graph, entity{"@id": "#uploader", "@type": "Person", "name": uploader})
 	}
 	for _, p := range props {
-		graph = append(graph, entity{"@id": "#" + p.name, "@type": "PropertyValue", "name": p.name, "value": p.value})
+		graph = append(graph, entity{"@id": "#" + fileID(p.name), "@type": "PropertyValue", "name": p.name, "value": p.value})
 	}
 
 	if prov.DerivedFrom != "" {
 		sourceID := "#source-" + prov.DerivedFrom
-		root["wasDerivedFrom"] = ref(sourceID)
+		root["isBasedOn"] = ref(sourceID)
+		root["mentions"] = ref("#run")
 		graph = append(graph, entity{"@id": sourceID, "@type": "Dataset", "identifier": prov.DerivedFrom, "name": prov.DerivedFrom})
 
 		var tools []entity
@@ -332,36 +375,38 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 				graph = append(graph, entity{"@id": in.URL, "@type": "SoftwareApplication", "name": in.Name, "version": in.Version, "url": in.URL})
 			}
 		}
-		var instrumentRef any = tools
-		if len(tools) == 1 {
-			instrumentRef = tools[0]
-		}
-		graph = append(graph, entity{
-			"@id":        "#run",
-			"@type":      "CreateAction",
-			"name":       fmt.Sprintf("Dataset %s produced by %s", id, prov.Instruments[0].Name),
-			"endTime":    stamp,
-			"instrument": instrumentRef,
+		run := entity{
+			"@id":   "#run",
+			"@type": "CreateAction",
+			"name":  fmt.Sprintf("Dataset %s produced by %s", id, prov.Instruments[0].Name),
+			"description": fmt.Sprintf("%s %s made dataset %s from %s, as its publisher stated to lbf",
+				prov.Instruments[0].Name, prov.Instruments[0].Version, id, prov.DerivedFrom),
+			"instrument": refs(tools),
 			"object":     ref(sourceID),
 			"result":     ref("./"),
-			"agent":      ref("#uploader"),
-		})
-	}
-	if len(conformsTo) > 0 {
-		refs := make([]entity, len(conformsTo))
-		for i, uri := range conformsTo {
-			refs[i] = ref(uri)
-			profile := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": cmp.Or(titles[uri], uri)}
-			if v := profileVersion.FindString(uri); v != "" {
-				profile["version"] = strings.TrimPrefix(v, "/")
-			}
-			graph = append(graph, profile)
 		}
-		root["conformsTo"] = refs
+		if uploader != "" {
+			run["agent"] = ref("#uploader")
+		}
+		graph = append(graph, run)
+	}
+	if conformsTo := prof.conformsTo(prov.DerivedFrom != ""); len(conformsTo) > 0 {
+		ids := make([]entity, len(conformsTo))
+		for i, uri := range conformsTo {
+			ids[i] = ref(uri)
+			graph = append(graph, prof.entities(uri)...)
+		}
+		root["conformsTo"] = refs(ids)
+		graph = append(graph,
+			entity{"@id": roleSchema, "@type": "DefinedTerm", "name": "Schema", "description": "A schema the profile's data must meet"},
+			entity{"@id": roleMapping, "@type": "DefinedTerm", "name": "Mapping", "description": "How the crate is laid out for the profile's schema to check it"})
 	}
 
 	for _, f := range files {
-		file := entity{"@id": fileID(f.Rel), "@type": "File", "contentSize": fmt.Sprint(f.Size)}
+		file := entity{"@id": fileID(f.Rel), "@type": "File", "name": path.Base(f.Rel), "contentSize": fmt.Sprint(f.Size)}
+		if format := mediaTypes[strings.ToLower(path.Ext(f.Rel))]; format != "" {
+			file["encodingFormat"] = format
+		}
 		if f.SHA256 != "" {
 			file["sha256"] = f.SHA256
 		}
@@ -369,60 +414,79 @@ func buildCrate(id, source string, files []localFile, t target, prov provenance,
 	}
 
 	return json.MarshalIndent(map[string]any{
-		"@context": "https://w3id.org/ro/crate/1.2/context",
+		"@context": roCrateContext,
 		"@graph":   graph,
 	}, "", "    ")
 }
 
-// What a crate written by buildCrate states about its dataset, leaving out the properties lbf sets itself.
-func crateProvenance(crate []byte) (provenance, []string, error) {
-	var doc struct {
-		Graph []map[string]any `json:"@graph"`
+// The profiles a crate declares: Process Run Crate when lbf records how it was made, then bronze up to the chosen one.
+func (p *profile) conformsTo(derived bool) []string {
+	if p == nil {
+		return nil
 	}
-	if err := json.Unmarshal(crate, &doc); err != nil {
-		return provenance{}, nil, fmt.Errorf("its %s is not valid JSON: %w", crateName, err)
+	ids := p.ids()
+	if derived {
+		ids = append([]string{processRunCrate}, ids...)
 	}
-	entities := map[string]map[string]any{}
-	for _, e := range doc.Graph {
-		if id, ok := e["@id"].(string); ok {
-			entities[id] = e
-		}
-	}
-	refs := func(v any) []string {
-		items, ok := v.([]any)
-		if !ok {
-			items = []any{v}
-		}
-		var ids []string
-		for _, item := range items {
-			if r, ok := item.(map[string]any); ok {
-				if id, ok := r["@id"].(string); ok {
-					ids = append(ids, id)
-				}
-			}
-		}
-		return ids
-	}
-	str := func(e map[string]any, key string) string {
-		s, _ := e[key].(string)
-		return s
-	}
+	return ids
+}
 
-	root := entities["./"]
-	p := provenance{Properties: map[string]string{}}
-	for _, id := range refs(root["additionalProperty"]) {
-		if name := str(entities[id], "name"); !slices.Contains(lbfProperties, name) {
-			p.Properties[name] = str(entities[id], "value")
+// A profile's entity, which records what it builds on and carries the exact schema the dataset was checked against.
+func (p *profile) entities(uri string) []entity {
+	e := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": uri}
+	if v := profileVersion.FindString(uri); v != "" {
+		e["version"] = strings.TrimPrefix(v, "/")
+	}
+	if uri == processRunCrate {
+		e["name"] = "Process Run Crate"
+		return []entity{e}
+	}
+	i := slices.IndexFunc(p.rules, func(r rule) bool { return r.id == uri })
+	r := p.rules[i]
+	e["name"] = cmp.Or(r.title, uri)
+	if r.parent != "" {
+		e["isProfileOf"] = ref(r.parent)
+	}
+	slug := fmt.Sprintf("#profile-%d", i)
+	if u, err := url.Parse(uri); err == nil {
+		if segs := strings.Split(strings.Trim(u.Path, "/"), "/"); len(segs) >= 2 {
+			slug = "#profile-" + fileID(strings.Join(segs[len(segs)-2:], "-"))
 		}
 	}
-	if src := refs(root["wasDerivedFrom"]); len(src) == 1 {
-		p.DerivedFrom = str(entities[src[0]], "identifier")
-		for _, id := range refs(entities["#run"]["instrument"]) {
-			e := entities[id]
-			p.Instruments = append(p.Instruments, instrument{str(e, "name"), str(e, "version"), str(e, "url")})
-		}
+	resources := []struct {
+		role, suffix, format string
+		text                 []byte
+	}{{roleSchema, "schema", "application/schema+json", r.raw}}
+	if i == 0 {
+		resources = append(resources, struct {
+			role, suffix, format string
+			text                 []byte
+		}{roleMapping, "frame", "application/ld+json", bronzeFrameJSON})
 	}
-	return p, refs(root["conformsTo"]), nil
+	out := []entity{e}
+	var ids []entity
+	for _, res := range resources {
+		descriptor := slug + "-" + res.suffix
+		name := fmt.Sprintf("The %s of %s", res.suffix, e["name"])
+		ids = append(ids, ref(descriptor))
+		artifact := entity{"@id": descriptor + ".json", "@type": "CreativeWork", "name": name, "encodingFormat": res.format, "text": string(res.text)}
+		if res.role == roleSchema {
+			artifact["conformsTo"] = ref(jsonSchemaDialect(res.text))
+		}
+		out = append(out,
+			entity{"@id": descriptor, "@type": []string{"CreativeWork", "ResourceDescriptor"}, "name": name, "hasRole": ref(res.role), "hasArtifact": ref(descriptor + ".json")},
+			artifact)
+	}
+	e["hasResource"] = refs(ids)
+	return out
+}
+
+func jsonSchemaDialect(raw []byte) string {
+	var head struct {
+		Schema string `json:"$schema"`
+	}
+	_ = json.Unmarshal(raw, &head)
+	return cmp.Or(head.Schema, "https://json-schema.org/draft/2020-12/schema")
 }
 
 // Percent-encodes like Python's urllib.parse.quote, as ro-crate-py does.

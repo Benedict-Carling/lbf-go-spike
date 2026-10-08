@@ -80,7 +80,7 @@ func propertiesFile(t *testing.T, body string) provenanceFlags {
 
 func prepared(t *testing.T, dir, id string, prov provenanceFlags) publication {
 	t.Helper()
-	pub, err := preparePublication(dir, prov, "", id)
+	pub, err := preparePublication(dir, prov, nil, id)
 	must(t, err)
 	return pub
 }
@@ -271,7 +271,7 @@ func TestCheckAccess(t *testing.T) {
 func TestPublishIDMustBeMinted(t *testing.T) {
 	dir := dataset(t, map[string]string{"a.txt": "a"})
 	for _, bad := range []string{"test", "20261001-fancy-dassie", "20261001-Fancy-dassie-eadb", "20261001-fancy-dassie-eadb/x"} {
-		if _, err := preparePublication(dir, provenanceFlags{}, "", bad); err == nil {
+		if _, err := preparePublication(dir, provenanceFlags{}, nil, bad); err == nil {
 			t.Errorf("--id %q accepted", bad)
 		}
 	}
@@ -289,21 +289,23 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		DerivedFrom: "20260101-x-y-0000",
 		Instruments: []instrument{{"CellProfiler", "4.2.6", "https://cellprofiler.org"}, {"pipe", "1", "https://example.org/pipe"}},
 		Properties:  map[string]string{"sample_id": "S1"},
+		Name:        "Run 1",
+		Description: "Cells, imaged",
 	}
-	conformsTo := []string{processRunCrate, "https://example.org/p"}
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{SubscriptionName: "sub"}, prov, conformsTo, nil, time.Now())
+	prof := &profile{rules: []rule{{id: "https://example.org/p", raw: []byte("{}")}}}
+	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{SubscriptionName: "sub"}, prov, prof, time.Now())
 	must(t, err)
-	got, gotConformsTo, err := crateProvenance(raw)
+	got, schemas, err := crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(prov) || !slices.Equal(gotConformsTo, conformsTo) {
-		t.Fatalf("got %+v %v", got, gotConformsTo)
+	if !got.sameAs(prov) || !maps.Equal(schemas, map[string]string{processRunCrate: "", "https://example.org/p": "{}"}) {
+		t.Fatalf("got %+v %v", got, schemas)
 	}
 
-	raw, err = buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, nil, time.Now())
+	raw, err = buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, time.Now())
 	must(t, err)
-	got, gotConformsTo, err = crateProvenance(raw)
+	got, schemas, err = crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(provenance{Properties: map[string]string{}}) || gotConformsTo != nil {
-		t.Fatalf("got %+v %v", got, gotConformsTo)
+	if !got.sameAs(provenance{Name: "run1", Description: "Dataset of 1 file from run1", Properties: map[string]string{}}) || len(schemas) != 0 {
+		t.Fatalf("got %+v %v", got, schemas)
 	}
 }
