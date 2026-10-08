@@ -19,3 +19,17 @@ Done when all three pass.
 
 - Comments are one line, for what the code cannot show.
 - Messages say what happened and what to do, in the domain words.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default five roles, recorded as a `Status:` line: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` for terms, and README.md "Design decisions" in place of ADRs. See `docs/agents/domain.md`.
