@@ -18,15 +18,13 @@ import (
 	"time"
 )
 
-func crateOf(t *testing.T, tg target, id string) ([]crateFile, []byte) {
+func crateOf(t *testing.T, tg target, id string) storedCrate {
 	t.Helper()
-	cc, err := tg.client()
+	raw, err := blobsOf(t, tg, id).read(context.Background(), crateName)
 	must(t, err)
-	crate, err := downloadBuffer(context.Background(), cc, id+"/"+crateName)
+	crate, err := readCrate(raw)
 	must(t, err)
-	files, err := crateFiles(crate)
-	must(t, err)
-	return files, crate
+	return crate
 }
 
 func TestConcurrentFetchesOfOneIDIntoOneFolder(t *testing.T) {
@@ -38,7 +36,7 @@ func TestConcurrentFetchesOfOneIDIntoOneFolder(t *testing.T) {
 	}
 	pub := prepared(t, dataset(t, files), "", provenanceFlags{})
 	must(t, upload(ctx, tg, pub))
-	listed, crate := crateOf(t, tg, pub.ID)
+	crate := crateOf(t, tg, pub.ID)
 
 	for attempt := range 10 {
 		out := t.TempDir()
@@ -51,7 +49,7 @@ func TestConcurrentFetchesOfOneIDIntoOneFolder(t *testing.T) {
 					t.Errorf("attempt %d, fetch %d: %v", attempt, fetcher, err)
 					return
 				}
-				if problem, err := verifyDir(got.path, listed, crate); problem != "" || err != nil {
+				if problem, err := verifyDir(got.path, crate); problem != "" || err != nil {
 					t.Errorf("attempt %d, fetch %d succeeded, but %s is not the dataset: %s %v", attempt, fetcher, root, problem, err)
 				}
 			})
@@ -77,7 +75,7 @@ func TestFetchNeverReportsAnotherFetchsUnfinishedFolder(t *testing.T) {
 	}
 	pub := prepared(t, dataset(t, files), "", provenanceFlags{})
 	must(t, upload(ctx, tg, pub))
-	listed, crate := crateOf(t, tg, pub.ID)
+	crate := crateOf(t, tg, pub.ID)
 
 	aRenaming, releaseA := make(chan struct{}), make(chan struct{})
 	bMidway, releaseB := make(chan struct{}), make(chan struct{})
@@ -118,7 +116,7 @@ func TestFetchNeverReportsAnotherFetchsUnfinishedFolder(t *testing.T) {
 	if ra.err != nil {
 		t.Fatalf("A: %v", ra.err)
 	}
-	if problem, err := verifyDir(ra.got.path, listed, crate); problem != "" || err != nil {
+	if problem, err := verifyDir(ra.got.path, crate); problem != "" || err != nil {
 		t.Errorf("A reported success while %s was not the dataset: %s %v", ra.got.path, problem, err)
 	}
 	close(releaseB)
@@ -126,7 +124,7 @@ func TestFetchNeverReportsAnotherFetchsUnfinishedFolder(t *testing.T) {
 	if rb.err != nil {
 		t.Fatalf("B: %v", rb.err)
 	}
-	if problem, err := verifyDir(rb.got.path, listed, crate); problem != "" || err != nil {
+	if problem, err := verifyDir(rb.got.path, crate); problem != "" || err != nil {
 		t.Errorf("B reported success while %s was not the dataset: %s %v", rb.got.path, problem, err)
 	}
 	if entries, _ := os.ReadDir(out); len(entries) != 1 {
@@ -195,12 +193,11 @@ func TestPublishSurvivesALostCommitResponse(t *testing.T) {
 func TestUploadingIdenticalBytesTwiceIsNotAnotherPublish(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
-	cc, err := tg.client()
-	must(t, err)
 	id := newID()
+	b := blobsOf(t, tg, id)
 	for range 2 {
 		pub := prepared(t, dataset(t, map[string]string{"a.txt": "a"}), id, provenanceFlags{})
-		if err := uploadFile(ctx, cc, id+"/run1/a.txt", &pub.Files[0], tg.User, func(int64) {}); err != nil {
+		if err := b.putFile(ctx, &pub.Files[0], func(int64) {}); err != nil {
 			t.Fatal(err)
 		}
 		if len(pub.Files[0].SHA256) != 64 {
@@ -212,18 +209,18 @@ func TestUploadingIdenticalBytesTwiceIsNotAnotherPublish(t *testing.T) {
 func TestAnotherPublishsCrateLandingFirstIsNotCalledMissing(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
-	cc, err := tg.client()
-	must(t, err)
 	dir := dataset(t, map[string]string{"a.txt": "a"})
 	id := newID()
 	other := prepared(t, dir, id, provenanceFlags{})
 	other.Files[0].SHA256 = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
-	_, err = other.validate(tg)
+	_, err := other.validate(tg)
+	must(t, err)
+	otherCrate, err := other.buildCrate(tg, time.Now().Add(-time.Minute))
 	must(t, err)
 
 	beatIt := func(r *http.Request) bool {
 		if r.Method == http.MethodPut && r.URL.Query().Get("comp") == "blocklist" {
-			must(t, uploadCrate(ctx, cc, tg, other, time.Now().Add(-time.Minute)))
+			must(t, blobsOf(t, tg, id).putCrate(ctx, otherCrate))
 		}
 		return false
 	}
@@ -240,18 +237,16 @@ func TestAnotherPublishsCrateLandingFirstIsNotCalledMissing(t *testing.T) {
 func TestPublishAgainChecksWhatIsStoredAgainstTheCrate(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
-	cc, err := tg.client()
-	must(t, err)
 	id := newID()
 	dir := dataset(t, map[string]string{"a.txt": "a"})
 	must(t, upload(ctx, tg, prepared(t, dir, id, provenanceFlags{})))
 	late := prepared(t, dataset(t, map[string]string{"a.txt": "a", "b.txt": "b"}), id, provenanceFlags{})
-	must(t, uploadFile(ctx, cc, id+"/run1/b.txt", &late.Files[1], tg.User, func(int64) {}))
+	must(t, blobsOf(t, tg, id).putFile(ctx, &late.Files[1], func(int64) {}))
 	if _, err := download(ctx, tg, id, t.TempDir()); err == nil {
 		t.Fatal("fetch accepted a dataset with a file its crate does not list")
 	}
 
-	err = upload(ctx, tg, prepared(t, dir, id, provenanceFlags{}))
+	err := upload(ctx, tg, prepared(t, dir, id, provenanceFlags{}))
 	if _, ok := errors.AsType[idTaken](err); !ok || !strings.Contains(err.Error(), "run1/b.txt: stored but not listed in the crate") || !strings.Contains(err.Error(), "fetch will refuse it") {
 		t.Fatalf("rerun of a publish that fetch refuses: %v", err)
 	}

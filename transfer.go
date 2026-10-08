@@ -5,31 +5,20 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"maps"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -77,73 +66,29 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir, id 
 	return publication{ID: id, Source: source, Files: files, Provenance: prov, Profile: prof}, nil
 }
 
-// Checked here rather than in preparePublication because the uploader is only known once signed in.
-func (p publication) validate(t target) (time.Time, error) {
-	published := time.Now()
-	if err := p.Profile.validate(p.view(t, published)); err != nil {
-		return time.Time{}, err
-	}
-	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
-	return published, nil
-}
-
-// What profiles check: the dataset's files beside what its crate records.
-func (p publication) view(t target, published time.Time) map[string]any {
-	name := filepath.Base(p.Source)
-	files := make([]map[string]any, len(p.Files))
-	for i, f := range p.Files {
-		files[i] = map[string]any{"path": strings.TrimPrefix(f.Rel, name+"/"), "size": f.Size}
-	}
-	crate := map[string]any{
-		"identifier":         p.ID,
-		"datePublished":      timestamp(published),
-		"conformsTo":         p.Profile.conformsTo(p.Provenance.DerivedFrom != ""),
-		"additionalProperty": p.Provenance.Properties,
-	}
-	if user := strings.TrimSpace(t.User); user != "" {
-		crate["creator"] = user
-	}
-	if p.Provenance.DerivedFrom != "" {
-		crate["wasDerivedFrom"] = p.Provenance.DerivedFrom
-		crate["instrument"] = p.Provenance.Instruments
-	}
-	return map[string]any{
-		"data":  map[string]any{"name": name, "files": files},
-		"crate": crate,
-	}
-}
-
-func (p publication) crate(t target) ([]byte, error) {
-	published, err := p.validate(t)
-	if err != nil {
-		return nil, err
-	}
-	return p.buildCrate(t, published)
-}
-
 func upload(ctx context.Context, t target, pub publication) error {
 	published, err := pub.validate(t)
 	if err != nil {
 		return err
 	}
-	cc, err := t.client()
+	b, err := t.blobs(pub.ID)
 	if err != nil {
 		return err
 	}
 
 	id := pub.ID
 	status("Checking write access to " + t.Account + "/" + t.Container)
-	err = checkWrite(ctx, cc, t)
+	err = b.checkWrite(ctx)
 	var stored map[string]crateFile
 	if err == nil {
-		stored, err = listStored(ctx, cc, id)
+		stored, err = b.list(ctx)
 	}
 	status("")
 	if err != nil {
 		return err
 	}
 	if _, ok := stored[crateName]; ok {
-		return confirmPublished(ctx, cc, pub, stored)
+		return confirmPublished(ctx, b, pub, stored)
 	}
 
 	if len(stored) > 0 {
@@ -154,7 +99,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 		return err
 	}
 	if len(problems) > 0 {
-		return idTaken{problemList(fmt.Sprintf("an earlier attempt at %s stored different files, and lbf never changes a stored file, so nothing was uploaded; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
+		return taken(fmt.Sprintf("an earlier attempt at %s stored different files, and lbf never changes a stored file, so nothing was uploaded", id), problems...)
 	}
 
 	var total int64
@@ -163,18 +108,22 @@ func upload(ctx context.Context, t target, pub publication) error {
 		f := &pub.Files[n]
 		total += f.Size
 		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
-			return uploadFile(ctx, cc, id+"/"+f.Rel, f, t.User, progress)
+			return b.putFile(ctx, f, progress)
 		}}
 	}
 	logf("Uploading %d files (%s) from %s as %s\n", len(jobs), humanBytes(total), pub.Source, id)
 
 	started := time.Now()
+	var crate []byte
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
 	if err == nil {
-		err = uploadCrate(ctx, cc, t, pub, published)
+		crate, err = pub.buildCrate(t, published)
+	}
+	if err == nil {
+		err = b.putCrate(ctx, crate)
 	}
 	if ctx.Err() != nil {
-		return interrupted(context.WithoutCancel(ctx), cc, id)
+		return interrupted(context.WithoutCancel(ctx), b)
 	}
 	if errors.Is(err, errAnotherCrate) {
 		return fmt.Errorf("%s: %w. Run the same publish with --id %s to check it records these files", id, err, id)
@@ -185,7 +134,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 	if err != nil {
 		return fmt.Errorf("%w\n%s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", err, id, id)
 	}
-	if err := verifyLanded(ctx, cc, pub); err != nil {
+	if err := verifyLanded(ctx, b, crate); err != nil {
 		return err
 	}
 	logDone(started, total)
@@ -193,17 +142,17 @@ func upload(ctx context.Context, t target, pub publication) error {
 }
 
 // The crate can land even though its response never arrives.
-func interrupted(ctx context.Context, cc *container.Client, id string) error {
+func interrupted(ctx context.Context, b blobs) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_, err := cc.NewBlobClient(id+"/"+crateName).GetProperties(ctx, nil)
+	landed, err := b.has(ctx, crateName)
 	switch {
-	case err == nil:
-		return fmt.Errorf("interrupted, but %s was published; run the same publish with --id %s to check what landed", id, id)
-	case bloberror.HasCode(err, bloberror.BlobNotFound):
-		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", id, id)
+	case err != nil:
+		return fmt.Errorf("interrupted before lbf could tell whether %s was published; run the same publish with --id %s to finish or check it", b.id, b.id)
+	case landed:
+		return fmt.Errorf("interrupted, but %s was published; run the same publish with --id %s to check what landed", b.id, b.id)
 	default:
-		return fmt.Errorf("interrupted before lbf could tell whether %s was published; run the same publish with --id %s to finish or check it", id, id)
+		return fmt.Errorf("interrupted; %s was left without a crate, so fetch will refuse it. Run the same publish with --id %s to finish it", b.id, b.id)
 	}
 }
 
@@ -212,68 +161,35 @@ type idTaken struct{ error }
 
 func (e idTaken) Unwrap() error { return e.error }
 
-func listStored(ctx context.Context, cc *container.Client, id string) (map[string]crateFile, error) {
-	prefix := id + "/"
-	stored := map[string]crateFile{}
-	pager := cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
-		Prefix:  new(prefix),
-		Include: container.ListBlobsInclude{Metadata: true},
-	})
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("listing %s: %w", id, err)
-		}
-		for _, b := range page.Segment.BlobItems {
-			if !isDirectoryMarker(b) {
-				rel := strings.TrimPrefix(*b.Name, prefix)
-				stored[rel] = crateFile{Rel: rel, Size: deref(b.Properties.ContentLength), SHA256: metadata(b.Metadata, "sha256")}
-			}
-		}
+func taken(heading string, problems ...string) error {
+	heading += "; publish without --id, or with a new ID from 'lbf new-id'"
+	if len(problems) > 0 {
+		heading += ":"
 	}
-	return stored, nil
+	return idTaken{problemList(heading, problems)}
 }
 
 // A rerun of a publish that already finished succeeds only if it would have published the same thing.
-func confirmPublished(ctx context.Context, cc *container.Client, pub publication, stored map[string]crateFile) error {
+func confirmPublished(ctx context.Context, b blobs, pub publication, stored map[string]crateFile) error {
 	id := pub.ID
 	status("Reading the crate of " + id)
-	crate, err := downloadBuffer(ctx, cc, id+"/"+crateName)
+	raw, err := b.read(ctx, crateName)
 	status("")
 	if err != nil {
 		return fmt.Errorf("reading the crate of %s: %w", id, err)
 	}
-	files, err := crateFiles(crate)
+	crate, err := readCrate(raw)
 	if err != nil {
 		return fmt.Errorf("dataset %s: %w", id, err)
 	}
-	if problems := landedProblems(files, stored); len(problems) > 0 {
-		return idTaken{problemList(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
+	if problems := crate.differences(stored, true); len(problems) > 0 {
+		return taken(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it", id), problems...)
 	}
-	stated, conformsTo, err := crateStatement(crate)
+	problems, err := crate.differsFrom(pub)
 	if err != nil {
-		return idTaken{fmt.Errorf("%s is already published, but lbf cannot read what its crate states (%v), so this publish cannot be checked against it; publish without --id, or with a new ID from 'lbf new-id'", id, err)}
+		return taken(fmt.Sprintf("%s is already published, but lbf cannot read what its crate states (%v), so this publish cannot be checked against it", id, err))
 	}
-
-	// A name or description lbf wrote follows the folder, so it only has to match when it was given.
-	if pub.Provenance.Name == "" {
-		stated.Name = ""
-	}
-	if pub.Provenance.Description == "" {
-		stated.Description = ""
-	}
-	var problems []string
-	if !stated.sameAs(pub.Provenance) {
-		problems = append(problems, "its name, description, parent, instruments or properties differ from these")
-	}
-	if !slices.Equal(slices.Sorted(slices.Values(conformsTo)), slices.Sorted(slices.Values(pub.Profile.conformsTo(pub.Provenance.DerivedFrom != "")))) {
-		problems = append(problems, "it was checked against other profiles")
-	}
-	recorded := map[string]crateFile{}
-	for _, f := range files {
-		recorded[f.Rel] = f
-	}
-	toSend, differ, err := compareRecorded(ctx, pub.Files, recorded)
+	toSend, differ, err := compareRecorded(ctx, pub.Files, crate.byPath())
 	if err != nil {
 		return err
 	}
@@ -282,7 +198,7 @@ func confirmPublished(ctx context.Context, cc *container.Client, pub publication
 	}
 	problems = append(problems, differ...)
 	if len(problems) > 0 {
-		return idTaken{problemList(fmt.Sprintf("%s is already published, differently, and a dataset never changes; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
+		return taken(fmt.Sprintf("%s is already published, differently, and a dataset never changes", id), problems...)
 	}
 	logf("%s is already published with exactly these files; nothing was uploaded\n", id)
 	return nil
@@ -365,136 +281,18 @@ func unchanged(f *localFile, read int64) error {
 	return nil
 }
 
-// Commits with its sha256 only if the file did not change while being sent, so stored metadata never lies.
-func uploadFile(ctx context.Context, cc *container.Client, name string, f *localFile, uploader string, progress func(int64)) error {
-	fh, err := os.Open(f.Path)
-	if err != nil {
-		return err
-	}
-	defer fh.Close()
-	h := sha256.New()
-	r := &countingReader{r: io.TeeReader(io.LimitReader(fh, f.Size), h), progress: progress}
-	bb := cc.NewBlockBlobClient(name)
-	size := max(blockSize, (f.Size+maxBlocks-1)/maxBlocks)
-
-	// Uncommitted blocks are shared by everyone writing this blob, so each attempt stages under its own IDs.
-	attempt := make([]byte, 8)
-	_, _ = rand.Read(attempt)
-	var ids []string
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(blockWorkers)
-	for off := int64(0); off < f.Size && gctx.Err() == nil; off += size {
-		buf := make([]byte, min(size, f.Size-off))
-		if _, err := io.ReadFull(r, buf); err != nil {
-			break
-		}
-		blockID := base64.StdEncoding.EncodeToString(fmt.Appendf(nil, "%x-%08d", attempt, len(ids)))
-		ids = append(ids, blockID)
-		g.Go(func() error {
-			_, err := bb.StageBlock(gctx, blockID, streaming.NopCloser(bytes.NewReader(buf)), nil)
-			return err
-		})
-	}
-	if err := g.Wait(); err != nil {
-		return fmt.Errorf("uploading %s: %w", f.Rel, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := unchanged(f, r.n); err != nil {
-		return err
-	}
-
-	sum := hex.EncodeToString(h.Sum(nil))
-	meta := map[string]*string{"sha256": &sum}
-	if u := strings.TrimSpace(uploader); u != "" && !strings.ContainsFunc(u, func(c rune) bool { return c < ' ' || c > '~' }) {
-		meta["uploader"] = &u
-	}
-	_, err = bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
-		Metadata: meta,
-		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
-			IfNoneMatch: to.Ptr(azcore.ETagAny),
-		}},
-	})
-	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		err = storedAs(ctx, bb, f.Size, sum)
-		if errors.Is(err, errStoredDiffers) {
-			return idTaken{fmt.Errorf("%s changed while this publish was writing it; is another publish of the same ID running?", name)}
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("uploading %s: %w", f.Rel, err)
-	}
-	f.SHA256 = sum
-	return nil
-}
-
-var errStoredDiffers = errors.New("a different blob is stored under this name")
-
-// A commit whose response was lost is retried and refused, as is one that an earlier attempt sending the same bytes beat.
-func storedAs(ctx context.Context, bb *blockblob.Client, size int64, sum string) error {
-	props, err := bb.GetProperties(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if deref(props.ContentLength) != size || metadata(props.Metadata, "sha256") != sum {
-		return errStoredDiffers
-	}
-	return nil
-}
-
 // Another publish of the same ID could have added files before this one's crate landed.
-func verifyLanded(ctx context.Context, cc *container.Client, pub publication) error {
-	stored, err := listStored(ctx, cc, pub.ID)
+func verifyLanded(ctx context.Context, b blobs, raw []byte) error {
+	crate, err := readCrate(raw)
+	if err != nil {
+		return fmt.Errorf("dataset %s: %w", b.id, err)
+	}
+	stored, err := b.list(ctx)
 	if err != nil {
 		return err
 	}
-	files := make([]crateFile, len(pub.Files))
-	for i, f := range pub.Files {
-		files[i] = crateFile{Rel: f.Rel, Size: f.Size, SHA256: f.SHA256}
-	}
-	if problems := landedProblems(files, stored); len(problems) > 0 {
-		return idTaken{problemList(fmt.Sprintf("%s was published, but something else changed its files meanwhile, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", pub.ID), problems)}
-	}
-	return nil
-}
-
-func landedProblems(files []crateFile, stored map[string]crateFile) []string {
-	problems := compareStored(files, stored)
-	for _, f := range files {
-		if s, ok := stored[f.Rel]; ok && s.SHA256 != f.SHA256 {
-			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %q", f.Rel, s.SHA256, f.SHA256))
-		}
-	}
-	return problems
-}
-
-var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")
-
-func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time) error {
-	crate, err := pub.buildCrate(t, published)
-	if err != nil {
-		return err
-	}
-	name := pub.ID + "/" + crateName
-	_, err = cc.NewBlockBlobClient(name).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
-		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: new("application/json")},
-		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
-			IfNoneMatch: to.Ptr(azcore.ETagAny),
-		}},
-	})
-	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
-		stored, err := downloadBuffer(ctx, cc, name)
-		if err != nil {
-			return fmt.Errorf("reading the crate already stored as %s: %w", name, err)
-		}
-		if !bytes.Equal(stored, crate) {
-			return errAnotherCrate
-		}
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("uploading %s: %w", crateName, err)
+	if problems := crate.differences(stored, true); len(problems) > 0 {
+		return taken(fmt.Sprintf("%s was published, but something else changed its files meanwhile, so fetch will refuse it", b.id), problems...)
 	}
 	return nil
 }
@@ -518,8 +316,8 @@ type fetched struct {
 }
 
 // What the crate states, for --json; a crate lbf cannot read is still fetched, without it.
-func statedBy(id string, crate []byte) *provenance {
-	p, _, err := crateStatement(crate)
+func statedBy(id string, crate storedCrate) *provenance {
+	p, _, err := crate.statement()
 	if err != nil {
 		logf("[fetch] cannot read what the crate of %s states: %v\n", id, err)
 		return nil
@@ -530,15 +328,14 @@ func statedBy(id string, crate []byte) *provenance {
 var fetchHook = func(ctx context.Context, stage string) {}
 
 func download(ctx context.Context, t target, id, outDir string) (fetched, error) {
-	cc, err := t.client()
+	b, err := t.blobs(id)
 	if err != nil {
 		return fetched{}, err
 	}
 
-	prefix := id + "/"
 	status("Listing " + id)
 	defer status("")
-	stored, err := listStored(ctx, cc, id)
+	stored, err := b.list(ctx)
 	if err != nil {
 		return fetched{}, err
 	}
@@ -550,16 +347,17 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	}
 
 	status("Reading the crate of " + id)
-	crate, err := downloadBuffer(ctx, cc, prefix+crateName)
+	raw, err := b.read(ctx, crateName)
 	if err != nil {
 		return fetched{}, fmt.Errorf("downloading the crate of %s: %w", id, err)
 	}
 	status("")
-	files, err := crateFiles(crate)
+	crate, err := readCrate(raw)
 	if err != nil {
 		return fetched{}, fmt.Errorf("dataset %s: %w", id, err)
 	}
-	if problems := compareStored(files, stored); len(problems) > 0 {
+	files := crate.Files
+	if problems := crate.differences(stored, false); len(problems) > 0 {
 		return fetched{}, problemList(fmt.Sprintf("dataset %s does not match its crate, so nothing was downloaded:", id), problems)
 	}
 	if problems := localNameProblems(files, runtime.GOOS); len(problems) > 0 {
@@ -572,7 +370,7 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	}
 	if _, err := os.Lstat(root); err == nil {
 		status("Checking the existing " + root)
-		if err := verifyExisting(root, id, files, crate); err != nil {
+		if err := verifyExisting(root, id, crate); err != nil {
 			return fetched{}, err
 		}
 		logf("%s is already here and matches its crate\n", root)
@@ -610,7 +408,7 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	jobs := make([]job, len(files))
 	for i, f := range files {
 		jobs[i] = job{name: f.Rel, size: f.Size, run: func(ctx context.Context, progress func(int64)) error {
-			if err := downloadFile(ctx, cc, dir, prefix+f.Rel, f, progress); err != nil {
+			if err := b.get(ctx, dir, f, progress); err != nil {
 				return err
 			}
 			fetchHook(ctx, "downloaded")
@@ -619,7 +417,7 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 	}
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
 	if err == nil {
-		err = dir.WriteFile(crateName, crate, 0o644)
+		err = dir.WriteFile(crateName, raw, 0o644)
 	}
 	dir.Close()
 	if ctx.Err() != nil {
@@ -633,7 +431,7 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 		renamed = true
 	} else if _, serr := os.Lstat(root); serr != nil {
 		return fetched{}, err
-	} else if err := verifyExisting(root, id, files, crate); err != nil {
+	} else if err := verifyExisting(root, id, crate); err != nil {
 		return fetched{}, err
 	} else {
 		logf("%s was saved meanwhile by another fetch, and matches its crate\n", root)
@@ -669,8 +467,8 @@ func stalePartials(root string, age time.Duration) []string {
 	return stale
 }
 
-func verifyExisting(root, id string, files []crateFile, crate []byte) error {
-	problem, err := verifyDir(root, files, crate)
+func verifyExisting(root, id string, crate storedCrate) error {
+	problem, err := verifyDir(root, crate)
 	if err != nil {
 		return err
 	}
@@ -696,110 +494,6 @@ func dataDir(root string, files []crateFile) string {
 	return filepath.Join(root, filepath.FromSlash(top))
 }
 
-func downloadFile(ctx context.Context, cc *container.Client, dir *os.Root, name string, f crateFile, progress func(int64)) error {
-	fh, err := createIn(dir, f.Rel)
-	if err != nil {
-		return err
-	}
-	_, err = cc.NewBlobClient(name).DownloadFile(ctx, fh, &blob.DownloadFileOptions{
-		BlockSize:   blockSize,
-		Concurrency: blockWorkers,
-		Progress:    progress,
-	})
-	if cerr := fh.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return fmt.Errorf("downloading %s: %w", name, err)
-	}
-	problem, err := checkFile(dir, f)
-	if err != nil {
-		return err
-	}
-	if problem != "" {
-		return fmt.Errorf("%s after download; fetch again, and if it recurs the stored copy differs from what was published", problem)
-	}
-	return nil
-}
-
-func downloadBuffer(ctx context.Context, cc *container.Client, name string) ([]byte, error) {
-	resp, err := cc.NewBlobClient(name).DownloadStream(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
-}
-
-type crateFile struct {
-	Rel    string
-	Size   int64
-	SHA256 string
-}
-
-// The crate, written last, is the record of what landed; fetch trusts it over the listing.
-func crateFiles(crate []byte) ([]crateFile, error) {
-	var doc struct {
-		Graph []map[string]any `json:"@graph"`
-	}
-	if err := json.Unmarshal(crate, &doc); err != nil {
-		return nil, fmt.Errorf("its %s is not valid JSON: %w", crateName, err)
-	}
-	entities := map[string]map[string]any{}
-	for _, e := range doc.Graph {
-		if id, ok := e["@id"].(string); ok {
-			entities[id] = e
-		}
-	}
-	var parts []any
-	switch hp := entities["./"]["hasPart"].(type) {
-	case []any:
-		parts = hp
-	case map[string]any:
-		parts = []any{hp}
-	}
-	files := make([]crateFile, 0, len(parts))
-	for _, p := range parts {
-		ref, _ := p.(map[string]any)
-		id, _ := ref["@id"].(string)
-		rel, err := url.PathUnescape(id)
-		if err != nil || rel == "" {
-			return nil, fmt.Errorf("its %s lists an unreadable file %q", crateName, id)
-		}
-		size, err := strconv.ParseInt(fmt.Sprint(entities[id]["contentSize"]), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("its %s gives no size for %s", crateName, rel)
-		}
-		sum, _ := entities[id]["sha256"].(string)
-		files = append(files, crateFile{Rel: rel, Size: size, SHA256: sum})
-	}
-	if len(files) == 0 {
-		return nil, fmt.Errorf("its %s lists no files", crateName)
-	}
-	return files, nil
-}
-
-func compareStored(files []crateFile, stored map[string]crateFile) []string {
-	var problems []string
-	listed := map[string]bool{crateName: true}
-	for _, f := range files {
-		listed[f.Rel] = true
-		s, ok := stored[f.Rel]
-		switch {
-		case !ok:
-			problems = append(problems, f.Rel+": listed in the crate but not stored")
-		case s.Size != f.Size:
-			problems = append(problems, fmt.Sprintf("%s: stored as %d bytes, but the crate records %d", f.Rel, s.Size, f.Size))
-		}
-	}
-	for _, name := range slices.Sorted(maps.Keys(stored)) {
-		if !listed[name] {
-			problems = append(problems, name+": stored but not listed in the crate")
-		}
-	}
-	return problems
-}
-
 func localNameProblems(files []crateFile, goos string) []string {
 	var problems []string
 	fold := goos == "windows" || goos == "darwin"
@@ -822,21 +516,21 @@ func localNameProblems(files []crateFile, goos string) []string {
 }
 
 // Returns why root does not hold exactly these files and crate, or "" if it does.
-func verifyDir(root string, files []crateFile, crate []byte) (string, error) {
+func verifyDir(root string, crate storedCrate) (string, error) {
 	dir, err := os.OpenRoot(root)
 	if err != nil {
 		return "", err
 	}
 	defer dir.Close()
 	want := map[string]bool{crateName: true}
-	for _, f := range files {
+	for _, f := range crate.Files {
 		want[f.Rel] = true
 		if problem, err := checkFile(dir, f); problem != "" || err != nil {
 			return problem, err
 		}
 	}
 	local, err := dir.ReadFile(crateName)
-	if err != nil || !bytes.Equal(local, crate) {
+	if err != nil || !bytes.Equal(local, crate.raw) {
 		return crateName + " differs", nil
 	}
 	extra := ""
@@ -910,53 +604,6 @@ func transferAll(ctx context.Context, p *progress, jobs []job) error {
 func logDone(started time.Time, total int64) {
 	d := time.Since(started)
 	logf("Done in %s (%s/s)\n", d.Round(time.Millisecond), humanBytes(rate(total, d)))
-}
-
-func checkAccess(ctx context.Context, t target, mode string) error {
-	cc, err := t.client()
-	if err != nil {
-		return err
-	}
-	status("Checking access to " + t.Account + "/" + t.Container)
-	defer status("")
-	_, err = cc.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{MaxResults: to.Ptr[int32](1)}).NextPage(ctx)
-	if bloberror.HasCode(err, bloberror.AuthorizationPermissionMismatch, bloberror.AuthorizationFailure, bloberror.InsufficientAccountPermissions) {
-		return fmt.Errorf("you cannot list %s/%s; your login needs 'Storage Blob Data Reader' there", t.Account, t.Container)
-	}
-	if err != nil {
-		return fmt.Errorf("checking access to %s/%s: %w", t.Account, t.Container, err)
-	}
-	if mode == "upload" {
-		return checkWrite(ctx, cc, t)
-	}
-	return nil
-}
-
-// An uncommitted block proves write access without creating a visible blob; Azure discards it after a week.
-func checkWrite(ctx context.Context, cc *container.Client, t target) error {
-	blockID := base64.StdEncoding.EncodeToString([]byte("lbf-write-check"))
-	_, err := cc.NewBlockBlobClient(".lbf-check").StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader([]byte{0})), nil)
-	if bloberror.HasCode(err, bloberror.AuthorizationPermissionMismatch, bloberror.AuthorizationFailure, bloberror.InsufficientAccountPermissions) {
-		return fmt.Errorf("you cannot write to %s/%s, so nothing was uploaded; your login needs 'Storage Blob Data Contributor' there", t.Account, t.Container)
-	}
-	if err != nil {
-		return fmt.Errorf("checking write access to %s/%s: %w", t.Account, t.Container, err)
-	}
-	return nil
-}
-
-// Hierarchical-namespace accounts list directories as zero-length blobs.
-func isDirectoryMarker(b *container.BlobItem) bool {
-	return metadata(b.Metadata, "hdi_isfolder") == "true"
-}
-
-func metadata(m map[string]*string, key string) string {
-	for k, v := range m {
-		if strings.EqualFold(k, key) {
-			return deref(v)
-		}
-	}
-	return ""
 }
 
 // os.Root refuses names, including via symlinks, that would land outside the download directory.
