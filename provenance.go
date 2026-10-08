@@ -174,7 +174,7 @@ func (p provenance) check() error {
 		}
 	}
 	for k := range p.Properties {
-		if k == "uploader" || k == "blob-location" || k == "run" || strings.HasPrefix(k, "source-") || strings.HasPrefix(k, "@") {
+		if k == "uploader" || k == "blob-location" || k == "run" || strings.HasPrefix(k, "source-") || strings.HasPrefix(k, "profile-") || strings.HasPrefix(k, "@") {
 			return fmt.Errorf("property %q would clash with an entity or keyword in the crate; choose another name", k)
 		}
 	}
