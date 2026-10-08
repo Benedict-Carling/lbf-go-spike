@@ -122,7 +122,7 @@ func (b blobs) putFile(ctx context.Context, f *localFile, progress func(int64)) 
 	if u := strings.TrimSpace(b.t.User); u != "" && !strings.ContainsFunc(u, func(c rune) bool { return c < ' ' || c > '~' }) {
 		meta["uploader"] = &u
 	}
-	_, err = bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{Metadata: meta, AccessConditions: ifAbsent})
+	_, err = bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{Metadata: meta, AccessConditions: ifAbsent()})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
 		err = storedAs(ctx, bb, f.Size, sum)
 		if errors.Is(err, errStoredDiffers) {
@@ -136,7 +136,9 @@ func (b blobs) putFile(ctx context.Context, f *localFile, progress func(int64)) 
 	return nil
 }
 
-var ifAbsent = &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(azcore.ETagAny)}}
+func ifAbsent() *blob.AccessConditions {
+	return &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(azcore.ETagAny)}}
+}
 
 var errStoredDiffers = errors.New("a different blob is stored under this name")
 
@@ -157,7 +159,7 @@ var errAnotherCrate = errors.New("another publish of the same ID stored its crat
 func (b blobs) putCrate(ctx context.Context, crate []byte) error {
 	_, err := b.cc.NewBlockBlobClient(b.name(crateName)).UploadBuffer(ctx, crate, &blockblob.UploadBufferOptions{
 		HTTPHeaders:      &blob.HTTPHeaders{BlobContentType: new("application/json")},
-		AccessConditions: ifAbsent,
+		AccessConditions: ifAbsent(),
 	})
 	if bloberror.HasCode(err, bloberror.BlobAlreadyExists, bloberror.ConditionNotMet) {
 		stored, err := b.read(ctx, crateName)

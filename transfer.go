@@ -185,24 +185,9 @@ func confirmPublished(ctx context.Context, b blobs, pub publication, stored map[
 	if problems := crate.differences(stored, true); len(problems) > 0 {
 		return taken(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it", id), problems...)
 	}
-	stated, conformsTo, err := crate.statement()
+	problems, err := crate.differsFrom(pub)
 	if err != nil {
 		return taken(fmt.Sprintf("%s is already published, but lbf cannot read what its crate states (%v), so this publish cannot be checked against it", id, err))
-	}
-
-	// A name or description lbf wrote follows the folder, so it only has to match when it was given.
-	if pub.Provenance.Name == "" {
-		stated.Name = ""
-	}
-	if pub.Provenance.Description == "" {
-		stated.Description = ""
-	}
-	var problems []string
-	if !stated.sameAs(pub.Provenance) {
-		problems = append(problems, "its name, description, parent, instruments or properties differ from these")
-	}
-	if !slices.Equal(slices.Sorted(slices.Values(conformsTo)), slices.Sorted(slices.Values(pub.conformsTo()))) {
-		problems = append(problems, "it was checked against other profiles")
 	}
 	toSend, differ, err := compareRecorded(ctx, pub.Files, crate.byPath())
 	if err != nil {
@@ -300,7 +285,7 @@ func unchanged(f *localFile, read int64) error {
 func verifyLanded(ctx context.Context, b blobs, raw []byte) error {
 	crate, err := readCrate(raw)
 	if err != nil {
-		return err
+		return fmt.Errorf("dataset %s: %w", b.id, err)
 	}
 	stored, err := b.list(ctx)
 	if err != nil {

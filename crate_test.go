@@ -107,12 +107,6 @@ func TestRepublishingChecksOnlyTheNameAndDescriptionGiven(t *testing.T) {
 	if err := upload(ctx, tg, pub); err == nil || !strings.Contains(err.Error(), "renamed/a.txt: not in it") {
 		t.Fatalf("a folder of another name holds other files, so it is another dataset: %v", err)
 	}
-
-	named, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{name: "Run 1"}, "", id)
-	must(t, err)
-	if err := upload(ctx, tg, named); err == nil || !strings.Contains(err.Error(), "name, description") {
-		t.Fatalf("a name the first publish did not give was accepted: %v", err)
-	}
 	same, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{}, "", id)
 	must(t, err)
 	must(t, upload(ctx, tg, same))
@@ -124,6 +118,35 @@ func statementOf(raw []byte) (provenance, []string, error) {
 		return provenance{}, nil, err
 	}
 	return c.statement()
+}
+
+func TestRepublishComparesWhatTheCrateStates(t *testing.T) {
+	pub := func(name string, props map[string]string, profileID string) publication {
+		return publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}},
+			Provenance: provenance{Name: name, Properties: props}, Profile: &profile{rules: []rule{{id: profileID}}}}
+	}
+	s1, p := map[string]string{"sample_id": "S1"}, "https://example.org/p"
+	for _, c := range []struct {
+		name             string
+		published, again publication
+		differs          bool
+	}{
+		{"the same", pub("", s1, p), pub("", s1, p), false},
+		{"a name lbf filled in, now given", pub("", s1, p), pub("Run 1", s1, p), true},
+		{"a name given, now left out", pub("Run 1", s1, p), pub("", s1, p), false},
+		{"another property", pub("", s1, p), pub("", map[string]string{"sample_id": "S2"}, p), true},
+		{"another profile", pub("", s1, p), pub("", s1, "https://example.org/q"), true},
+	} {
+		raw, err := c.published.buildCrate(target{User: "u"}, time.Now())
+		must(t, err)
+		crate, err := readCrate(raw)
+		must(t, err)
+		problems, err := crate.differsFrom(c.again)
+		must(t, err)
+		if (len(problems) > 0) != c.differs {
+			t.Errorf("%s: %v", c.name, problems)
+		}
+	}
 }
 
 const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "@graph": [

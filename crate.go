@@ -337,6 +337,28 @@ func (c storedCrate) differences(stored map[string]crateFile, sums bool) []strin
 	return problems
 }
 
+// How what the crate states differs from what this publication would; a name or description lbf filled in follows the folder, so it only has to match when given.
+func (c storedCrate) differsFrom(p publication) ([]string, error) {
+	stated, conformsTo, err := c.statement()
+	if err != nil {
+		return nil, err
+	}
+	if p.Provenance.Name == "" {
+		stated.Name = ""
+	}
+	if p.Provenance.Description == "" {
+		stated.Description = ""
+	}
+	var problems []string
+	if !stated.sameAs(p.Provenance) {
+		problems = append(problems, "its name, description, parent, instruments or properties differ from these")
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(conformsTo)), slices.Sorted(slices.Values(p.conformsTo()))) {
+		problems = append(problems, "it was checked against other profiles")
+	}
+	return problems, nil
+}
+
 // How lbf reads a crate back, whichever version wrote it: earlier ones record the parent as wasDerivedFrom and do not mention the run.
 var statementFrame = map[string]any{
 	"@context": []any{roCrateContext, map[string]any{
