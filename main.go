@@ -129,7 +129,7 @@ func run(ctx context.Context, args []string) error {
 			}
 			return nil
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.account, o.container)
+		t, err := o.target(ctx, "upload", o.container)
 		if err != nil {
 			return err
 		}
@@ -143,7 +143,7 @@ func run(ctx context.Context, args []string) error {
 		if !validID.MatchString(id) {
 			return fmt.Errorf("%q is not a dataset ID", id)
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.account, o.container)
+		t, err := o.target(ctx, "download", o.container)
 		if err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func run(ctx context.Context, args []string) error {
 		if o.mode != "upload" && o.mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, o.mode, o.tenant, o.tag, o.account, o.container)
+		t, err := o.target(ctx, o.mode, o.container)
 		if err != nil {
 			return err
 		}
@@ -322,11 +322,14 @@ func newCommand(cmd string, o *options) (*command, error) {
 	tenant := func() {
 		str(&o.tenant, "tenant", "ID", "", "Entra tenant to sign in to (default Imperial College London)")
 	}
-	storage := func() {
-		str(&o.container, "container", "NAME", "bronze", "blob container")
+	account := func() {
 		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
 		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
 		tenant()
+	}
+	storage := func() {
+		str(&o.container, "container", "NAME", "bronze", "blob container")
+		account()
 	}
 	jsonFlag := func(desc string) {
 		fs.BoolVar(&o.json, "json", false, desc)
@@ -365,7 +368,7 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.flags = append(c.flags, commandFlag{name: "profile", arg: "NAME[@VERSION]|DIR"})
 		str(&o.id, "id", "ID", "", "publish under this ID from 'lbf new-id'; run again with the same ID to finish a failed publish")
 		c.notes += "Exits with 3 when the ID already holds different files or provenance, which retrying cannot fix; use a new ID.\n"
-		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without uploading; signs in only to read a --profile not yet cached")
+		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without uploading; signs in only to read a --profile not yet cached, or find the latest of one")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})
 		jsonFlag("print {\"id\", \"url\"} as JSON instead of text, or instead of the crate with --dry-run (its url names the placeholder account dryrun)")
 		storage()
@@ -381,10 +384,8 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.synopsis = "browse [options]"
 		c.notes = "Reads every dataset's crate, caching each one since crates never change, and serves them on this computer only.\n"
 		str(&o.container, "container", "NAMES", "", "comma-separated containers to read (default every container you can list)")
-		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
-		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
 		str(&o.port, "port", "PORT", "0", "local port to serve on (0 picks a free one)")
-		tenant()
+		account()
 	case "profiles":
 		c.synopsis = "profiles [show NAME[@VERSION]|DIR | pull NAME[@VERSION] | publish DIR] [options]"
 		c.maxArgs = 2
@@ -393,9 +394,7 @@ for, 'pull' copies it and the profiles it builds on into --out for a machine tha
 'publish' adds a profile.json whose $id ends in /<name>/<version>; a published version never changes.
 `
 		str(&o.out, "out", "DIR", ".", "where 'pull' writes <name>/<version>/profile.json")
-		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
-		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
-		tenant()
+		account()
 		sasEnv()
 	case "new-id":
 		c.synopsis = "new-id"
@@ -447,7 +446,7 @@ func (c *command) parse(args []string) ([]string, error) {
 	set := map[string]bool{}
 	c.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	for _, f := range c.flags {
-		if f.str && set[f.name] && c.fs.Lookup(f.name).Value.String() == "" {
+		if f.str && set[f.name] && strings.TrimSpace(c.fs.Lookup(f.name).Value.String()) == "" {
 			return nil, fmt.Errorf("--%s is empty; give it a value, or leave it out for the default", f.name)
 		}
 	}
@@ -555,11 +554,12 @@ func printFetched(asJSON bool, id, url string, got fetched) error {
 	return nil
 }
 
-func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, accountName, containerName string) (target, error) {
-	if sasEnv != "" {
-		return readSASEnv(sasEnv, mode, containerName)
+// The storage account and container the options pick, from --sas-env or by signing in.
+func (o options) target(ctx context.Context, mode, container string) (target, error) {
+	if o.sasEnv != "" {
+		return readSASEnv(o.sasEnv, mode, container)
 	}
-	return mintTarget(ctx, tenant, tag, accountName, containerName, mode)
+	return mintTarget(ctx, o.tenant, o.tag, o.account, container, mode)
 }
 
 // PowerShell 5.1 passes 'C:\My Folder\' -x as `C:\My Folder" -x`; a quote cannot appear in a Windows path.

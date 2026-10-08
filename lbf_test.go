@@ -132,7 +132,7 @@ func TestDatasetFilesRefusesUnreadableFiles(t *testing.T) {
 
 func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5, SHA256: "abc"}, {Rel: "run1/old.txt", Size: 3}}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, time.Now())
+	raw, err := publication{ID: "20260101-x-y-0000", Source: "/data/run1", Files: files}.buildCrate(target{Container: "bronze"}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestRepairWindowsArgs(t *testing.T) {
 func TestCrateMatchesPythonShape(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5}, {Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	raw, err := publication{ID: "20260101-x-y-0000", Source: "/data/run1", Files: files}.buildCrate(tgt, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1055,7 +1055,7 @@ func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
 	prof, err := loadProfile(dir)
 	must(t, err)
 	prov := provenance{DerivedFrom: "20260101-x-y-0000", Instruments: []instrument{{"pipe", "1", "https://example.org/pipe"}}, Properties: map[string]string{}}
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, prov, prof, time.Now())
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: prov, Profile: prof}.buildCrate(target{}, time.Now())
 	must(t, err)
 	var doc struct {
 		Graph []map[string]any `json:"@graph"`

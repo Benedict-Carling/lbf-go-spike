@@ -118,7 +118,8 @@ Process Run Crate 0.6.
 ## Profiles
 
 A profile is a JSON Schema `profile.json` whose `$id`, such as
-`https://w3id.org/lbf/profiles/plate-read/0.1.0`, ends in its name and version.
+`https://w3id.org/lbf/profiles/plate-read/0.1.0`, ends in its name and a
+semantic version (`1`, `1.2` or `1.2.3`, with or without a leading `v`).
 It builds on another with `$ref`, and every chain ends at bronze,
 `https://w3id.org/lbf/profiles/bronze/0.5.0`. `--profile` takes a profile
 published in the storage account, as `NAME` (the latest) or `NAME@VERSION`, or
@@ -138,9 +139,12 @@ A profile checks the crate's root, laid out by bronze's JSON-LD frame
 ```
 
 A property's `title`, `description` and `examples` are shown when it is
-missing or wrong, with the flag that gives it. The crate's `conformsTo` lists
-every profile checked, each recorded with the profile it builds on
-(`isProfileOf`) and carrying the exact schema it was checked against.
+missing or wrong, with the flag that gives it: `--property`, `--name`,
+`--description`, `--derived-from` and `--instrument`, or the files. A profile
+that requires a term no flag gives is reported as one no dataset can meet. The
+crate's `conformsTo` lists every profile checked, each recorded with the
+profile it builds on (`isProfileOf`) and carrying the exact schema it was
+checked against, and Process Run Crate when the dataset is derived.
 `examples/profile-skeleton` walks through writing and using profiles.
 
 ```
@@ -155,12 +159,12 @@ Published profiles live in the account's `profiles` container as
 are cached locally once fetched; `--dry-run` with `NAME@VERSION` uses the cache
 without signing in.
 
-`--dry-run` validates and prints the crate, as uploader `dry-run`, signing in only to read a profile not yet cached;
+`--dry-run` validates and prints the crate, as uploader `dry-run`, signing in only to read a `--profile NAME@VERSION` not yet cached, or to find the latest version of a `--profile NAME`;
 with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
 publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path", "provenance"}` as one line, where
 `path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it; fetch's
-`provenance` is what the crate states (`name`, `description`, `derived_from`, `instruments`, `properties`), as in a `--provenance` file. `--tag KEY=VALUE` picks
+`provenance` is what the crate states (`name`, `description`, `derived_from`, `instruments`, `properties`), as in a `--provenance` file, leaving out a name and description lbf filled in. `--tag KEY=VALUE` picks
 the storage account (default `tag=storage`, production; the test account is
 `tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and
 otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
@@ -197,7 +201,13 @@ and record a new decision here.
   its exact schema.** RO-Crate infers nothing from a profile's parents, so all
   are listed, each recording the one it builds on (`isProfileOf`) and, as the
   text of a `ResourceDescriptor`'s artifact, the schema the dataset met.
-  Resuming a publish requires the same schemas.
+  Bronze also carries its frame, in the `mapping` role, since the frame is part
+  of what bronze's schema means. A derived dataset also lists Process Run Crate
+  0.6, which lbf declares by how it writes the run rather than checks, so it
+  carries no schema. Resuming a publish requires the same schemas.
+- **A profile's version is a semantic version, and a published one never
+  changes.** `NAME` without a version takes the latest, ordered as semantic
+  versions are, so `0.10.0` follows `0.9.0`.
 - **Profiles are published in the storage account they describe, as
   `profiles/<name>/<version>/profile.json`, named
   `https://w3id.org/lbf/profiles/<name>/<version>`.** They need no sign-in but
@@ -211,9 +221,17 @@ and record a new decision here.
   lbf fills a missing name and description. Richer metadata travels as a crate
   of its own inside the published folder, which lbf publishes as a file and
   never merges.
+- **lbf states only what it knows.** The licence is an entity with a name,
+  as RO-Crate asks. A file's `encodingFormat` comes from a fixed table of
+  extensions, not the operating system's, so a crate is the same wherever it is
+  written; a file whose type is not in the table has none. Without a known
+  uploader the crate has no `creator`, rather than an invented one, so bronze
+  refuses it. `lbf fetch --json` leaves out a name or description lbf filled
+  in, so carrying it forward never passes off lbf's words as the publisher's.
 - **Errors are said in flags.** A profile's `title`, `description` and
   `examples` tell whoever publishes what to add, so a profile is guidance as
-  well as rules.
+  well as rules. lbf rewords JSON Schema's messages for publishers, and says
+  when a profile asks for something lbf sets itself, or that no flag gives.
 
 ## Browsing datasets
 

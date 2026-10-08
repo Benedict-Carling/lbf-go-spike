@@ -293,7 +293,7 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		Description: "Cells, imaged",
 	}
 	prof := &profile{rules: []rule{{id: "https://example.org/p", raw: []byte("{}")}}}
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{SubscriptionName: "sub"}, prov, prof, time.Now())
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: prov, Profile: prof}.buildCrate(target{SubscriptionName: "sub"}, time.Now())
 	must(t, err)
 	got, schemas, err := crateStatement(raw)
 	must(t, err)
@@ -301,11 +301,11 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		t.Fatalf("got %+v %v", got, schemas)
 	}
 
-	raw, err = buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, time.Now())
+	raw, err = publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}}.buildCrate(target{}, time.Now())
 	must(t, err)
 	got, schemas, err = crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(provenance{Name: "run1", Description: "Dataset of 1 file from run1", Properties: map[string]string{}}) || len(schemas) != 0 {
+	if !got.sameAs(provenance{Properties: map[string]string{}}) || len(schemas) != 0 {
 		t.Fatalf("got %+v %v", got, schemas)
 	}
 }

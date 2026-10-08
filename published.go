@@ -7,13 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -21,56 +19,63 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
+	"golang.org/x/mod/semver"
 )
 
 // Published profiles live in the storage account beside the datasets that meet them, as <name>/<version>/profile.json.
 const profilesContainer = "profiles"
 
 var (
-	profileRef  = regexp.MustCompile(`^([a-z0-9][a-z0-9-]*)(?:@(v?[0-9]+(?:\.[0-9]+)*))?$`)
+	profileRef  = regexp.MustCompile(`^([a-z0-9][a-z0-9-]*)(?:@(v?[0-9]+(?:\.[0-9]+){0,2}))?$`)
 	profileSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 )
 
+// A published profile: its name, and its version unless the latest is meant.
+type published struct{ name, version string }
+
+func (p published) String() string { return p.name + "@" + p.version }
+
+// Where it is kept, under the profiles container or a local copy of it.
+func (p published) blob() string         { return p.name + "/" + p.version + "/profile.json" }
+func (p published) in(dir string) string { return filepath.Join(dir, filepath.FromSlash(p.blob())) }
+
+// The published profile a blob in the profiles container holds, if it holds one.
+func publishedBlob(name string) (published, bool) {
+	segs := strings.Split(name, "/")
+	if len(segs) != 3 || segs[2] != "profile.json" || !profileSlug.MatchString(segs[0]) || !versionFolder.MatchString(segs[1]) {
+		return published{}, false
+	}
+	return published{segs[0], segs[1]}, true
+}
+
 // A --profile names a published profile unless it is a path, or a profile.json, or a folder holding one, here.
-func registryRef(arg string) (name, version string, ok bool) {
+func publishedRef(arg string) (published, bool) {
 	if arg == "" || strings.ContainsAny(arg, `/\`) {
-		return "", "", false
+		return published{}, false
 	}
 	if info, err := os.Stat(arg); err == nil && !info.IsDir() {
-		return "", "", false
+		return published{}, false
 	}
 	if _, err := os.Stat(filepath.Join(arg, "profile.json")); err == nil {
-		return "", "", false
+		return published{}, false
 	}
 	m := profileRef.FindStringSubmatch(arg)
 	if m == nil {
-		return "", "", false
+		return published{}, false
 	}
-	return m[1], m[2], true
+	return published{m[1], m[2]}, true
 }
 
 // The name and version a profile is published under: the last two segments of its $id.
-func profilePath(id string) (name, version string, err error) {
+func publishedAs(id string) (published, error) {
 	u, err := url.Parse(id)
 	if err == nil {
 		segs := strings.Split(strings.Trim(u.Path, "/"), "/")
 		if len(segs) >= 2 && profileSlug.MatchString(segs[len(segs)-2]) && versionFolder.MatchString(segs[len(segs)-1]) {
-			return segs[len(segs)-2], segs[len(segs)-1], nil
+			return published{segs[len(segs)-2], segs[len(segs)-1]}, nil
 		}
 	}
-	return "", "", fmt.Errorf("$id %s does not end in /<name>/<version>, such as https://w3id.org/lbf/profiles/plate-read/0.1.0, so it cannot be published", id)
-}
-
-func versionLess(a, b string) bool {
-	parse := func(v string) []int {
-		var out []int
-		for s := range strings.SplitSeq(strings.TrimPrefix(v, "v"), ".") {
-			n, _ := strconv.Atoi(s)
-			out = append(out, n)
-		}
-		return out
-	}
-	return slices.Compare(parse(a), parse(b)) < 0
+	return published{}, fmt.Errorf("$id %s does not end in /<name>/<version>, such as https://w3id.org/lbf/profiles/plate-read/0.1.0, so it cannot be published", id)
 }
 
 var cacheRoot = os.UserCacheDir
@@ -105,11 +110,11 @@ func syncProfiles(ctx context.Context, t target) (string, error) {
 			return "", fmt.Errorf("listing %s/%s: %w", t.Account, profilesContainer, err)
 		}
 		for _, b := range page.Segment.BlobItems {
-			segs := strings.Split(*b.Name, "/")
-			if len(segs) != 3 || segs[2] != "profile.json" || !profileSlug.MatchString(segs[0]) || !versionFolder.MatchString(segs[1]) {
+			ref, ok := publishedBlob(*b.Name)
+			if !ok {
 				continue
 			}
-			local := filepath.Join(dir, segs[0], segs[1], "profile.json")
+			local := ref.in(dir)
 			if _, err := os.Stat(local); err == nil {
 				continue
 			}
@@ -156,71 +161,64 @@ func publishedVersions(dir, name string) []string {
 	entries, _ := os.ReadDir(filepath.Join(dir, name))
 	var versions []string
 	for _, e := range entries {
-		if _, err := os.Stat(filepath.Join(dir, name, e.Name(), "profile.json")); err == nil && versionFolder.MatchString(e.Name()) {
+		if _, err := os.Stat(published{name, e.Name()}.in(dir)); err == nil && versionFolder.MatchString(e.Name()) {
 			versions = append(versions, e.Name())
 		}
 	}
 	slices.SortFunc(versions, func(a, b string) int {
-		switch {
-		case versionLess(a, b):
-			return -1
-		case versionLess(b, a):
-			return 1
-		}
-		return cmp.Compare(a, b)
+		return cmp.Or(semver.Compare("v"+strings.TrimPrefix(a, "v"), "v"+strings.TrimPrefix(b, "v")), cmp.Compare(a, b))
 	})
 	return versions
 }
 
 // The folder lbf loads a --profile from: the argument itself, or the cached copy of a published profile.
 func profileDir(ctx context.Context, o options, arg string, offline bool) (string, error) {
-	name, version, ok := registryRef(arg)
+	ref, ok := publishedRef(arg)
 	if !ok {
 		return arg, nil
 	}
-	if name == "bronze" {
+	if ref.name == "bronze" {
 		return "", nil
 	}
-	if offline && version != "" {
-		account := cmp.Or(o.account, "*")
-		root, _ := cacheRoot()
-		cached, _ := filepath.Glob(filepath.Join(root, "lbf", "profiles", account, name, version, "profile.json"))
+	if offline && ref.version != "" {
+		cache, _ := profilesCache(cmp.Or(o.account, "*"))
+		cached, _ := filepath.Glob(ref.in(cache))
 		if len(cached) > 0 && !slices.ContainsFunc(cached[1:], func(p string) bool { return !sameFile(p, cached[0]) }) {
 			return filepath.Dir(cached[0]), nil
 		}
 	}
-	t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.account, profilesContainer)
+	t, err := o.target(ctx, "download", profilesContainer)
 	if err != nil && o.sasEnv != "" {
 		return "", fmt.Errorf("--profile %s is read from the storage account's %s container, which this --sas-env file does not cover; give the profile as a folder instead, from 'lbf profiles pull %s': %w", arg, profilesContainer, arg, err)
 	}
 	if err != nil {
 		return "", err
 	}
-	return publishedProfile(ctx, t, name, version)
+	return publishedProfile(ctx, t, ref)
 }
 
 // The cached folder of a published profile, the latest version unless one is given.
-func publishedProfile(ctx context.Context, t target, name, version string) (string, error) {
-	if cache, err := profilesCache(t.Account); err == nil && version != "" {
-		if _, err := os.Stat(filepath.Join(cache, name, version, "profile.json")); err == nil {
-			return filepath.Join(cache, name, version), nil
+func publishedProfile(ctx context.Context, t target, ref published) (string, error) {
+	if cache, err := profilesCache(t.Account); err == nil && ref.version != "" {
+		if _, err := os.Stat(ref.in(cache)); err == nil {
+			return filepath.Dir(ref.in(cache)), nil
 		}
 	}
 	dir, err := syncProfiles(ctx, t)
 	if err != nil {
 		return "", err
 	}
-	versions := publishedVersions(dir, name)
+	versions := publishedVersions(dir, ref.name)
 	if len(versions) == 0 {
-		return "", fmt.Errorf("there is no folder %s here, and no profile %s is published in %s; 'lbf profiles' lists those that are", name, name, t.Account)
+		return "", fmt.Errorf("there is no folder %s here, and no profile %s is published in %s; 'lbf profiles' lists those that are", ref.name, ref.name, t.Account)
 	}
-	if version == "" {
-		version = versions[len(versions)-1]
-		logf("[profile] using %s@%s, the latest; give --profile %s@%s to keep to it\n", name, version, name, version)
-	} else if !slices.Contains(versions, version) {
-		return "", fmt.Errorf("%s has no version %s in %s; published: %s", name, version, t.Account, strings.Join(versions, ", "))
+	if ref.version == "" {
+		ref.version = versions[len(versions)-1]
+		logf("[profile] using %s, the latest; give --profile %s to keep to it\n", ref, ref)
+	} else if !slices.Contains(versions, ref.version) {
+		return "", fmt.Errorf("%s has no version %s in %s; published: %s", ref.name, ref.version, t.Account, strings.Join(versions, ", "))
 	}
-	return filepath.Join(dir, name, version), nil
+	return filepath.Dir(ref.in(dir)), nil
 }
 
 func profiles(ctx context.Context, o options, args []string) error {
@@ -254,7 +252,7 @@ func profiles(ctx context.Context, o options, args []string) error {
 }
 
 func listProfiles(ctx context.Context, o options) error {
-	t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.account, profilesContainer)
+	t, err := o.target(ctx, "download", profilesContainer)
 	if err != nil {
 		return err
 	}
@@ -269,11 +267,11 @@ func listProfiles(ctx context.Context, o options) error {
 		if len(versions) == 0 {
 			continue
 		}
-		latest := versions[len(versions)-1]
+		latest := published{e.Name(), versions[len(versions)-1]}
 		var head struct{ Title, Description string }
-		raw, _ := os.ReadFile(filepath.Join(dir, e.Name(), latest, "profile.json"))
+		raw, _ := os.ReadFile(latest.in(dir))
 		_ = json.Unmarshal(raw, &head)
-		fmt.Printf("%s@%s  %s\n", e.Name(), latest, cmp.Or(head.Title, e.Name()))
+		fmt.Printf("%s  %s\n", latest, cmp.Or(head.Title, e.Name()))
 		if head.Description != "" {
 			fmt.Printf("    %s\n", head.Description)
 		}
@@ -290,75 +288,18 @@ func listProfiles(ctx context.Context, o options) error {
 	return nil
 }
 
-// What a profile asks of a publisher, in the flags that give it.
+// What 'lbf profiles show' prints: the profile, what it builds on, and what it asks of a publisher.
 func describeProfile(prof *profile, ref string) string {
 	var b strings.Builder
-	target := prof.rules[len(prof.rules)-1]
-	var head struct{ Title, Description string }
-	_ = json.Unmarshal(target.raw, &head)
-	fmt.Fprintf(&b, "%s  %s\n", target.id, cmp.Or(head.Title, target.id))
-	if head.Description != "" {
-		fmt.Fprintf(&b, "  %s\n", head.Description)
+	target := prof.chosen()
+	fmt.Fprintf(&b, "%s  %s\n", target.id, cmp.Or(target.title, target.id))
+	if target.schema.Description != "" {
+		fmt.Fprintf(&b, "  %s\n", target.schema.Description)
 	}
-	if len(prof.rules) > 1 {
-		var chain []string
-		for _, r := range prof.rules[:len(prof.rules)-1] {
-			chain = append(chain, r.id)
-		}
-		fmt.Fprintf(&b, "  Builds on %s\n", strings.Join(chain, ", "))
+	if bases := slices.DeleteFunc(prof.ids(), func(id string) bool { return id == target.id }); len(bases) > 0 {
+		fmt.Fprintf(&b, "  Builds on %s\n", strings.Join(bases, ", "))
 	}
-
-	type ask struct{ flag, need, hint string }
-	var asks []ask
-	seen := map[string]bool{}
-	add := func(a ask) {
-		if !seen[a.flag] {
-			seen[a.flag] = true
-			asks = append(asks, a)
-		}
-	}
-	type schema struct {
-		Required   []string
-		Properties map[string]json.RawMessage
-		AllOf      []json.RawMessage `json:"allOf"`
-	}
-	// A schema and those it combines with allOf, which profiles use to group rules.
-	var parts func(raw json.RawMessage) []schema
-	parts = func(raw json.RawMessage) []schema {
-		var s schema
-		_ = json.Unmarshal(raw, &s)
-		out := []schema{s}
-		for _, sub := range s.AllOf {
-			out = append(out, parts(sub)...)
-		}
-		return out
-	}
-	derived := false
-	for _, r := range slices.Backward(prof.rules) {
-		for _, s := range parts(r.raw) {
-			if slices.Contains(s.Required, "isBasedOn") || slices.Contains(s.Required, "mentions") {
-				derived = true
-			}
-			for _, props := range parts(s.Properties["additionalProperty"]) {
-				for _, n := range slices.Concat(props.Required, slices.Sorted(maps.Keys(props.Properties))) {
-					need := "optional"
-					if slices.Contains(props.Required, n) {
-						need = "required"
-					}
-					add(ask{"--property " + n + "=...", need, annotations(props.Properties[n])})
-				}
-			}
-			if h := annotations(s.Properties["hasPart"]); h != "" {
-				add(ask{"files", "required", h})
-			}
-		}
-	}
-	if derived {
-		add(ask{"--derived-from ID --instrument ...", "required", "what it was made from and with"})
-	}
-	for _, f := range []string{"name", "description"} {
-		add(ask{"--" + f + " ...", "optional", "lbf fills it in if left out"})
-	}
+	asks := prof.asks()
 	b.WriteString("\n  Asks for:\n")
 	width := 0
 	for _, a := range asks {
@@ -377,24 +318,9 @@ func describeProfile(prof *profile, ref string) string {
 	return b.String()
 }
 
-func annotations(raw json.RawMessage) string {
-	var m map[string]any
-	_ = json.Unmarshal(raw, &m)
-	var parts []string
-	for _, k := range []string{"title", "description"} {
-		if s, ok := m[k].(string); ok && s != "" {
-			parts = append(parts, s)
-		}
-	}
-	if ex, ok := m["examples"].([]any); ok && len(ex) > 0 {
-		parts = append(parts, fmt.Sprintf("e.g. %v", ex[0]))
-	}
-	return strings.Join(parts, "; ")
-}
-
 // Writes a published profile and those it builds on as <out>/<name>/<version>/profile.json, for --profile on a machine that cannot sign in.
 func pullProfile(ctx context.Context, o options, arg string) error {
-	if _, _, ok := registryRef(arg); !ok {
+	if _, ok := publishedRef(arg); !ok {
 		return fmt.Errorf("%q is not a published profile's NAME or NAME@VERSION", arg)
 	}
 	dir, err := profileDir(ctx, o, arg, false)
@@ -417,13 +343,13 @@ func pullProfile(ctx context.Context, o options, arg string) error {
 func writeProfiles(prof *profile, out string) (string, error) {
 	var target string
 	for _, r := range prof.rules[1:] {
-		name, version, err := profilePath(r.id)
+		ref, err := publishedAs(r.id)
 		if err != nil {
 			return "", err
 		}
-		path := filepath.Join(out, name, version, "profile.json")
+		path := ref.in(out)
 		if have, err := os.ReadFile(path); err == nil && !bytes.Equal(have, r.raw) {
-			return "", fmt.Errorf("%s already holds another %s@%s; move it aside", path, name, version)
+			return "", fmt.Errorf("%s already holds another %s; move it aside", path, ref)
 		}
 		if err := writeAtomic(path, r.raw); err != nil {
 			return "", err
@@ -434,14 +360,15 @@ func writeProfiles(prof *profile, out string) (string, error) {
 }
 
 func publishProfile(ctx context.Context, o options, dir string) error {
-	if _, err := loadProfile(dir); err != nil {
-		return err
-	}
-	t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.account, profilesContainer)
+	prof, err := loadProfile(dir)
 	if err != nil {
 		return err
 	}
-	msg, err := publishProfileTo(ctx, t, dir)
+	t, err := o.target(ctx, "upload", profilesContainer)
+	if err != nil {
+		return err
+	}
+	msg, err := publishProfileTo(ctx, t, prof)
 	if err != nil {
 		return err
 	}
@@ -449,15 +376,11 @@ func publishProfile(ctx context.Context, o options, dir string) error {
 	return nil
 }
 
-func publishProfileTo(ctx context.Context, t target, dir string) (string, error) {
-	prof, err := loadProfile(dir)
-	if err != nil {
-		return "", err
-	}
+func publishProfileTo(ctx context.Context, t target, prof *profile) (string, error) {
 	if len(prof.rules) < 2 {
 		return "", errors.New("lbf's bronze profile is compiled into lbf and is never published")
 	}
-	name, version, err := profilePath(prof.ID)
+	ref, err := publishedAs(prof.ID)
 	if err != nil {
 		return "", err
 	}
@@ -466,16 +389,16 @@ func publishProfileTo(ctx context.Context, t target, dir string) (string, error)
 		return "", err
 	}
 	for _, r := range prof.rules[1 : len(prof.rules)-1] {
-		pname, pversion, err := profilePath(r.id)
+		base, err := publishedAs(r.id)
 		if err != nil {
 			return "", err
 		}
-		published, err := os.ReadFile(filepath.Join(cache, pname, pversion, "profile.json"))
+		stored, err := os.ReadFile(base.in(cache))
 		if err != nil {
 			return "", fmt.Errorf("%s builds on %s, which is not published in %s; publish it first", prof.ID, r.id, t.Account)
 		}
-		if !bytes.Equal(published, r.raw) {
-			return "", fmt.Errorf("%s builds on %s, but the copy beside it differs from the one published in %s", prof.ID, r.id, t.Account)
+		if !bytes.Equal(stored, r.raw) {
+			return "", fmt.Errorf("%s builds on %s, but the copy beside it differs from the one published in %s; 'lbf profiles pull %s' fetches the published one", prof.ID, r.id, t.Account, base)
 		}
 	}
 	cc, err := t.client()
@@ -485,8 +408,8 @@ func publishProfileTo(ctx context.Context, t target, dir string) (string, error)
 	if err := checkWrite(ctx, cc, t); err != nil {
 		return "", err
 	}
-	raw := prof.rules[len(prof.rules)-1].raw
-	blobName := name + "/" + version + "/profile.json"
+	raw := prof.chosen().raw
+	blobName := ref.blob()
 	_, err = cc.NewBlockBlobClient(blobName).UploadBuffer(ctx, raw, &blockblob.UploadBufferOptions{
 		HTTPHeaders: &blob.HTTPHeaders{BlobContentType: to.Ptr("application/schema+json")},
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
@@ -499,15 +422,15 @@ func publishProfileTo(ctx context.Context, t target, dir string) (string, error)
 			return "", derr
 		}
 		if !bytes.Equal(stored, raw) {
-			return "", fmt.Errorf("%s@%s is already published in %s with other contents, and a published profile never changes; give this one a new version", name, version, t.Account)
+			return "", fmt.Errorf("%s is already published in %s with other contents, and a published profile never changes; give this one a new version", ref, t.Account)
 		}
-		return fmt.Sprintf("%s@%s is already published in %s, unchanged", name, version, t.Account), nil
+		return fmt.Sprintf("%s is already published in %s, unchanged", ref, t.Account), nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("publishing %s: %w", blobName, err)
 	}
-	if err := writeAtomic(filepath.Join(cache, name, version, "profile.json"), raw); err != nil {
+	if err := writeAtomic(ref.in(cache), raw); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Published %s@%s in %s\nUse it with: lbf publish <folder> --profile %s@%s", name, version, t.Account, name, version), nil
+	return fmt.Sprintf("Published %s in %s\nUse it with: lbf publish <folder> --profile %s", ref, t.Account, ref), nil
 }

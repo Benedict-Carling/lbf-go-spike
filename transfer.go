@@ -80,11 +80,11 @@ func preparePublication(input string, provFlags provenanceFlags, profileDirs []s
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
 func (p publication) validate(t target) (time.Time, error) {
 	published := time.Now()
-	crate, err := buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, p.Profile, published)
+	crate, err := p.buildCrate(t, published)
 	if err != nil {
 		return time.Time{}, err
 	}
-	view, err := crateView(crate)
+	view, err := framedRoot(crate)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -100,7 +100,7 @@ func (p publication) crate(t target) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, p.Profile, published)
+	return p.buildCrate(t, published)
 }
 
 func upload(ctx context.Context, t target, pub publication) error {
@@ -456,7 +456,7 @@ func landedProblems(files []crateFile, stored map[string]crateFile) []string {
 var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")
 
 func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time) error {
-	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, pub.Profile, published)
+	crate, err := pub.buildCrate(t, published)
 	if err != nil {
 		return err
 	}

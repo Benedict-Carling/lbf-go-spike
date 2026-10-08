@@ -31,7 +31,7 @@ type offlineLoader struct{ context any }
 // 1.3 changed only the Bioschemas workflow terms of 1.2, which lbf's crates never used.
 func (l offlineLoader) LoadDocument(u string) (*ld.RemoteDocument, error) {
 	if u != roCrateContext && u != roCrate12Context {
-		return nil, ld.NewJsonLdError(ld.LoadingDocumentFailed, fmt.Sprintf("lbf knows only the contexts of the crates it writes, not %s", u))
+		return nil, ld.NewJsonLdError(ld.LoadingDocumentFailed, fmt.Sprintf("the crate uses the context %s, but lbf reads only the RO-Crate 1.2 and 1.3 contexts of the crates it writes; this crate was not written by lbf", u))
 	}
 	return &ld.RemoteDocument{DocumentURL: u, Document: l.context}, nil
 }
@@ -47,8 +47,8 @@ var jsonld = sync.OnceValues(func() (*ld.JsonLdOptions, error) {
 	return opts, nil
 })
 
-// What profiles validate: the crate's root with everything it refers to embedded, laid out by bronze's frame.
-func crateView(crate []byte) (map[string]any, error) {
+// What profiles check: the crate's root with everything it refers to embedded, laid out by bronze's frame.
+func framedRoot(crate []byte) (map[string]any, error) {
 	var frame map[string]any
 	if err := json.Unmarshal(bronzeFrameJSON, &frame); err != nil {
 		return nil, err
@@ -146,13 +146,21 @@ func crateStatement(crate []byte) (provenance, map[string]string, error) {
 			p.Properties[name] = str(pv, "value")
 		}
 	}
-	for _, source := range slices.Concat(asList(view["isBasedOn"]), asList(view["wasDerivedFrom"])) {
-		p.DerivedFrom = str(source, "identifier")
+	for _, parent := range slices.Concat(asList(view["isBasedOn"]), asList(view["wasDerivedFrom"])) {
+		p.DerivedFrom = str(parent, "identifier")
 	}
 	for _, run := range asList(obj(view["@reverse"])["result"]) {
 		for _, in := range asList(obj(run)["instrument"]) {
 			p.Instruments = append(p.Instruments, instrument{str(in, "name"), str(in, "version"), str(in, "url")})
 		}
+	}
+	// What lbf wrote when the publisher gave nothing, this version or an earlier one, is not what they stated.
+	id, source := str(view, "identifier"), str(obj(view["additionalProperty"])["source_path"], "value")
+	if p.Name == id || p.Name == defaultName(source) {
+		p.Name = ""
+	}
+	if slices.Contains([]string{"Dataset " + id, "Bronze-layer dataset " + id, defaultDescription(source, len(asList(view["hasPart"])), p.DerivedFrom)}, p.Description) {
+		p.Description = ""
 	}
 	schemas := map[string]string{}
 	for _, prof := range asList(view["conformsTo"]) {

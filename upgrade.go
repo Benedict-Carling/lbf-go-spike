@@ -14,10 +14,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -100,31 +100,10 @@ func latestVersion(ctx context.Context, base string) (string, error) {
 	return tag, nil
 }
 
-// parseVersion reads vX.Y.Z or a pre-release vX.Y.Z-suffix, which sorts below vX.Y.Z.
-func parseVersion(v string) (p []int, ok bool) {
-	core, pre, isPre := strings.Cut(strings.TrimPrefix(v, "v"), "-")
-	parts := strings.Split(core, ".")
-	if !strings.HasPrefix(v, "v") || len(parts) != 3 || (isPre && pre == "") {
-		return nil, false
-	}
-	for _, s := range parts {
-		n, err := strconv.Atoi(s)
-		if err != nil || strings.Trim(s, "0123456789") != "" {
-			return nil, false
-		}
-		p = append(p, n)
-	}
-	if isPre {
-		return append(p, 0), true
-	}
-	return append(p, 1), true
-}
-
 // newerVersion never offers a pre-release, but moves a pre-release user on to the release.
 func newerVersion(latest, current string) bool {
-	l, okL := parseVersion(latest)
-	c, okC := parseVersion(current)
-	return okL && okC && l[3] == 1 && slices.Compare(l, c) > 0
+	full := func(v string) bool { return semver.IsValid(v) && semver.Canonical(v) == v }
+	return full(latest) && full(current) && semver.Prerelease(latest) == "" && semver.Compare(latest, current) > 0
 }
 
 func assetName() string {

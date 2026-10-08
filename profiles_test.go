@@ -63,7 +63,7 @@ func TestCrateUsesOnlyROCrateTerms(t *testing.T) {
 	prof, err := loadProfile(filepath.Join(root, "cell-painting", "0.1.0"))
 	must(t, err)
 	pub := derivedPublication(t, prof)
-	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, target{User: "u", Container: "silver"}, pub.Provenance, prof, time.Now())
+	crate, err := pub.buildCrate(target{User: "u", Container: "silver"}, time.Now())
 	must(t, err)
 	if err := checkTerms(crate); err != nil {
 		t.Fatalf("crate uses a term outside its context: %v", err)
@@ -126,7 +126,7 @@ func TestProfileErrorsSayWhichFlagFixesThem(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "missing --property plate_id=...") || !strings.Contains(err.Error(), "Plate barcode; e.g. P001") {
 		t.Errorf("missing property: %v", err)
 	}
-	if err != nil && strings.Contains(err.Error(), "/hasPart: no file is what the profile asks for") {
+	if err != nil && strings.Contains(err.Error(), "files: no file is what the profile asks for") {
 		t.Logf("%v", err)
 	}
 
@@ -147,13 +147,13 @@ func TestRegistryRef(t *testing.T) {
 		"plate-read@0.2.0": {"plate-read", "0.2.0"},
 		"plate-read@v1":    {"plate-read", "v1"},
 	} {
-		name, version, ok := registryRef(arg)
-		if !ok || name != want[0] || version != want[1] {
-			t.Errorf("%s: got %s %s %v", arg, name, version, ok)
+		ref, ok := publishedRef(arg)
+		if !ok || ref.name != want[0] || ref.version != want[1] {
+			t.Errorf("%s: got %v %v", arg, ref, ok)
 		}
 	}
 	for _, arg := range []string{"", "plate-local", "./plate-read", `profiles\plate-read`, "Plate-Read", "plate-read@latest"} {
-		if _, _, ok := registryRef(arg); ok {
+		if _, ok := publishedRef(arg); ok {
 			t.Errorf("%q taken as a published profile", arg)
 		}
 	}
@@ -178,32 +178,32 @@ func TestRegistryPublishesResolvesShowsAndPulls(t *testing.T) {
 	writeFile(t, filepath.Join(src, "plate-read", "0.2.0", "profile.json"), profileJSON("plate-read", "0.2.0", bronze, plate))
 	writeFile(t, filepath.Join(src, "plate-summary", "0.1.0", "profile.json"), profileJSON("plate-summary", "0.1.0", "https://w3id.org/lbf/profiles/plate-read/0.2.0", ""))
 
-	if _, err := publishProfileTo(ctx, tg, filepath.Join(src, "plate-summary", "0.1.0")); err == nil || !strings.Contains(err.Error(), "publish it first") {
+	if _, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-summary", "0.1.0"))); err == nil || !strings.Contains(err.Error(), "publish it first") {
 		t.Fatalf("published before what it builds on: %v", err)
 	}
 	for _, v := range []string{"0.1.0", "0.2.0"} {
-		msg, err := publishProfileTo(ctx, tg, filepath.Join(src, "plate-read", v))
+		msg, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-read", v)))
 		must(t, err)
 		t.Log(msg)
 	}
-	msg, err := publishProfileTo(ctx, tg, filepath.Join(src, "plate-read", "0.2.0"))
+	msg, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-read", "0.2.0")))
 	if err != nil || !strings.Contains(msg, "unchanged") {
 		t.Fatalf("republishing the same profile: %s %v", msg, err)
 	}
 	writeFile(t, filepath.Join(src, "plate-read", "0.2.0", "profile.json"), profileJSON("plate-read", "0.2.0", bronze, ""))
-	if _, err := publishProfileTo(ctx, tg, filepath.Join(src, "plate-read", "0.2.0")); err == nil || !strings.Contains(err.Error(), "never changes") {
+	if _, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-read", "0.2.0"))); err == nil || !strings.Contains(err.Error(), "never changes") {
 		t.Fatalf("a published version was replaced: %v", err)
 	}
-	if _, err := publishProfileTo(ctx, tg, filepath.Join(src, "plate-summary", "0.1.0")); err == nil || !strings.Contains(err.Error(), "differs") {
+	if _, err := publishProfileTo(ctx, tg, loaded(t, filepath.Join(src, "plate-summary", "0.1.0"))); err == nil || !strings.Contains(err.Error(), "differs") {
 		t.Fatalf("published on top of a local copy that differs from the published one: %v", err)
 	}
 
-	latest, err := publishedProfile(ctx, tg, "plate-read", "")
+	latest, err := publishedProfile(ctx, tg, published{"plate-read", ""})
 	must(t, err)
 	if filepath.Base(latest) != "0.2.0" {
 		t.Fatalf("latest is %s", latest)
 	}
-	if _, err := publishedProfile(ctx, tg, "plate-read", "0.3.0"); err == nil || !strings.Contains(err.Error(), "0.1.0, 0.2.0") {
+	if _, err := publishedProfile(ctx, tg, published{"plate-read", "0.3.0"}); err == nil || !strings.Contains(err.Error(), "0.1.0, 0.2.0") {
 		t.Fatalf("missing version: %v", err)
 	}
 	prof, err := loadProfile(latest)
@@ -282,9 +282,9 @@ func TestFilesSetAsideFrameAsFramingWould(t *testing.T) {
 	must(t, err)
 	files := []localFile{{Rel: "run1/a b.csv", Size: 3, SHA256: "ab"}, {Rel: "run1/x/y.tif", Size: 5}}
 	prov := provenance{DerivedFrom: "20260101-x-y-0000", Instruments: []instrument{{"p", "1", "https://example.org/p"}}, Properties: map[string]string{"plate id": "P1"}}
-	crate, err := buildCrate("20260102-a-b-1234", "/data/run1", files, target{User: "u"}, prov, prof, time.Now())
+	crate, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: files, Provenance: prov, Profile: prof}.buildCrate(target{User: "u"}, time.Now())
 	must(t, err)
-	fast, err := crateView(crate)
+	fast, err := framedRoot(crate)
 	must(t, err)
 
 	opts, err := jsonld()
@@ -352,7 +352,7 @@ const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "
 func TestCratesFromAnEarlierLbfAreReadBack(t *testing.T) {
 	p, schemas, err := crateStatement([]byte(earlierLbfCrate))
 	must(t, err)
-	want := provenance{Name: "20261005-vocal-unicorn-112d", Description: "Dataset 20261005-vocal-unicorn-112d", DerivedFrom: "20261005-crucial-lab-cccb",
+	want := provenance{DerivedFrom: "20261005-crucial-lab-cccb",
 		Instruments: []instrument{{"pipe", "0.1.0", "https://example.org/pipe"}}, Properties: map[string]string{"sample_id": "SAM-0001"}}
 	if !p.sameAs(want) || len(schemas) != 2 {
 		t.Fatalf("got %+v %v", p, schemas)
@@ -451,5 +451,78 @@ func TestADatasetCanMeetSeveralProfiles(t *testing.T) {
 	must(t, err)
 	if _, err := pub.crate(target{User: "u"}); err == nil || !strings.Contains(err.Error(), "missing --property grant=...") {
 		t.Fatalf("one profile's rules skipped: %v", err)
+	}
+}
+
+func loaded(t *testing.T, dir string) *profile {
+	t.Helper()
+	prof, err := loadProfile(dir)
+	must(t, err)
+	return prof
+}
+
+const strictProfile = `{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://w3id.org/lbf/profiles/strict/0.1.0",
+ "$ref": "https://w3id.org/lbf/profiles/bronze/0.5.0", "title": "Strict", "required": ["keywords"],
+ "properties": {
+  "name": {"title": "Plate name", "pattern": "^Plate ", "examples": ["Plate P-0001"]},
+  "description": {"minLength": 400},
+  "keywords": {"title": "Keywords"},
+  "hasPart": {"description": "A FASTA file", "contains": {"properties": {"@id": {"pattern": "\\.fasta$"}}}}}}`
+
+func TestProfileErrorsOnTheRootSayWhatFixesThem(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "strict", "0.1.0")
+	writeFile(t, filepath.Join(dir, "profile.json"), strictProfile)
+	pub, err := preparePublication(dataset(t, map[string]string{"a.csv": "x"}), provenanceFlags{}, []string{dir}, "")
+	must(t, err)
+	_, err = pub.crate(target{User: "u"})
+	for _, want := range []string{
+		"does not meet profile Strict (https://w3id.org/lbf/profiles/strict/0.1.0)",
+		"is not in the form the profile asks for\n      Plate name; e.g. Plate P-0001",
+		"  --description: is ",
+		"characters long, but must be at least 400",
+		"  missing keywords, which no flag of lbf's gives, so no dataset can meet this profile",
+		"  files: no file is what the profile asks for\n      A FASTA file",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("lacks %q: %v", want, err)
+		}
+	}
+
+	pub, err = preparePublication(dataset(t, map[string]string{"a.csv": "x"}), provenanceFlags{}, nil, "")
+	must(t, err)
+	if _, err := pub.crate(target{}); err == nil || !strings.Contains(err.Error(), "missing creator: lbf names whoever signed in") {
+		t.Errorf("no uploader: %v", err)
+	}
+}
+
+func TestShowSaysWhatNoFlagCanGive(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "strict", "0.1.0")
+	writeFile(t, filepath.Join(dir, "profile.json"), strictProfile)
+	got := map[string]ask{}
+	for _, a := range loaded(t, dir).asks() {
+		got[a.flag] = a
+	}
+	for flag, want := range map[string]ask{
+		"--name ...":        {"--name ...", "required", "Plate name; e.g. Plate P-0001"},
+		"--description ...": {"--description ...", "required", "lbf's own does not meet it"},
+		"keywords":          {"keywords", "required", "no flag of lbf's gives it, so no dataset can meet this profile"},
+		"files":             {"files", "required", "A FASTA file"},
+	} {
+		if got[flag] != want {
+			t.Errorf("%s: got %+v", flag, got[flag])
+		}
+	}
+	if _, ok := got["license"]; ok {
+		t.Errorf("a term lbf sets is asked for: %+v", got)
+	}
+}
+
+func TestProfileVersionsSortAsSemanticVersions(t *testing.T) {
+	dir := t.TempDir()
+	for _, v := range []string{"0.10.0", "0.9.0", "v1", "0.9", "1.0.0.1"} {
+		writeFile(t, published{"plate-read", v}.in(dir), "{}")
+	}
+	if got := publishedVersions(dir, "plate-read"); !slices.Equal(got, []string{"0.9", "0.9.0", "0.10.0", "v1"}) {
+		t.Fatalf("got %v", got)
 	}
 }

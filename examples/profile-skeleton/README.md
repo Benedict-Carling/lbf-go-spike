@@ -126,11 +126,12 @@ A published version never changes: to change the rules, copy the folder to
 
 ## When a dataset does not meet its profile
 
-Nothing is uploaded, and lbf says which flag fixes each problem:
+Nothing is uploaded, and lbf says which flag fixes each problem, in the
+profile's own words:
 
 ```
-error: dataset does not meet profile https://w3id.org/lbf/profiles/plate-read/0.1.0:
-  --property plate_id: 'plate one' does not match pattern '^P-[0-9]{4}$'
+error: dataset does not meet profile Plate read (https://w3id.org/lbf/profiles/plate-read/0.1.0):
+  --property plate_id: 'plate one' is not in the form the profile asks for
       Plate barcode; On the side of the plate; e.g. P-0001
   missing --property operator=...
       Who ran the reader; e.g. A. Researcher
