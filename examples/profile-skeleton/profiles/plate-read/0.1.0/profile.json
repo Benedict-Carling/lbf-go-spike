@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://w3id.org/lbf/profiles/plate-read/0.1.0",
+  "$ref": "https://w3id.org/lbf/profiles/bronze/0.5.0",
+  "title": "Plate read",
+  "description": "One plate as the plate reader read it: its readings.csv, the plate's barcode, who ran it and on which reader.",
+  "required": ["additionalProperty"],
+  "properties": {
+    "hasPart": {
+      "description": "The reader's export, saved as readings.csv",
+      "contains": {"properties": {"@id": {"pattern": "(^|/)readings\\.csv$"}}}
+    },
+    "additionalProperty": {
+      "required": ["plate_id", "operator", "reader_serial"],
+      "properties": {
+        "plate_id": {
+          "title": "Plate barcode", "description": "On the side of the plate", "examples": ["P-0001"],
+          "properties": {"value": {"pattern": "^P-[0-9]{4}$"}}
+        },
+        "operator": {
+          "title": "Who ran the reader", "examples": ["A. Researcher"],
+          "properties": {"value": {"minLength": 1}}
+        },
+        "reader_serial": {
+          "title": "Reader serial number", "description": "On the back of the reader", "examples": ["SN-204417"],
+          "properties": {"value": {"minLength": 1}}
+        }
+      }
+    }
+  }
+}
