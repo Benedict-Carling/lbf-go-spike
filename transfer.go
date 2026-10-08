@@ -78,29 +78,17 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir, id 
 }
 
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
-func (p publication) validate(t target) (time.Time, []string, error) {
+func (p publication) validate(t target) (time.Time, error) {
 	published := time.Now()
-	ids := p.Profile.ids()
-	conformsTo := ids
-	if p.Provenance.DerivedFrom != "" {
-		conformsTo = append([]string{processRunCrate}, ids...)
+	if err := p.Profile.validate(p.view(t, published)); err != nil {
+		return time.Time{}, err
 	}
-	if err := p.Profile.validate(p.view(t, published, conformsTo)); err != nil {
-		return time.Time{}, nil, err
-	}
-	logf("[profile] meets %s\n", strings.Join(ids, ", "))
-	return published, conformsTo, nil
+	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
+	return published, nil
 }
 
-func (p publication) crate(t target) ([]byte, error) {
-	published, conformsTo, err := p.validate(t)
-	if err != nil {
-		return nil, err
-	}
-	return buildCrate(p.ID, p.Source, p.Files, t, p.Provenance, conformsTo, p.Profile.titles(), published)
-}
-
-func (p publication) view(t target, published time.Time, conformsTo []string) map[string]any {
+// What profiles check: the dataset's files beside what its crate records.
+func (p publication) view(t target, published time.Time) map[string]any {
 	name := filepath.Base(p.Source)
 	files := make([]map[string]any, len(p.Files))
 	for i, f := range p.Files {
@@ -109,7 +97,7 @@ func (p publication) view(t target, published time.Time, conformsTo []string) ma
 	crate := map[string]any{
 		"identifier":         p.ID,
 		"datePublished":      timestamp(published),
-		"conformsTo":         conformsTo,
+		"conformsTo":         p.Profile.conformsTo(p.Provenance.DerivedFrom != ""),
 		"additionalProperty": p.Provenance.Properties,
 	}
 	if user := strings.TrimSpace(t.User); user != "" {
@@ -125,8 +113,16 @@ func (p publication) view(t target, published time.Time, conformsTo []string) ma
 	}
 }
 
+func (p publication) crate(t target) ([]byte, error) {
+	published, err := p.validate(t)
+	if err != nil {
+		return nil, err
+	}
+	return p.buildCrate(t, published)
+}
+
 func upload(ctx context.Context, t target, pub publication) error {
-	published, conformsTo, err := pub.validate(t)
+	published, err := pub.validate(t)
 	if err != nil {
 		return err
 	}
@@ -147,7 +143,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 		return err
 	}
 	if _, ok := stored[crateName]; ok {
-		return confirmPublished(ctx, cc, pub, conformsTo, stored)
+		return confirmPublished(ctx, cc, pub, stored)
 	}
 
 	if len(stored) > 0 {
@@ -175,7 +171,7 @@ func upload(ctx context.Context, t target, pub publication) error {
 	started := time.Now()
 	err = transferAll(ctx, newProgress(os.Stderr, len(jobs), total), jobs)
 	if err == nil {
-		err = uploadCrate(ctx, cc, t, pub, published, conformsTo)
+		err = uploadCrate(ctx, cc, t, pub, published)
 	}
 	if ctx.Err() != nil {
 		return interrupted(context.WithoutCancel(ctx), cc, id)
@@ -239,7 +235,7 @@ func listStored(ctx context.Context, cc *container.Client, id string) (map[strin
 }
 
 // A rerun of a publish that already finished succeeds only if it would have published the same thing.
-func confirmPublished(ctx context.Context, cc *container.Client, pub publication, conformsTo []string, stored map[string]crateFile) error {
+func confirmPublished(ctx context.Context, cc *container.Client, pub publication, stored map[string]crateFile) error {
 	id := pub.ID
 	status("Reading the crate of " + id)
 	crate, err := downloadBuffer(ctx, cc, id+"/"+crateName)
@@ -254,14 +250,24 @@ func confirmPublished(ctx context.Context, cc *container.Client, pub publication
 	if problems := landedProblems(files, stored); len(problems) > 0 {
 		return idTaken{problemList(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
 	}
-	stated, statedConformsTo, err := crateProvenance(crate)
+	stated, conformsTo, err := crateStatement(crate)
 	if err != nil {
-		return fmt.Errorf("dataset %s: %w", id, err)
+		return idTaken{fmt.Errorf("%s is already published, but lbf cannot read what its crate states (%v), so this publish cannot be checked against it; publish without --id, or with a new ID from 'lbf new-id'", id, err)}
 	}
 
+	// A name or description lbf wrote follows the folder, so it only has to match when it was given.
+	if pub.Provenance.Name == "" {
+		stated.Name = ""
+	}
+	if pub.Provenance.Description == "" {
+		stated.Description = ""
+	}
 	var problems []string
-	if !stated.sameAs(pub.Provenance) || !slices.Equal(statedConformsTo, conformsTo) {
-		problems = append(problems, "its parent, instruments, properties or profiles differ from these")
+	if !stated.sameAs(pub.Provenance) {
+		problems = append(problems, "its name, description, parent, instruments or properties differ from these")
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(conformsTo)), slices.Sorted(slices.Values(pub.Profile.conformsTo(pub.Provenance.DerivedFrom != "")))) {
+		problems = append(problems, "it was checked against other profiles")
 	}
 	recorded := map[string]crateFile{}
 	for _, f := range files {
@@ -465,8 +471,8 @@ func landedProblems(files []crateFile, stored map[string]crateFile) []string {
 
 var errAnotherCrate = errors.New("another publish of the same ID stored its crate first")
 
-func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time, conformsTo []string) error {
-	crate, err := buildCrate(pub.ID, pub.Source, pub.Files, t, pub.Provenance, conformsTo, pub.Profile.titles(), published)
+func uploadCrate(ctx context.Context, cc *container.Client, t target, pub publication, published time.Time) error {
+	crate, err := pub.buildCrate(t, published)
 	if err != nil {
 		return err
 	}
@@ -508,6 +514,17 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 type fetched struct {
 	path, dataPath string
+	stated         *provenance
+}
+
+// What the crate states, for --json; a crate lbf cannot read is still fetched, without it.
+func statedBy(id string, crate []byte) *provenance {
+	p, _, err := crateStatement(crate)
+	if err != nil {
+		logf("[fetch] cannot read what the crate of %s states: %v\n", id, err)
+		return nil
+	}
+	return &p
 }
 
 var fetchHook = func(ctx context.Context, stage string) {}
@@ -559,7 +576,7 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 			return fetched{}, err
 		}
 		logf("%s is already here and matches its crate\n", root)
-		return fetched{root, dataDir(root, files)}, nil
+		return fetched{root, dataDir(root, files), statedBy(id, crate)}, nil
 	}
 
 	var total int64
@@ -622,7 +639,7 @@ func download(ctx context.Context, t target, id, outDir string) (fetched, error)
 		logf("%s was saved meanwhile by another fetch, and matches its crate\n", root)
 	}
 	logDone(started, total)
-	return fetched{root, dataDir(root, files)}, nil
+	return fetched{root, dataDir(root, files), statedBy(id, crate)}, nil
 }
 
 // Each fetch downloads into a folder of its own, so several fetches of one dataset into one place never touch each other's.

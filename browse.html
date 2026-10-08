@@ -65,7 +65,7 @@
 </main>
 <dialog id="detail"></dialog>
 <script>
-const LEAD = ["id", "container", "creator", "datePublished", "files", "size_bytes", "run_instrument", "wasDerivedFrom"];
+const LEAD = ["id", "name", "container", "creator", "datePublished", "files", "size_bytes", "run_instrument", "isBasedOn", "wasDerivedFrom"];
 const HIDDEN = new Set(["fetch", "description", "name", "identifier", "license", "distribution"]);
 const PAGE = 100;
 let all = [], files = {}, labels = {}, columns = [], facetCols = [], byId = new Map();
@@ -170,7 +170,7 @@ const iri = k => {
   return isURL(k) ? k : "http://schema.org/" + k;
 };
 const term = k => k.startsWith("@") ? esc(k) : link(iri(k), esc(k));
-const parents = r => [r.wasDerivedFrom, r.run_object].flatMap(v => [].concat(v ?? []).map(String));
+const parents = r => [r.isBasedOn, r.wasDerivedFrom, r.run_object].flatMap(v => [].concat(v ?? []).map(String));
 
 async function open(r) {
   history.replaceState(null, "", "#" + r.container + "/" + r.id);
@@ -206,11 +206,12 @@ async function open(r) {
   const parts = list(root.hasPart).map(x => g.get(x["@id"]) ?? x);
   parts.forEach(e => seen.add(e["@id"]));
   const fileKeys = [...new Set(parts.flatMap(Object.keys))].filter(k => !["@id", "@type"].includes(k));
+  const from = root.isBasedOn ? "isBasedOn" : "wasDerivedFrom";
 
   const body = [
-    `<dl>${fields(root, ["@id", "hasPart", "additionalProperty", "conformsTo", "wasDerivedFrom"])}
+    `<dl>${fields(root, ["@id", "hasPart", "additionalProperty", "conformsTo", "isBasedOn", "wasDerivedFrom", "mentions"])}
       <dt>size</dt><dd>${size(r.size_bytes)} in ${r.files} file${r.files === 1 ? "" : "s"}</dd><dt>container</dt><dd>${esc(r.container)}</dd></dl>`,
-    section("Produced by", (root.wasDerivedFrom ? `<dl><dt>${term("wasDerivedFrom")}</dt><dd>${value(root.wasDerivedFrom)}</dd></dl>` : "") +
+    section("Produced by", (root[from] ? `<dl><dt>${term(from)}</dt><dd>${value(root[from])}</dd></dl>` : "") +
       runs.map(e => `<dl>${fields(e, ["@id", "@type", "result"])}</dl>`).join("")),
     section("Used to make", children.length ? `<ul>${children.map(c => `<li><a href="#" data-open="${esc(c.id)}">${esc(c.id)}</a> <span class="muted">${esc(show("", c.run_instrument))}</span></li>`).join("")}</ul>` : ""),
     section(term("additionalProperty"), props.length ? `<dl>${props.map(e => `<dt>${esc(e.name ?? e.propertyID ?? e["@id"])}</dt><dd>${e.name ?? e.propertyID ? value(e.value) : `<span class="muted">not described in this crate</span>`}${Object.keys(e).filter(k => !["@id", "@type", "name", "value"].includes(k)).map(k => ` <span class="muted">${term(k)}: ${value(e[k])}</span>`).join("")}</dd>`).join("")}</dl>` : ""),

@@ -38,7 +38,8 @@ Run 'lbf <command> --help' for its options.
 `
 
 const provenanceHelp = `--derived-from and --instrument are given together or not at all. --provenance is a JSON file:
-{"derived_from": "<id>", "instruments": [{"name", "version", "url"}], "properties": {"name": "value"}}.
+{"name", "description", "derived_from": "<id>", "instruments": [{"name", "version", "url"}], "properties": {"name": "value"}};
+--property, --name and --description add to it, and anything given twice is refused.
 --profile is a directory holding a JSON Schema profile.json; publish validates against it, and lbf's
 bronze profile, before uploading anything.
 `
@@ -119,7 +120,7 @@ func run(ctx context.Context, args []string) error {
 			}
 			return nil
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, "upload", o.tenant, o.tag, o.account, o.container)
+		t, err := o.target(ctx, "upload", o.container)
 		if err != nil {
 			return err
 		}
@@ -133,7 +134,7 @@ func run(ctx context.Context, args []string) error {
 		if !validID.MatchString(id) {
 			return fmt.Errorf("%q is not a dataset ID", id)
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, "download", o.tenant, o.tag, o.account, o.container)
+		t, err := o.target(ctx, "download", o.container)
 		if err != nil {
 			return err
 		}
@@ -156,7 +157,7 @@ func run(ctx context.Context, args []string) error {
 		if o.mode != "upload" && o.mode != "download" {
 			return errors.New("--mode must be 'upload' or 'download'")
 		}
-		t, err := resolveTarget(ctx, o.sasEnv, o.mode, o.tenant, o.tag, o.account, o.container)
+		t, err := o.target(ctx, o.mode, o.container)
 		if err != nil {
 			return err
 		}
@@ -307,11 +308,14 @@ func newCommand(cmd string, o *options) (*command, error) {
 	tenant := func() {
 		str(&o.tenant, "tenant", "ID", "", "Entra tenant to sign in to (default Imperial College London)")
 	}
-	storage := func() {
-		str(&o.container, "container", "NAME", "bronze", "blob container")
+	account := func() {
 		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
 		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
 		tenant()
+	}
+	storage := func() {
+		str(&o.container, "container", "NAME", "bronze", "blob container")
+		account()
 	}
 	jsonFlag := func(desc string) {
 		fs.BoolVar(&o.json, "json", false, desc)
@@ -331,8 +335,15 @@ func newCommand(cmd string, o *options) (*command, error) {
 			return err
 		})
 		c.flags = append(c.flags, commandFlag{name: "instrument", arg: "name=NAME,version=VERSION,url=URL"})
+		fs.Func("property", "a property of the dataset; repeat for several", func(v string) error {
+			o.prov.props = append(o.prov.props, v)
+			return nil
+		})
+		c.flags = append(c.flags, commandFlag{name: "property", arg: "NAME=VALUE"})
 		str(&o.prov.properties, "properties", "FILE", "", `JSON object of property names and values, e.g. {"sample_id": "SAM-0001"}`)
-		str(&o.prov.file, "provenance", "FILE", "", "all of the above as one JSON file, instead of those flags")
+		str(&o.prov.name, "name", "TEXT", "", "what people call the dataset (default the folder's name)")
+		str(&o.prov.description, "description", "TEXT", "", "what the dataset holds (default one lbf writes)")
+		str(&o.prov.file, "provenance", "FILE", "", "the dataset's name, description, parent, instruments and properties as one JSON file")
 		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
 		str(&o.id, "id", "ID", "", "publish under this ID from 'lbf new-id'; run again with the same ID to finish a failed publish")
 		c.notes += "Exits with 3 when the ID already holds different files or provenance, which retrying cannot fix; use a new ID.\n"
@@ -345,17 +356,15 @@ func newCommand(cmd string, o *options) (*command, error) {
 		c.synopsis = cmd + " <id> [options]"
 		c.arg, c.argDesc = "<id>", "dataset ID, as printed by 'lbf publish'"
 		str(&o.out, "out", "DIR", ".", "output directory")
-		jsonFlag("print {\"id\", \"url\", \"path\", \"data_path\"} as JSON instead of the path; data_path is the uploaded folder inside path")
+		jsonFlag("print {\"id\", \"url\", \"path\", \"data_path\", \"provenance\"} as JSON instead of the path; data_path is the uploaded folder inside path, and provenance what its crate states, as in a --provenance file")
 		storage()
 		sasEnv()
 	case "browse":
 		c.synopsis = "browse [options]"
 		c.notes = "Reads every dataset's crate, caching each one since crates never change, and serves them on this computer only.\n"
 		str(&o.container, "container", "NAMES", "", "comma-separated containers to read (default every container you can list)")
-		str(&o.tag, "tag", "KEY=VALUE", "tag=storage", "storage account tag; the test account is tag=storage-test")
-		str(&o.account, "account", "NAME", "", "which tagged storage account to use when several are tagged (asked for in a terminal)")
 		str(&o.port, "port", "PORT", "0", "local port to serve on (0 picks a free one)")
-		tenant()
+		account()
 	case "new-id":
 		c.synopsis = "new-id"
 		c.notes = "Prints a new dataset ID without signing in. Pass it to 'lbf publish --id' once the data is ready.\n"
@@ -401,7 +410,7 @@ func (c *command) parse(args []string) ([]string, error) {
 	set := map[string]bool{}
 	c.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	for _, f := range c.flags {
-		if f.str && set[f.name] && c.fs.Lookup(f.name).Value.String() == "" {
+		if f.str && set[f.name] && strings.TrimSpace(c.fs.Lookup(f.name).Value.String()) == "" {
 			return nil, fmt.Errorf("--%s is empty; give it a value, or leave it out for the default", f.name)
 		}
 	}
@@ -499,7 +508,7 @@ func printPublished(asJSON bool, id, url string) error {
 func printFetched(asJSON bool, id, url string, got fetched) error {
 	var err error
 	if asJSON {
-		err = printJSON(map[string]string{"id": id, "url": url, "path": got.path, "data_path": got.dataPath})
+		err = printJSON(map[string]any{"id": id, "url": url, "path": got.path, "data_path": got.dataPath, "provenance": got.stated})
 	} else {
 		_, err = fmt.Println(got.path)
 	}
@@ -509,11 +518,12 @@ func printFetched(asJSON bool, id, url string, got fetched) error {
 	return nil
 }
 
-func resolveTarget(ctx context.Context, sasEnv, mode, tenant, tag, accountName, containerName string) (target, error) {
-	if sasEnv != "" {
-		return readSASEnv(sasEnv, mode, containerName)
+// The storage account and container the options pick, from --sas-env or by signing in.
+func (o options) target(ctx context.Context, mode, container string) (target, error) {
+	if o.sasEnv != "" {
+		return readSASEnv(o.sasEnv, mode, container)
 	}
-	return mintTarget(ctx, tenant, tag, accountName, containerName, mode)
+	return mintTarget(ctx, o.tenant, o.tag, o.account, container, mode)
 }
 
 // PowerShell 5.1 passes 'C:\My Folder\' -x as `C:\My Folder" -x`; a quote cannot appear in a Windows path.

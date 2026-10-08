@@ -289,21 +289,23 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		DerivedFrom: "20260101-x-y-0000",
 		Instruments: []instrument{{"CellProfiler", "4.2.6", "https://cellprofiler.org"}, {"pipe", "1", "https://example.org/pipe"}},
 		Properties:  map[string]string{"sample_id": "S1"},
+		Name:        "Run 1",
+		Description: "Cells, imaged",
 	}
-	conformsTo := []string{processRunCrate, "https://example.org/p"}
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{SubscriptionName: "sub"}, prov, conformsTo, nil, time.Now())
+	prof := &profile{rules: []rule{{id: "https://example.org/p"}}}
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: prov, Profile: prof}.buildCrate(target{SubscriptionName: "sub"}, time.Now())
 	must(t, err)
-	got, gotConformsTo, err := crateProvenance(raw)
+	got, conformsTo, err := crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(prov) || !slices.Equal(gotConformsTo, conformsTo) {
-		t.Fatalf("got %+v %v", got, gotConformsTo)
+	if !got.sameAs(prov) || !slices.Equal(slices.Sorted(slices.Values(conformsTo)), []string{"https://example.org/p", processRunCrate}) {
+		t.Fatalf("got %+v %v", got, conformsTo)
 	}
 
-	raw, err = buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, nil, time.Now())
+	raw, err = publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}}.buildCrate(target{}, time.Now())
 	must(t, err)
-	got, gotConformsTo, err = crateProvenance(raw)
+	got, conformsTo, err = crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(provenance{Properties: map[string]string{}}) || gotConformsTo != nil {
-		t.Fatalf("got %+v %v", got, gotConformsTo)
+	if !got.sameAs(provenance{Properties: map[string]string{}}) || len(conformsTo) != 0 {
+		t.Fatalf("got %+v %v", got, conformsTo)
 	}
 }

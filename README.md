@@ -78,24 +78,27 @@ stops with nothing uploaded if not.
 
 Every publish is validated before anything is uploaded. Every dataset must meet
 the bronze profile (`profiles/bronze/profile.json`, compiled into the binary),
-plus the one given with `--profile`. Without flags a dataset has no parent and
-no properties. Derived datasets record what they came from:
+plus the one given with `--profile`. Derived datasets record what they came from:
 
 ```
 lbf publish results/ --container silver \
     --derived-from 20261001-fancy-dassie-eadb \
     --instrument name=my-pipeline,version=0.1.0,url=https://... \
-    --properties metadata.json \
+    --property sample_id=SAM-0001 \
     --profile profiles/minimal-silver/0.1.0
 ```
 
-`metadata.json` holds the properties as strings, e.g. `{"sample_id": "SAM-0001"}`.
-`--derived-from` and `--instrument` come together, and `--instrument` repeats
-for several. The same provenance can instead be given as one file with
-`--provenance provenance.json`:
+`--property NAME=VALUE` repeats for several properties, and `--properties metadata.json`
+gives them as a JSON object of strings, e.g. `{"sample_id": "SAM-0001"}`.
+`--name` and `--description` say what the dataset is; without them lbf uses the
+folder's name and writes a description. `--derived-from` and `--instrument`
+come together, and `--instrument` repeats for several. The same can instead be
+given as one file with `--provenance provenance.json`, which `--property`,
+`--name` and `--description` add to; anything given twice is refused:
 
 ```json
-{"derived_from": "20261001-fancy-dassie-eadb",
+{"name": "Plate 1 features",
+ "derived_from": "20261001-fancy-dassie-eadb",
  "instruments": [{"name": "my-pipeline", "version": "0.1.0", "url": "https://..."}],
  "properties": {"sample_id": "SAM-0001"}}
 ```
@@ -104,6 +107,11 @@ Every field is optional, but `derived_from` and `instruments` come together.
 `derived_from` must be an ID lbf minted, and instruments that share a `url`
 must be the same instrument. Field names are exact: unknown or differently
 cased fields are rejected, as is anything after the closing brace.
+
+The crate is RO-Crate 1.3, in schema.org terms or those RO-Crate adopts:
+properties are `PropertyValue`s, the parent is `isBasedOn`, and a derived
+dataset also has a `CreateAction` run, which the root `mentions`, conforming to
+Process Run Crate 0.6.
 
 A profile is a directory holding a JSON Schema `profile.json`, describing both
 the data given as `<path>` and the crate lbf writes for it. Its `$id` is
@@ -119,17 +127,51 @@ validates this view of the dataset, once the uploader is known:
            "wasDerivedFrom": "...", "instrument": [{"name": "...", "version": "...", "url": "..."}]}}
 ```
 
-File paths are relative to `<path>`. `crate` uses the RO-Crate's own names.
+File paths are relative to `<path>`. `crate` uses lbf's own names for what the
+crate records, whichever RO-Crate terms it uses.
 
 `--dry-run` validates and prints the crate without signing in, as uploader `dry-run`;
 with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
-publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path"}` as one line, where
-`path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it. `--tag KEY=VALUE` picks
+publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path", "provenance"}` as one line, where
+`path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it; fetch's
+`provenance` is what the crate states (`name`, `description`, `derived_from`, `instruments`, `properties`), as in a `--provenance` file, leaving out a name and description lbf filled in. `--tag KEY=VALUE` picks
 the storage account (default `tag=storage`, production; the test account is
 `tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and
 otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
 uses a pre-minted credential instead of `az login`.
+
+## Design decisions
+
+Why lbf describes datasets as it does. Change these deliberately,
+and record a new decision here.
+
+- **The crate is RO-Crate 1.3, in the RO-Crate specification's terms first and
+  schema.org's next; lbf invents none.** Where schema.org has no word, the
+  specification's own choice is used (`conformsTo` from Dublin Core, the
+  Profiles vocabulary for profiles). Lab-specific values are
+  `additionalProperty` `PropertyValue`s, schema.org's mechanism for properties
+  it does not name.
+- **A parent is `isBasedOn`, and how it was made is a `CreateAction` the root
+  `mentions`, conforming to Process Run Crate 0.6.** The specification records
+  provenance with schema.org actions, never PROV's `wasDerivedFrom`, which
+  earlier lbf versions wrote and lbf still reads. lbf records only what it saw
+  or was told: the uploader is the `creator`, and the run has no `endTime`,
+  since lbf never sees the run.
+- **What a publisher states is one record: a name, description, parent,
+  instruments and properties.** The flags, the `--provenance` file and
+  `lbf fetch --json` all use it. Flags give values (`--property`) and links
+  (`--derived-from`, `--instrument`, since those point at other entities);
+  lbf fills a missing name and description. Richer metadata travels as a crate
+  of its own inside the published folder, which lbf publishes as a file and
+  never merges.
+- **lbf states only what it knows.** The licence is an entity with a name,
+  as RO-Crate asks. A file's `encodingFormat` comes from a fixed table of
+  extensions, not the operating system's, so a crate is the same wherever it is
+  written; a file whose type is not in the table has none. Without a known
+  uploader the crate has no `creator`, rather than an invented one, so bronze
+  refuses it. `lbf fetch --json` leaves out a name or description lbf filled
+  in, so carrying it forward never passes off lbf's words as the publisher's.
 
 ## Browsing datasets
 

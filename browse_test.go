@@ -17,12 +17,12 @@ func TestFlattenCrateShowsWhatPublishRecorded(t *testing.T) {
 		Properties:  map[string]string{"sample_id": "S1"},
 	}
 	files := []localFile{{Rel: "run1/a.csv", Size: 3, SHA256: "abc"}, {Rel: "run1/b.csv", Size: 4}}
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", files, target{User: "ann@example.org"}, prov, nil, nil, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: files, Provenance: prov}.buildCrate(target{User: "ann@example.org"}, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC))
 	must(t, err)
 
 	row, got, names, err := flattenCrate(raw)
 	must(t, err)
-	if row["run_instrument"] != "CellProfiler 4.2.6" || len(names) != 0 {
+	if row["run_instrument"] != "CellProfiler 4.2.6" || len(names) != 1 || names[licenseURL] != "In Copyright" {
 		t.Errorf("run_instrument: got %v, names %v", row["run_instrument"], names)
 	}
 	for k, want := range map[string]any{
@@ -43,7 +43,7 @@ func TestFlattenCrateShowsWhatPublishRecorded(t *testing.T) {
 }
 
 func TestFlattenCrateShowsFieldsNoOneTaughtIt(t *testing.T) {
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, nil, nil, time.Now())
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}}.buildCrate(target{}, time.Now())
 	must(t, err)
 	var doc map[string]any
 	must(t, json.Unmarshal(raw, &doc))
@@ -83,7 +83,7 @@ func TestFlattenCrateKeysLinksByIRIUnlessTheVersionIsNotInIt(t *testing.T) {
 }
 
 func TestFlattenCrateKeepsEachValueOfAMultiValuedProperty(t *testing.T) {
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, []string{"https://example.org/p1", "https://example.org/p2"}, nil, time.Now())
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}, Profile: &profile{rules: []rule{{id: "https://example.org/p1"}, {id: "https://example.org/p2"}}}}.buildCrate(target{}, time.Now())
 	must(t, err)
 	row, _, _, err := flattenCrate(raw)
 	must(t, err)

@@ -31,7 +31,7 @@ func TestSymlinkedRootIsNamedAfterTheLink(t *testing.T) {
 		t.Fatalf("folder link: %s %s %v", source, rels(files), err)
 	}
 	pub := publication{ID: newID(), Source: source, Files: files}
-	if got := pub.view(target{}, time.Now(), nil)["data"].(map[string]any)["files"].([]map[string]any)[0]["path"]; got != "x.txt" {
+	if got := pub.view(target{}, time.Now())["data"].(map[string]any)["files"].([]map[string]any)[0]["path"]; got != "x.txt" {
 		t.Fatalf("profile sees %v", got)
 	}
 
