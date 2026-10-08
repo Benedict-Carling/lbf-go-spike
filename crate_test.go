@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"os"
@@ -121,21 +122,23 @@ func statementOf(raw []byte) (provenance, []string, error) {
 }
 
 func TestRepublishComparesWhatTheCrateStates(t *testing.T) {
-	pub := func(name string, props map[string]string, profileID string) publication {
+	pub := func(prov provenance, profileID string) publication {
+		prov.Properties = map[string]string{"sample_id": cmp.Or(prov.Properties["sample_id"], "S1")}
 		return publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}},
-			Provenance: provenance{Name: name, Properties: props}, Profile: &profile{rules: []rule{{id: profileID}}}}
+			Provenance: prov, Profile: &profile{rules: []rule{{id: profileID}}}}
 	}
-	s1, p := map[string]string{"sample_id": "S1"}, "https://example.org/p"
+	p := "https://example.org/p"
 	for _, c := range []struct {
 		name             string
 		published, again publication
-		differs          bool
+		want             string
 	}{
-		{"the same", pub("", s1, p), pub("", s1, p), false},
-		{"a name lbf filled in, now given", pub("", s1, p), pub("Run 1", s1, p), true},
-		{"a name given, now left out", pub("Run 1", s1, p), pub("", s1, p), false},
-		{"another property", pub("", s1, p), pub("", map[string]string{"sample_id": "S2"}, p), true},
-		{"another profile", pub("", s1, p), pub("", s1, "https://example.org/q"), true},
+		{"the same", pub(provenance{}, p), pub(provenance{}, p), ""},
+		{"a name lbf filled in, now given", pub(provenance{}, p), pub(provenance{Name: "Run 1"}, p), "name, description"},
+		{"a name given, now left out", pub(provenance{Name: "Run 1"}, p), pub(provenance{}, p), ""},
+		{"a description lbf filled in, now given", pub(provenance{}, p), pub(provenance{Description: "Cells"}, p), "name, description"},
+		{"another property", pub(provenance{}, p), pub(provenance{Properties: map[string]string{"sample_id": "S2"}}, p), "name, description"},
+		{"another profile", pub(provenance{}, p), pub(provenance{}, "https://example.org/q"), "other profiles"},
 	} {
 		raw, err := c.published.buildCrate(target{User: "u"}, time.Now())
 		must(t, err)
@@ -143,8 +146,8 @@ func TestRepublishComparesWhatTheCrateStates(t *testing.T) {
 		must(t, err)
 		problems, err := crate.differsFrom(c.again)
 		must(t, err)
-		if (len(problems) > 0) != c.differs {
-			t.Errorf("%s: %v", c.name, problems)
+		if got := strings.Join(problems, "\n"); c.want == "" && got != "" || !strings.Contains(got, c.want) || len(problems) > 1 {
+			t.Errorf("%s: got %q, want only %q", c.name, got, c.want)
 		}
 	}
 }
