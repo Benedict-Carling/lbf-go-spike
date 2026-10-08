@@ -85,11 +85,16 @@ func prepared(t *testing.T, dir, id string, prov provenanceFlags) publication {
 	return pub
 }
 
+func blobsOf(t *testing.T, tg target, id string) blobs {
+	t.Helper()
+	b, err := tg.blobs(id)
+	must(t, err)
+	return b
+}
+
 func storedNow(t *testing.T, tg target, id string) map[string]crateFile {
 	t.Helper()
-	cc, err := tg.client()
-	must(t, err)
-	stored, err := listStored(context.Background(), cc, id)
+	stored, err := blobsOf(t, tg, id).list(context.Background())
 	must(t, err)
 	return stored
 }
@@ -97,21 +102,18 @@ func storedNow(t *testing.T, tg target, id string) map[string]crateFile {
 // Stores some of a dataset's files as an attempt that stopped partway would have.
 func earlierAttempt(t *testing.T, tg target, id string, files map[string]string, stored ...string) {
 	t.Helper()
-	cc, err := tg.client()
-	must(t, err)
+	b := blobsOf(t, tg, id)
 	pub := prepared(t, dataset(t, files), id, provenanceFlags{})
 	for i := range pub.Files {
 		if slices.Contains(stored, pub.Files[i].Rel) {
-			must(t, uploadFile(context.Background(), cc, id+"/"+pub.Files[i].Rel, &pub.Files[i], tg.User, func(int64) {}))
+			must(t, b.putFile(context.Background(), &pub.Files[i], func(int64) {}))
 		}
 	}
 }
 
 func etag(t *testing.T, tg target, name string) string {
 	t.Helper()
-	cc, err := tg.client()
-	must(t, err)
-	props, err := cc.NewBlobClient(name).GetProperties(context.Background(), nil)
+	props, err := blobsOf(t, tg, "").cc.NewBlobClient(name).GetProperties(context.Background(), nil)
 	must(t, err)
 	return string(*props.ETag)
 }
@@ -201,13 +203,12 @@ func TestTwoPublishesOfOneIDCannotOverwriteEachOther(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
 	id := newID()
-	cc, err := tg.client()
-	must(t, err)
+	b := blobsOf(t, tg, id)
 	one := prepared(t, dataset(t, map[string]string{"a.txt": "a"}), id, provenanceFlags{})
-	must(t, uploadFile(ctx, cc, id+"/run1/a.txt", &one.Files[0], tg.User, func(int64) {}))
+	must(t, b.putFile(ctx, &one.Files[0], func(int64) {}))
 
 	other := prepared(t, dataset(t, map[string]string{"a.txt": "b"}), id, provenanceFlags{})
-	err = uploadFile(ctx, cc, id+"/run1/a.txt", &other.Files[0], tg.User, func(int64) {})
+	err := b.putFile(ctx, &other.Files[0], func(int64) {})
 	if _, ok := errors.AsType[idTaken](err); !ok || !strings.Contains(err.Error(), "another publish") {
 		t.Fatal(err)
 	}
@@ -216,22 +217,20 @@ func TestTwoPublishesOfOneIDCannotOverwriteEachOther(t *testing.T) {
 func TestRacingUploadsNeverStoreAnotherFilesBytes(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
-	cc, err := tg.client()
-	must(t, err)
 	for i := range 20 {
-		name := fmt.Sprintf("race/%d.bin", i)
+		b := blobsOf(t, tg, fmt.Sprintf("race%d", i))
 		pubs := []publication{
 			prepared(t, dataset(t, map[string]string{"f.bin": strings.Repeat("a", blockSize+1000)}), "", provenanceFlags{}),
 			prepared(t, dataset(t, map[string]string{"f.bin": strings.Repeat("b", blockSize+1000)}), "", provenanceFlags{}),
 		}
 		done := make(chan error, 2)
 		for j := range pubs {
-			go func() { done <- uploadFile(ctx, cc, name, &pubs[j].Files[0], tg.User, func(int64) {}) }()
+			go func() { done <- b.putFile(ctx, &pubs[j].Files[0], func(int64) {}) }()
 		}
 		<-done
 		<-done
-		stored := storedNow(t, tg, "race")[strings.TrimPrefix(name, "race/")]
-		body, err := downloadBuffer(ctx, cc, name)
+		stored := storedNow(t, tg, b.id)["run1/f.bin"]
+		body, err := b.read(ctx, "run1/f.bin")
 		must(t, err)
 		if sum := sha256.Sum256(body); hex.EncodeToString(sum[:]) != stored.SHA256 {
 			t.Fatalf("attempt %d: stored bytes do not match the stored sha256", i)
@@ -295,7 +294,7 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 	prof := &profile{rules: []rule{{id: "https://example.org/p"}}}
 	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: prov, Profile: prof}.buildCrate(target{SubscriptionName: "sub"}, time.Now())
 	must(t, err)
-	got, conformsTo, err := crateStatement(raw)
+	got, conformsTo, err := statementOf(raw)
 	must(t, err)
 	if !got.sameAs(prov) || !slices.Equal(slices.Sorted(slices.Values(conformsTo)), []string{"https://example.org/p", processRunCrate}) {
 		t.Fatalf("got %+v %v", got, conformsTo)
@@ -303,7 +302,7 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 
 	raw, err = publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}}.buildCrate(target{}, time.Now())
 	must(t, err)
-	got, conformsTo, err = crateStatement(raw)
+	got, conformsTo, err = statementOf(raw)
 	must(t, err)
 	if !got.sameAs(provenance{Properties: map[string]string{}}) || len(conformsTo) != 0 {
 		t.Fatalf("got %+v %v", got, conformsTo)

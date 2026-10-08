@@ -12,7 +12,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/service"
 )
@@ -35,10 +34,6 @@ func (t target) containerURL() string {
 		return t.endpoint + "/" + t.Container
 	}
 	return fmt.Sprintf("https://%s.blob.core.windows.net/%s", t.Account, t.Container)
-}
-
-func (t target) client() (*container.Client, error) {
-	return container.NewClientWithNoCredential(t.containerURL()+"?"+t.SAS, nil)
 }
 
 func mintTarget(ctx context.Context, tenant, tag, accountName, containerName, mode string) (target, error) {

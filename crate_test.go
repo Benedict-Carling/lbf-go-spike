@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"os"
@@ -107,15 +108,48 @@ func TestRepublishingChecksOnlyTheNameAndDescriptionGiven(t *testing.T) {
 	if err := upload(ctx, tg, pub); err == nil || !strings.Contains(err.Error(), "renamed/a.txt: not in it") {
 		t.Fatalf("a folder of another name holds other files, so it is another dataset: %v", err)
 	}
-
-	named, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{name: "Run 1"}, "", id)
-	must(t, err)
-	if err := upload(ctx, tg, named); err == nil || !strings.Contains(err.Error(), "name, description") {
-		t.Fatalf("a name the first publish did not give was accepted: %v", err)
-	}
 	same, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{}, "", id)
 	must(t, err)
 	must(t, upload(ctx, tg, same))
+}
+
+func statementOf(raw []byte) (provenance, []string, error) {
+	c, err := readCrate(raw)
+	if err != nil {
+		return provenance{}, nil, err
+	}
+	return c.statement()
+}
+
+func TestRepublishComparesWhatTheCrateStates(t *testing.T) {
+	pub := func(prov provenance, profileID string) publication {
+		prov.Properties = map[string]string{"sample_id": cmp.Or(prov.Properties["sample_id"], "S1")}
+		return publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}},
+			Provenance: prov, Profile: &profile{rules: []rule{{id: profileID}}}}
+	}
+	p := "https://example.org/p"
+	for _, c := range []struct {
+		name             string
+		published, again publication
+		want             string
+	}{
+		{"the same", pub(provenance{}, p), pub(provenance{}, p), ""},
+		{"a name lbf filled in, now given", pub(provenance{}, p), pub(provenance{Name: "Run 1"}, p), "name, description"},
+		{"a name given, now left out", pub(provenance{Name: "Run 1"}, p), pub(provenance{}, p), ""},
+		{"a description lbf filled in, now given", pub(provenance{}, p), pub(provenance{Description: "Cells"}, p), "name, description"},
+		{"another property", pub(provenance{}, p), pub(provenance{Properties: map[string]string{"sample_id": "S2"}}, p), "name, description"},
+		{"another profile", pub(provenance{}, p), pub(provenance{}, "https://example.org/q"), "other profiles"},
+	} {
+		raw, err := c.published.buildCrate(target{User: "u"}, time.Now())
+		must(t, err)
+		crate, err := readCrate(raw)
+		must(t, err)
+		problems, err := crate.differsFrom(c.again)
+		must(t, err)
+		if got := strings.Join(problems, "\n"); c.want == "" && got != "" || !strings.Contains(got, c.want) || len(problems) > 1 {
+			t.Errorf("%s: got %q, want only %q", c.name, got, c.want)
+		}
+	}
 }
 
 const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "@graph": [
@@ -134,14 +168,14 @@ const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "
  {"@id": "data/a.csv", "@type": "File", "contentSize": "1"}]}`
 
 func TestCratesFromAnEarlierLbfAreReadBack(t *testing.T) {
-	p, conformsTo, err := crateStatement([]byte(earlierLbfCrate))
+	p, conformsTo, err := statementOf([]byte(earlierLbfCrate))
 	must(t, err)
 	want := provenance{DerivedFrom: "20261005-crucial-lab-cccb",
 		Instruments: []instrument{{"pipe", "0.1.0", "https://example.org/pipe"}}, Properties: map[string]string{"sample_id": "SAM-0001"}}
 	if !p.sameAs(want) || len(conformsTo) != 2 {
 		t.Fatalf("got %+v %v", p, conformsTo)
 	}
-	if _, _, err := crateStatement([]byte(`{"@context": "https://example.org/other", "@graph": []}`)); err == nil {
+	if _, _, err := statementOf([]byte(`{"@context": "https://example.org/other", "@graph": [{"@id": "./", "hasPart": {"@id": "a"}}, {"@id": "a", "contentSize": "1"}]}`)); err == nil {
 		t.Fatal("a crate in an unknown context was read")
 	}
 }
@@ -175,7 +209,7 @@ func TestPropertyNamesAreSafeInTheCrate(t *testing.T) {
 	if !strings.Contains(string(crate), `"@id": "#plate%20id"`) {
 		t.Fatalf("property id not encoded:\n%s", crate)
 	}
-	stated, _, err := crateStatement(crate)
+	stated, _, err := statementOf(crate)
 	must(t, err)
 	if stated.Properties["plate id"] != "P 1" || stated.Properties["a/b"] != "c" {
 		t.Fatalf("read back %v", stated.Properties)

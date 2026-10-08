@@ -135,16 +135,16 @@ func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := crateFiles(raw)
+	got, err := readCrate(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []crateFile{{"run1/a b#1%.csv", 5, "abc"}, {"run1/old.txt", 3, ""}}
-	if !slices.Equal(got, want) {
-		t.Fatalf("got %+v", got)
+	if !slices.Equal(got.Files, want) {
+		t.Fatalf("got %+v", got.Files)
 	}
 
-	problems := compareStored(want, map[string]crateFile{"run1/a b#1%.csv": {Size: 4}, crateName: {Size: 9}, "run1/extra": {Size: 1}})
+	problems := got.differences(map[string]crateFile{"run1/a b#1%.csv": {Size: 4}, crateName: {Size: 9}, "run1/extra": {Size: 1}}, false)
 	if got := strings.Join(problems, "\n"); got != "run1/a b#1%.csv: stored as 4 bytes, but the crate records 5\n"+
 		"run1/old.txt: listed in the crate but not stored\nrun1/extra: stored but not listed in the crate" {
 		t.Fatalf("got:\n%s", got)
@@ -156,18 +156,18 @@ func TestVerifyDir(t *testing.T) {
 	writeFile(t, filepath.Join(root, "run1", "a.txt"), "hello")
 	writeFile(t, filepath.Join(root, crateName), "crate")
 	sum := sha256.Sum256([]byte("hello"))
-	files := []crateFile{{"run1/a.txt", 5, hex.EncodeToString(sum[:])}}
+	crate := storedCrate{raw: []byte("crate"), Files: []crateFile{{"run1/a.txt", 5, hex.EncodeToString(sum[:])}}}
 
-	if problem, err := verifyDir(root, files, []byte("crate")); problem != "" || err != nil {
+	if problem, err := verifyDir(root, crate); problem != "" || err != nil {
 		t.Fatalf("intact copy: %q %v", problem, err)
 	}
 	writeFile(t, filepath.Join(root, "run1", "a.txt"), "jello")
-	if problem, _ := verifyDir(root, files, []byte("crate")); problem != "run1/a.txt has the wrong sha256" {
+	if problem, _ := verifyDir(root, crate); problem != "run1/a.txt has the wrong sha256" {
 		t.Fatalf("changed content: %q", problem)
 	}
 	writeFile(t, filepath.Join(root, "run1", "a.txt"), "hello")
 	writeFile(t, filepath.Join(root, "stray.txt"), "x")
-	if problem, _ := verifyDir(root, files, []byte("crate")); problem != "stray.txt is not part of the dataset" {
+	if problem, _ := verifyDir(root, crate); problem != "stray.txt is not part of the dataset" {
 		t.Fatalf("stray file: %q", problem)
 	}
 }
