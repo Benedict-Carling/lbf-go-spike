@@ -96,24 +96,24 @@ func TestRepublishingChecksOnlyTheNameAndDescriptionGiven(t *testing.T) {
 	ctx := context.Background()
 	first := dataset(t, map[string]string{"a.txt": "a"})
 	id := newID()
-	pub, err := preparePublication(first, provenanceFlags{}, "", id)
+	pub, err := preparePublication(first, provenanceFlags{}, nil, id)
 	must(t, err)
 	must(t, upload(ctx, tg, pub))
 
 	moved := filepath.Join(t.TempDir(), "renamed")
 	must(t, os.Rename(first, moved))
-	pub, err = preparePublication(moved, provenanceFlags{}, "", id)
+	pub, err = preparePublication(moved, provenanceFlags{}, nil, id)
 	must(t, err)
 	if err := upload(ctx, tg, pub); err == nil || !strings.Contains(err.Error(), "renamed/a.txt: not in it") {
 		t.Fatalf("a folder of another name holds other files, so it is another dataset: %v", err)
 	}
 
-	named, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{name: "Run 1"}, "", id)
+	named, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{name: "Run 1"}, nil, id)
 	must(t, err)
 	if err := upload(ctx, tg, named); err == nil || !strings.Contains(err.Error(), "name, description") {
 		t.Fatalf("a name the first publish did not give was accepted: %v", err)
 	}
-	same, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{}, "", id)
+	same, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{}, nil, id)
 	must(t, err)
 	must(t, upload(ctx, tg, same))
 }
@@ -134,12 +134,12 @@ const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "
  {"@id": "data/a.csv", "@type": "File", "contentSize": "1"}]}`
 
 func TestCratesFromAnEarlierLbfAreReadBack(t *testing.T) {
-	p, conformsTo, err := crateStatement([]byte(earlierLbfCrate))
+	p, schemas, err := crateStatement([]byte(earlierLbfCrate))
 	must(t, err)
 	want := provenance{DerivedFrom: "20261005-crucial-lab-cccb",
 		Instruments: []instrument{{"pipe", "0.1.0", "https://example.org/pipe"}}, Properties: map[string]string{"sample_id": "SAM-0001"}}
-	if !p.sameAs(want) || len(conformsTo) != 2 {
-		t.Fatalf("got %+v %v", p, conformsTo)
+	if !p.sameAs(want) || len(schemas) != 2 {
+		t.Fatalf("got %+v %v", p, schemas)
 	}
 	if _, _, err := crateStatement([]byte(`{"@context": "https://example.org/other", "@graph": []}`)); err == nil {
 		t.Fatal("a crate in an unknown context was read")
@@ -150,7 +150,7 @@ func TestFetchReturnsWhatTheCrateStates(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
 	prov := provenanceFlags{derivedFrom: "20260101-x-y-0000", instruments: []instrument{{"pipe", "1", "https://example.org/pipe"}}, props: []string{"sample_id=S1"}, name: "Run 1"}
-	pub, err := preparePublication(dataset(t, map[string]string{"a.csv": "x"}), prov, "", "")
+	pub, err := preparePublication(dataset(t, map[string]string{"a.csv": "x"}), prov, nil, "")
 	must(t, err)
 	must(t, upload(ctx, tg, pub))
 	got, err := download(ctx, tg, pub.ID, t.TempDir())
@@ -161,7 +161,7 @@ func TestFetchReturnsWhatTheCrateStates(t *testing.T) {
 }
 
 func TestPropertyNamesAreSafeInTheCrate(t *testing.T) {
-	for _, name := range []string{"@none", "@id"} {
+	for _, name := range []string{"@none", "profile-plate-read-0.1.0-schema"} {
 		if _, err := (provenanceFlags{props: []string{name + "=x"}}).load(); err == nil {
 			t.Errorf("%s accepted", name)
 		}

@@ -87,7 +87,7 @@ func TestProvenanceFilesAreReadExactly(t *testing.T) {
 	} {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		if _, err := preparePublication(data, provenanceFlags{file: path}, "", ""); err == nil {
+		if _, err := preparePublication(data, provenanceFlags{file: path}, nil, ""); err == nil {
 			t.Errorf("%s: accepted", name)
 		} else {
 			t.Logf("%s: %v", name, err)

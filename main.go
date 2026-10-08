@@ -27,6 +27,7 @@ Usage:
   lbf fetch <id>        download a dataset (alias: download)
   lbf new-id            print a dataset ID to publish under later
   lbf browse            search and look through every dataset in your browser
+  lbf profiles          list, show, pull and publish the profiles datasets meet
   lbf check             prove a credential can publish or fetch, without changing anything
   lbf mint-sas          write a pre-minted credential file
   lbf login             sign in with the browser and remember it
@@ -40,8 +41,8 @@ Run 'lbf <command> --help' for its options.
 const provenanceHelp = `--derived-from and --instrument are given together or not at all. --provenance is a JSON file:
 {"name", "description", "derived_from": "<id>", "instruments": [{"name", "version", "url"}], "properties": {"name": "value"}};
 --property, --name and --description add to it, and anything given twice is refused.
---profile is a directory holding a JSON Schema profile.json; publish validates against it, and lbf's
-bronze profile, before uploading anything.
+--profile is a profile published in the storage account (see 'lbf profiles'), as NAME or NAME@VERSION, or a
+folder holding profile.json; publish checks the crate against it, and lbf's bronze profile, before uploading anything.
 `
 
 const sasLifetime = 144 * time.Hour
@@ -100,7 +101,15 @@ func run(ctx context.Context, args []string) error {
 
 	switch args[0] {
 	case "publish", "upload":
-		pub, err := preparePublication(positional[0], o.prov, o.profile, o.id)
+		var dirs []string
+		for _, arg := range o.profiles {
+			dir, err := profileDir(ctx, o, arg, o.dryRun)
+			if err != nil {
+				return err
+			}
+			dirs = append(dirs, dir)
+		}
+		pub, err := preparePublication(positional[0], o.prov, dirs, o.id)
 		if err != nil {
 			return err
 		}
@@ -152,6 +161,9 @@ func run(ctx context.Context, args []string) error {
 
 	case "browse":
 		return browse(ctx, o)
+
+	case "profiles":
+		return profiles(ctx, o, positional)
 
 	case "check":
 		if o.mode != "upload" && o.mode != "download" {
@@ -268,7 +280,8 @@ func logoutMessage(user string, hadRecord, hadTokens bool, storeErr error) strin
 type options struct {
 	tag, account, tenant, container, sasEnv string
 	out, mode, port                         string
-	profile, id                             string
+	id                                      string
+	profiles                                []string
 	prov                                    provenanceFlags
 	dryRun, json                            bool
 }
@@ -288,6 +301,7 @@ type command struct {
 	fs              *flag.FlagSet
 	synopsis, notes string
 	arg, argDesc    string
+	maxArgs         int
 	flags           []commandFlag
 }
 
@@ -344,10 +358,17 @@ func newCommand(cmd string, o *options) (*command, error) {
 		str(&o.prov.name, "name", "TEXT", "", "what people call the dataset (default the folder's name)")
 		str(&o.prov.description, "description", "TEXT", "", "what the dataset holds (default one lbf writes)")
 		str(&o.prov.file, "provenance", "FILE", "", "the dataset's name, description, parent, instruments and properties as one JSON file")
-		str(&o.profile, "profile", "DIR", "", "directory containing profile.json")
+		fs.Func("profile", "a published profile, or a folder holding profile.json, that the dataset must meet; repeat for several", func(v string) error {
+			if v == "" {
+				return errors.New("is empty")
+			}
+			o.profiles = append(o.profiles, v)
+			return nil
+		})
+		c.flags = append(c.flags, commandFlag{name: "profile", arg: "NAME[@VERSION]|DIR"})
 		str(&o.id, "id", "ID", "", "publish under this ID from 'lbf new-id'; run again with the same ID to finish a failed publish")
 		c.notes += "Exits with 3 when the ID already holds different files or provenance, which retrying cannot fix; use a new ID.\n"
-		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without signing in or uploading")
+		fs.BoolVar(&o.dryRun, "dry-run", false, "validate and print the crate without uploading; signs in only to read a --profile not yet cached, or find the latest of one")
 		c.flags = append(c.flags, commandFlag{name: "dry-run"})
 		jsonFlag("print {\"id\", \"url\"} as JSON instead of text, or instead of the crate with --dry-run (its url names the placeholder account dryrun)")
 		storage()
@@ -365,6 +386,16 @@ func newCommand(cmd string, o *options) (*command, error) {
 		str(&o.container, "container", "NAMES", "", "comma-separated containers to read (default every container you can list)")
 		str(&o.port, "port", "PORT", "0", "local port to serve on (0 picks a free one)")
 		account()
+	case "profiles":
+		c.synopsis = "profiles [show NAME[@VERSION]|DIR | pull NAME[@VERSION] | publish DIR] [options]"
+		c.maxArgs = 2
+		c.notes = `Lists the profiles published in the storage account's 'profiles' container. 'show' says what one asks
+for, 'pull' copies it and the profiles it builds on into --out for a machine that cannot sign in, and
+'publish' adds a profile.json whose $id ends in /<name>/<version>; a published version never changes.
+`
+		str(&o.out, "out", "DIR", ".", "where 'pull' writes <name>/<version>/profile.json")
+		account()
+		sasEnv()
 	case "new-id":
 		c.synopsis = "new-id"
 		c.notes = "Prints a new dataset ID without signing in. Pass it to 'lbf publish --id' once the data is ready.\n"
@@ -397,12 +428,17 @@ func newCommand(cmd string, o *options) (*command, error) {
 	return c, nil
 }
 
+var emptyValue = regexp.MustCompile(`^invalid value "" for flag -(\S+): is empty$`)
+
 var flagErrorName = regexp.MustCompile(`^(flag provided but not defined: |flag needs an argument: |invalid value ".*" for flag |invalid boolean value ".*" for )-`)
 
 func (c *command) parse(args []string) ([]string, error) {
 	positional, err := parseInterspersed(c.fs, args)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil, err
+	}
+	if m := emptyValue.FindStringSubmatch(fmt.Sprint(err)); m != nil {
+		return nil, fmt.Errorf("--%s is empty; give it a value, or leave it out for the default", m[1])
 	}
 	if err != nil {
 		return nil, c.usageError(flagErrorName.ReplaceAllString(err.Error(), "$1--"))
@@ -428,8 +464,8 @@ func (c *command) parse(args []string) ([]string, error) {
 	if c.arg != "" {
 		want = 1
 	}
-	if len(positional) > want {
-		return nil, c.usageError(fmt.Sprintf("unexpected argument %q", positional[want]))
+	if len(positional) > max(want, c.maxArgs) {
+		return nil, c.usageError(fmt.Sprintf("unexpected argument %q", positional[max(want, c.maxArgs)]))
 	}
 	if len(positional) < want {
 		return nil, c.usageError("missing " + c.arg)

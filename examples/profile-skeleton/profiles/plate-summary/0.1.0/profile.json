@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://w3id.org/lbf/profiles/plate-summary/0.1.0",
+  "$ref": "https://w3id.org/lbf/profiles/bronze/0.5.0",
+  "title": "Plate summary",
+  "description": "Per-row statistics of one plate read, made from the bronze plate read by the plate-summary script.",
+  "required": ["isBasedOn", "mentions", "additionalProperty"],
+  "properties": {
+    "hasPart": {
+      "description": "The statistics, saved as summary.csv",
+      "contains": {"properties": {"@id": {"pattern": "(^|/)summary\\.csv$"}}}
+    },
+    "mentions": {
+      "description": "Made by the plate-summary script",
+      "contains": {"properties": {"instrument": {"contains": {"properties": {"name": {"const": "plate-summary"}}}}}}
+    },
+    "additionalProperty": {
+      "required": ["plate_id", "method"],
+      "properties": {
+        "plate_id": {
+          "title": "Plate barcode", "examples": ["P-0001"],
+          "properties": {"value": {"pattern": "^P-[0-9]{4}$"}}
+        },
+        "method": {
+          "title": "How each row was summarised", "examples": ["mean"],
+          "properties": {"value": {"enum": ["mean", "median"]}}
+        }
+      }
+    }
+  }
+}

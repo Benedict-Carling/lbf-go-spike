@@ -146,7 +146,7 @@ func TestBlobNamesAzureCannotHoldAreRefused(t *testing.T) {
 	}
 
 	longID := "20260101-" + strings.Repeat("a", 1010) + "-y-0000"
-	if _, err := preparePublication(dataset(t, map[string]string{"x": "x"}), provenanceFlags{}, "", longID); err == nil || !strings.Contains(err.Error(), "1024") {
+	if _, err := preparePublication(dataset(t, map[string]string{"x": "x"}), provenanceFlags{}, nil, longID); err == nil || !strings.Contains(err.Error(), "1024") {
 		t.Fatalf("publish: %v", err)
 	}
 }
