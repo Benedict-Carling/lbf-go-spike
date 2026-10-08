@@ -262,14 +262,6 @@ func TestCreateInRejectsEscapes(t *testing.T) {
 	}
 }
 
-func TestRepairWindowsArgs(t *testing.T) {
-	got := repairWindowsArgs([]string{"publish", `.\test data" --dry-run  --tag role=x`, "--out", `C:\d"`})
-	want := []string{"publish", `.\test data\`, "--dry-run", "--tag", "role=x", "--out", `C:\d\`}
-	if !slices.Equal(got, want) {
-		t.Fatalf("got %q", got)
-	}
-}
-
 func TestCrateMatchesPythonShape(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5}, {Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}

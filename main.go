@@ -12,7 +12,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -60,10 +59,7 @@ func main() {
 	// A second Ctrl-C exits at once instead of waiting for the first to unwind.
 	context.AfterFunc(ctx, stop)
 
-	args := os.Args[1:]
-	if runtime.GOOS == "windows" {
-		args = repairWindowsArgs(args)
-	}
+	args := commandArgs()
 	warnIfOutdated := startUpdateCheck(ctx, args)
 	err := run(ctx, args)
 	if err != nil {
@@ -524,21 +520,6 @@ func (o options) target(ctx context.Context, mode, container string) (target, er
 		return readSASEnv(o.sasEnv, mode, container)
 	}
 	return mintTarget(ctx, o.tenant, o.tag, o.account, container, mode)
-}
-
-// PowerShell 5.1 passes 'C:\My Folder\' -x as `C:\My Folder" -x`; a quote cannot appear in a Windows path.
-func repairWindowsArgs(args []string) []string {
-	var out []string
-	for _, a := range args {
-		head, rest, found := strings.Cut(a, `"`)
-		if !found {
-			out = append(out, a)
-			continue
-		}
-		out = append(out, head+`\`)
-		out = append(out, strings.Fields(strings.ReplaceAll(rest, `"`, ""))...)
-	}
-	return out
 }
 
 // flag stops at the first positional argument; this lets flags follow it.
