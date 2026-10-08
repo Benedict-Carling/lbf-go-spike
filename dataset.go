@@ -4,11 +4,9 @@ import (
 	"cmp"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,8 +20,6 @@ import (
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
-
-const licenseURL = "https://rightsstatements.org/vocab/InC/1.0/"
 
 var (
 	validID  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -256,190 +252,6 @@ func newID() string {
 	b := make([]byte, 2)
 	_, _ = rand.Read(b)
 	return fmt.Sprintf("%s-%s-%s", time.Now().Format("20060102"), petname.Generate(2, "-"), hex.EncodeToString(b))
-}
-
-type entity map[string]any
-
-func ref(id string) entity { return entity{"@id": id} }
-
-var profileVersion = regexp.MustCompile(`/v?[0-9]+(\.[0-9]+)*$`)
-
-// Same graph as rocrate_generator.py, but profiles are named by title; encoding/json sorts keys, matching its output.
-func buildCrate(id, source string, files []localFile, t target, prov provenance, conformsTo []string, titles map[string]string, published time.Time) ([]byte, error) {
-	stamp := timestamp(published)
-
-	parts := make([]entity, len(files))
-	for i, f := range files {
-		parts[i] = ref(fileID(f.Rel))
-	}
-
-	props := []struct{ name, value string }{
-		{"subscription_name", orUnknown(t.SubscriptionName)},
-		{"subscription_id", orUnknown(t.SubscriptionID)},
-		{"source_path", filepath.ToSlash(source)},
-	}
-	for _, k := range slices.Sorted(maps.Keys(prov.Properties)) {
-		props = append(props, struct{ name, value string }{k, prov.Properties[k]})
-	}
-	propRefs := make([]entity, len(props))
-	for i, p := range props {
-		propRefs[i] = ref("#" + p.name)
-	}
-
-	description := "Dataset " + id
-	if t.Container == "bronze" {
-		description = "Bronze-layer dataset " + id
-	}
-	root := entity{
-		"@id":                "./",
-		"@type":              "Dataset",
-		"identifier":         id,
-		"name":               id,
-		"description":        description,
-		"datePublished":      stamp,
-		"license":            licenseURL,
-		"creator":            ref("#uploader"),
-		"distribution":       ref("#blob-location"),
-		"additionalProperty": propRefs,
-		"hasPart":            parts,
-	}
-	graph := []entity{
-		root,
-		{
-			"@id":        "ro-crate-metadata.json",
-			"@type":      "CreativeWork",
-			"about":      ref("./"),
-			"conformsTo": ref("https://w3id.org/ro/crate/1.2"),
-		},
-		{"@id": "#uploader", "@type": "Person", "name": orUnknown(t.User)},
-		{"@id": "#blob-location", "@type": "DataDownload", "contentUrl": t.containerURL() + "/" + id},
-	}
-	for _, p := range props {
-		graph = append(graph, entity{"@id": "#" + p.name, "@type": "PropertyValue", "name": p.name, "value": p.value})
-	}
-
-	if prov.DerivedFrom != "" {
-		sourceID := "#source-" + prov.DerivedFrom
-		root["wasDerivedFrom"] = ref(sourceID)
-		graph = append(graph, entity{"@id": sourceID, "@type": "Dataset", "identifier": prov.DerivedFrom, "name": prov.DerivedFrom})
-
-		var tools []entity
-		seen := map[string]bool{}
-		for _, in := range prov.Instruments {
-			tools = append(tools, ref(in.URL))
-			if !seen[in.URL] {
-				seen[in.URL] = true
-				graph = append(graph, entity{"@id": in.URL, "@type": "SoftwareApplication", "name": in.Name, "version": in.Version, "url": in.URL})
-			}
-		}
-		var instrumentRef any = tools
-		if len(tools) == 1 {
-			instrumentRef = tools[0]
-		}
-		graph = append(graph, entity{
-			"@id":        "#run",
-			"@type":      "CreateAction",
-			"name":       fmt.Sprintf("Dataset %s produced by %s", id, prov.Instruments[0].Name),
-			"endTime":    stamp,
-			"instrument": instrumentRef,
-			"object":     ref(sourceID),
-			"result":     ref("./"),
-			"agent":      ref("#uploader"),
-		})
-	}
-	if len(conformsTo) > 0 {
-		refs := make([]entity, len(conformsTo))
-		for i, uri := range conformsTo {
-			refs[i] = ref(uri)
-			profile := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": cmp.Or(titles[uri], uri)}
-			if v := profileVersion.FindString(uri); v != "" {
-				profile["version"] = strings.TrimPrefix(v, "/")
-			}
-			graph = append(graph, profile)
-		}
-		root["conformsTo"] = refs
-	}
-
-	for _, f := range files {
-		file := entity{"@id": fileID(f.Rel), "@type": "File", "contentSize": fmt.Sprint(f.Size)}
-		if f.SHA256 != "" {
-			file["sha256"] = f.SHA256
-		}
-		graph = append(graph, file)
-	}
-
-	return json.MarshalIndent(map[string]any{
-		"@context": "https://w3id.org/ro/crate/1.2/context",
-		"@graph":   graph,
-	}, "", "    ")
-}
-
-// What a crate written by buildCrate states about its dataset, leaving out the properties lbf sets itself.
-func crateProvenance(crate []byte) (provenance, []string, error) {
-	var doc struct {
-		Graph []map[string]any `json:"@graph"`
-	}
-	if err := json.Unmarshal(crate, &doc); err != nil {
-		return provenance{}, nil, fmt.Errorf("its %s is not valid JSON: %w", crateName, err)
-	}
-	entities := map[string]map[string]any{}
-	for _, e := range doc.Graph {
-		if id, ok := e["@id"].(string); ok {
-			entities[id] = e
-		}
-	}
-	refs := func(v any) []string {
-		items, ok := v.([]any)
-		if !ok {
-			items = []any{v}
-		}
-		var ids []string
-		for _, item := range items {
-			if r, ok := item.(map[string]any); ok {
-				if id, ok := r["@id"].(string); ok {
-					ids = append(ids, id)
-				}
-			}
-		}
-		return ids
-	}
-	str := func(e map[string]any, key string) string {
-		s, _ := e[key].(string)
-		return s
-	}
-
-	root := entities["./"]
-	p := provenance{Properties: map[string]string{}}
-	for _, id := range refs(root["additionalProperty"]) {
-		if name := str(entities[id], "name"); !slices.Contains(lbfProperties, name) {
-			p.Properties[name] = str(entities[id], "value")
-		}
-	}
-	if src := refs(root["wasDerivedFrom"]); len(src) == 1 {
-		p.DerivedFrom = str(entities[src[0]], "identifier")
-		for _, id := range refs(entities["#run"]["instrument"]) {
-			e := entities[id]
-			p.Instruments = append(p.Instruments, instrument{str(e, "name"), str(e, "version"), str(e, "url")})
-		}
-	}
-	return p, refs(root["conformsTo"]), nil
-}
-
-// Percent-encodes like Python's urllib.parse.quote, as ro-crate-py does.
-func fileID(rel string) string {
-	var b strings.Builder
-	for _, c := range []byte(rel) {
-		if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("_.-~/", c) >= 0 {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
-}
-
-func timestamp(t time.Time) string {
-	return t.UTC().Format(time.RFC3339)
 }
 
 func orUnknown(s string) string {

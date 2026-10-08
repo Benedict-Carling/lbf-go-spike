@@ -218,12 +218,12 @@ func TestAnotherPublishsCrateLandingFirstIsNotCalledMissing(t *testing.T) {
 	id := newID()
 	other := prepared(t, dir, id, provenanceFlags{})
 	other.Files[0].SHA256 = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
-	_, conformsTo, err := other.validate(tg)
+	_, err = other.validate(tg)
 	must(t, err)
 
 	beatIt := func(r *http.Request) bool {
 		if r.Method == http.MethodPut && r.URL.Query().Get("comp") == "blocklist" {
-			must(t, uploadCrate(ctx, cc, tg, other, time.Now().Add(-time.Minute), conformsTo))
+			must(t, uploadCrate(ctx, cc, tg, other, time.Now().Add(-time.Minute)))
 		}
 		return false
 	}

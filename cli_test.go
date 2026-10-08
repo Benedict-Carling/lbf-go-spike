@@ -66,6 +66,9 @@ func TestEmptyFlagValueIsRefusedNotIgnored(t *testing.T) {
 			}
 		}
 	}
+	if _, _, err := parseArgs("publish", []string{"data", "--name", "  "}); err == nil || !strings.HasPrefix(err.Error(), "--name is empty") {
+		t.Errorf("a name of spaces: %v", err)
+	}
 	if _, _, err := parseArgs("publish", []string{"data", "--id", "20260101-x-y-0000", "--container", "silver"}); err != nil {
 		t.Errorf("non-empty values: %v", err)
 	}

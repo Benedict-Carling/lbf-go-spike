@@ -246,7 +246,7 @@ func flattenCrate(raw []byte) (map[string]any, []catalogFile, map[string]string,
 	row := map[string]any{}
 	for k, v := range root {
 		switch k {
-		case "@id", "@type", "hasPart":
+		case "@id", "@type", "hasPart", "mentions":
 		case "additionalProperty":
 			for _, ref := range asList(v) {
 				pv, _ := ref.(map[string]any)

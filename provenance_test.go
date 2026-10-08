@@ -17,7 +17,7 @@ func TestInstrumentsSharingAURLMustBeTheSame(t *testing.T) {
 		}
 	}
 
-	repeated := provenance{DerivedFrom: "20260101-x-y-0000", Instruments: []instrument{align, align}, Properties: map[string]string{}}
+	repeated := provenance{Name: "Run 1", Description: "Aligned", DerivedFrom: "20260101-x-y-0000", Instruments: []instrument{align, align}, Properties: map[string]string{}}
 	if err := repeated.check(); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestInstrumentsSharingAURLMustBeTheSame(t *testing.T) {
 	pub := publication{ID: newID(), Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: repeated, Profile: prof}
 	raw, err := pub.crate(target{Container: "bronze", User: "u"})
 	must(t, err)
-	got, _, err := crateProvenance(raw)
+	got, _, err := crateStatement(raw)
 	must(t, err)
 	if !got.sameAs(repeated) {
 		t.Fatalf("read back %+v", got)

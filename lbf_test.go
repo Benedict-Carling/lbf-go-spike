@@ -131,7 +131,7 @@ func TestDatasetFilesRefusesUnreadableFiles(t *testing.T) {
 
 func TestCrateRecordsWhatFetchVerifies(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5, SHA256: "abc"}, {Rel: "run1/old.txt", Size: 3}}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, target{Container: "bronze"}, provenance{}, nil, nil, time.Now())
+	raw, err := publication{ID: "20260101-x-y-0000", Source: "/data/run1", Files: files}.buildCrate(target{Container: "bronze"}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestRepairWindowsArgs(t *testing.T) {
 func TestCrateMatchesPythonShape(t *testing.T) {
 	files := []localFile{{Rel: "run1/a b#1%.csv", Size: 5}, {Rel: "run1/a.txt", Size: 3}}
 	tgt := target{Account: "acct", Container: "bronze", User: "u", SubscriptionName: "S", SubscriptionID: "I"}
-	raw, err := buildCrate("20260101-x-y-0000", "/data/run1", files, tgt, provenance{}, nil, nil, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	raw, err := publication{ID: "20260101-x-y-0000", Source: "/data/run1", Files: files}.buildCrate(tgt, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,14 +284,14 @@ func TestCrateMatchesPythonShape(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if doc.Context != "https://w3id.org/ro/crate/1.2/context" || doc.Graph[0]["datePublished"] != "2026-01-01T00:00:00Z" {
+	if doc.Context != "https://w3id.org/ro/crate/1.3/context" || doc.Graph[0]["datePublished"] != "2026-01-01T00:00:00Z" {
 		t.Fatalf("unexpected crate: %s", raw)
 	}
 	last := doc.Graph[len(doc.Graph)-1]
-	if last["@id"] != "run1/a.txt" || last["contentSize"] != "3" {
+	if last["@id"] != "run1/a.txt" || last["contentSize"] != "3" || last["name"] != "a.txt" || last["encodingFormat"] != "text/plain" {
 		t.Fatalf("file entity: %v", last)
 	}
-	if !strings.Contains(string(raw), `"run1/a%20b%231%25.csv"`) || strings.Contains(string(raw), "a b#1") {
+	if !strings.Contains(string(raw), `"run1/a%20b%231%25.csv"`) || strings.Contains(string(raw), `"@id": "run1/a b#1`) || !strings.Contains(string(raw), `"name": "a b#1%.csv"`) {
 		t.Fatalf("file @id not percent-encoded like ro-crate-py: %s", raw)
 	}
 }
@@ -299,7 +299,7 @@ func TestCrateMatchesPythonShape(t *testing.T) {
 func TestProfileCannotReplaceBronze(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "fake", "profile.json"),
-		`{"$id": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0"}`)
+		`{"$id": "`+bronzeProfileID(t)+`"}`)
 	if _, err := loadProfile(filepath.Join(root, "fake")); err == nil || !strings.Contains(err.Error(), "bronze") {
 		t.Fatalf("profile reusing bronze's $id accepted: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestProfileChecksDataAndCrate(t *testing.T) {
 	}
 	for _, want := range []string{
 		"/profiles/bronze/0.4.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
-		`"wasDerivedFrom": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
+		`"isBasedOn": {`, `"mentions": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
 	} {
 		if !strings.Contains(string(crate), want) {
 			t.Errorf("crate missing %s", want)
@@ -1056,8 +1056,8 @@ func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "profile.json"), `{"$id": "https://example.org/profiles/untitled/1.2", "$ref": "`+bronzeProfileID(t)+`"}`)
 	prof, err := loadProfile(dir)
 	must(t, err)
-	conformsTo := append([]string{processRunCrate}, prof.ids()...)
-	raw, err := buildCrate("20260102-a-b-1234", "/data/run1", []localFile{{Rel: "run1/a", Size: 1}}, target{}, provenance{Properties: map[string]string{}}, conformsTo, prof.titles(), time.Now())
+	prov := provenance{DerivedFrom: "20260101-x-y-0000", Instruments: []instrument{{"pipe", "1", "https://example.org/pipe"}}, Properties: map[string]string{}}
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: prov, Profile: prof}.buildCrate(target{}, time.Now())
 	must(t, err)
 	var doc struct {
 		Graph []map[string]any `json:"@graph"`
@@ -1068,7 +1068,7 @@ func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
 		got[fmt.Sprint(e["@id"])] = [2]any{e["name"], e["version"]}
 	}
 	for id, want := range map[string][2]any{
-		processRunCrate:    {"Process Run Crate", "0.5"},
+		processRunCrate:    {"Process Run Crate", "0.6"},
 		bronzeProfileID(t): {"Bronze dataset", "0.4.0"},
 		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2"},
 	} {
