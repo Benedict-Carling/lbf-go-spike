@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -402,9 +401,13 @@ func writeFile(t *testing.T, path, body string) {
 const minimalSilverProfile = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.org/profiles/minimal-silver",
-  "$ref": "https://w3id.org/lbf/profiles/bronze/0.5.0",
-  "required": ["isBasedOn", "mentions"],
-  "properties": {"additionalProperty": {"required": ["sample_id"]}}
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0",
+  "properties": {
+    "crate": {
+      "required": ["wasDerivedFrom", "instrument"],
+      "properties": {"additionalProperty": {"required": ["sample_id"]}}
+    }
+  }
 }`
 
 const cellPaintingProfile = `{
@@ -412,16 +415,15 @@ const cellPaintingProfile = `{
   "$id": "https://example.org/profiles/cell-painting",
   "$ref": "https://example.org/profiles/minimal-silver",
   "properties": {
-    "hasPart": {"allOf": [
-      {"contains": {"properties": {"@id": {"pattern": "^[^/]+/plate_map\\.csv$"}}}},
-      {"contains": {"properties": {"@id": {"pattern": "^[^/]+/features/.+\\.parquet$"}}}},
-      {"items": {"properties": {"@id": {"pattern": "^[^/]+/(plate_map\\.csv|features/.+|qc/.+)$"}}}}
-    ]},
-    "mentions": {"contains": {"properties": {"instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}}}}},
-    "additionalProperty": {
-      "required": ["plate_id"],
-      "properties": {"plate_id": {"title": "Plate barcode", "examples": ["P001"]}}
-    }
+    "data": {"properties": {"files": {"allOf": [
+      {"contains": {"properties": {"path": {"const": "plate_map.csv"}}}},
+      {"contains": {"properties": {"path": {"pattern": "^features/.+\\.parquet$"}}}},
+      {"items": {"properties": {"path": {"pattern": "^(plate_map\\.csv|features/.+|qc/.+)$"}}}}
+    ]}}},
+    "crate": {"properties": {
+      "instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}},
+      "additionalProperty": {"required": ["plate_id"]}
+    }}
   }
 }`
 
@@ -458,7 +460,7 @@ func TestProfileChecksDataAndCrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"/profiles/bronze/0.5.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
+		"/profiles/bronze/0.4.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
 		`"isBasedOn": {`, `"mentions": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
 	} {
 		if !strings.Contains(string(crate), want) {
@@ -525,7 +527,7 @@ func TestProvenanceRules(t *testing.T) {
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		_, err := preparePublication(data, provenanceFlags{file: path}, nil, "")
+		_, err := preparePublication(data, provenanceFlags{file: path}, "", "")
 		if err == nil {
 			t.Errorf("%s: accepted", name)
 			continue
@@ -1061,16 +1063,16 @@ func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
 		Graph []map[string]any `json:"@graph"`
 	}
 	must(t, json.Unmarshal(raw, &doc))
-	got := map[string][3]any{}
+	got := map[string][2]any{}
 	for _, e := range doc.Graph {
-		got[fmt.Sprint(e["@id"])] = [3]any{e["name"], e["version"], e["isProfileOf"]}
+		got[fmt.Sprint(e["@id"])] = [2]any{e["name"], e["version"]}
 	}
-	for id, want := range map[string][3]any{
-		processRunCrate:    {"Process Run Crate", "0.6", nil},
-		bronzeProfileID(t): {"Bronze dataset", "0.5.0", nil},
-		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2", map[string]any{"@id": bronzeProfileID(t)}},
+	for id, want := range map[string][2]any{
+		processRunCrate:    {"Process Run Crate", "0.6"},
+		bronzeProfileID(t): {"Bronze dataset", "0.4.0"},
+		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2"},
 	} {
-		if !reflect.DeepEqual(got[id], want) {
+		if got[id] != want {
 			t.Errorf("%s: got %v, want %v", id, got[id], want)
 		}
 	}

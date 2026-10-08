@@ -65,7 +65,6 @@ lbf publish <path>                 # land in bronze; prints the new dataset ID (
 lbf fetch <id> [--out DIR]         # alias: download
 lbf new-id                         # an ID to publish under later, with publish --id
 lbf browse                         # search every dataset's crate in your browser
-lbf profiles show DIR              # what a profile asks for, as flags; see Profiles
 lbf check --mode upload            # proves the credential works, before a long job
 lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
 lbf logout                         # signs out of lbf and deletes its tokens; says if az login still signs you in
@@ -89,7 +88,6 @@ lbf publish results/ --container silver \
     --profile profiles/minimal-silver/0.1.0
 ```
 
-`--profile` repeats when a dataset must meet several profiles, and
 `--property NAME=VALUE` repeats for several properties, and `--properties metadata.json`
 gives them as a JSON object of strings, e.g. `{"sample_id": "SAM-0001"}`.
 `--name` and `--description` say what the dataset is; without them lbf uses the
@@ -115,43 +113,24 @@ properties are `PropertyValue`s, the parent is `isBasedOn`, and a derived
 dataset also has a `CreateAction` run, which the root `mentions`, conforming to
 Process Run Crate 0.6.
 
-## Profiles
-
-A profile is a JSON Schema `profile.json` whose `$id`, such as
-`https://w3id.org/lbf/profiles/plate-read/0.1.0`, ends in its name and a
-semantic version (`1`, `1.2` or `1.2.3`, with or without a leading `v`).
-It builds on another with `$ref`, and every chain ends at bronze,
-`https://w3id.org/lbf/profiles/bronze/0.5.0`. `--profile` takes a folder
-holding `profile.json`; the profiles it builds on are found beside it
-(`profiles/<name>/profile.json` or, versioned,
-`profiles/<name>/<version>/profile.json`).
-
-A profile checks the crate's root, laid out by bronze's JSON-LD frame
-(`profiles/bronze/frame.json`): what the root refers to is embedded, and
-`additionalProperty` is keyed by name:
+A profile is a directory holding a JSON Schema `profile.json`, describing both
+the data given as `<path>` and the crate lbf writes for it. Its `$id` is
+recorded in the crate's `conformsTo`, along with every profile it builds on
+through `$ref`; sibling profiles (`profiles/<name>/profile.json` or, versioned,
+`profiles/<name>/<version>/profile.json`) and lbf's bronze profile resolve locally. It
+validates this view of the dataset, once the uploader is known:
 
 ```json
-{"@id": "./", "identifier": "...", "name": "results", "creator": {"name": "..."},
- "hasPart": [{"@id": "results/features/plate1.parquet", "contentSize": "12"}],
- "additionalProperty": {"sample_id": {"value": "SAM-0001"}},
- "isBasedOn": [{"identifier": "20261001-fancy-dassie-eadb"}],
- "mentions": [{"@type": "CreateAction", "instrument": [{"name": "my-pipeline", "version": "0.1.0"}]}]}
+{"data": {"name": "results", "files": [{"path": "features/plate1.parquet", "size": 12}]},
+ "crate": {"identifier": "...", "creator": "...", "datePublished": "...",
+           "conformsTo": ["..."], "additionalProperty": {"sample_id": "..."},
+           "wasDerivedFrom": "...", "instrument": [{"name": "...", "version": "...", "url": "..."}]}}
 ```
 
-A property's `title`, `description` and `examples` are shown when it is
-missing or wrong, with the flag that gives it: `--property`, `--name`,
-`--description`, `--derived-from` and `--instrument`, or the files. A profile
-that requires a term no flag gives is reported as one no dataset can meet. The
-crate's `conformsTo` lists every profile checked, each recorded with the
-profile it builds on (`isProfileOf`) and carrying the exact schema it was
-checked against, and Process Run Crate when the dataset is derived.
-`examples/profile-skeleton` walks through writing and using profiles.
+File paths are relative to `<path>`. `crate` uses lbf's own names for what the
+crate records, whichever RO-Crate terms it uses.
 
-```
-lbf profiles show DIR    # what the profile asks for, as flags, and the publish command that gives it
-```
-
-`--dry-run` validates and prints the crate, as uploader `dry-run`, without signing in;
+`--dry-run` validates and prints the crate without signing in, as uploader `dry-run`;
 with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
 publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path", "provenance"}` as one line, where
@@ -164,7 +143,7 @@ uses a pre-minted credential instead of `az login`.
 
 ## Design decisions
 
-Why lbf describes and checks datasets as it does. Change these deliberately,
+Why lbf describes datasets as it does. Change these deliberately,
 and record a new decision here.
 
 - **The crate is RO-Crate 1.3, in the RO-Crate specification's terms first and
@@ -179,29 +158,6 @@ and record a new decision here.
   earlier lbf versions wrote and lbf still reads. lbf records only what it saw
   or was told: the uploader is the `creator`, and the run has no `endTime`,
   since lbf never sees the run.
-- **A profile is JSON Schema over the crate's root as bronze's
-  `profiles/bronze/frame.json` lays it out.** json-gold frames the flat graph
-  into a tree: what the root refers to is embedded, the published files are
-  `hasPart`, and properties are keyed by name. This replaced bronze 0.4.0's
-  lbf-only view (`data` for the files beside `crate` for its metadata), so
-  that what a crate stores, what a profile checks and what the RO-Crate tools
-  read share one vocabulary, and any RO-Crate term can be checked. The frame is
-  part of bronze's version: changing it changes what every profile means.
-  Files refer to nothing, so they join the tree after framing, whose time
-  grows with the square of the entities.
-- **`conformsTo` lists every profile checked, from bronze up, and each carries
-  its exact schema.** RO-Crate infers nothing from a profile's parents, so all
-  are listed, each recording the one it builds on (`isProfileOf`) and, as the
-  text of a `ResourceDescriptor`'s artifact, the schema the dataset met.
-  Bronze also carries its frame, in the `mapping` role, since the frame is part
-  of what bronze's schema means. A derived dataset also lists Process Run Crate
-  0.6, which lbf declares by how it writes the run rather than checks, so it
-  carries no schema. Resuming a publish requires the same schemas.
-- **A profile is a folder, `profiles/<name>/<version>/profile.json`, named
-  `https://w3id.org/lbf/profiles/<name>/<version>`, and its version is a
-  semantic version that never changes once a dataset has met it.** A dataset's
-  crate carries the schema it met, so a changed rule is a new version, not an
-  edit. Bronze is compiled in; a pipeline keeps its profiles beside it.
 - **What a publisher states is one record: a name, description, parent,
   instruments and properties.** The flags, the `--provenance` file and
   `lbf fetch --json` all use it. Flags give values (`--property`) and links
@@ -216,10 +172,6 @@ and record a new decision here.
   uploader the crate has no `creator`, rather than an invented one, so bronze
   refuses it. `lbf fetch --json` leaves out a name or description lbf filled
   in, so carrying it forward never passes off lbf's words as the publisher's.
-- **Errors are said in flags.** A profile's `title`, `description` and
-  `examples` tell whoever publishes what to add, so a profile is guidance as
-  well as rules. lbf rewords JSON Schema's messages for publishers, and says
-  when a profile asks for something lbf sets itself, or that no flag gives.
 
 ## Browsing datasets
 

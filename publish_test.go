@@ -80,7 +80,7 @@ func propertiesFile(t *testing.T, body string) provenanceFlags {
 
 func prepared(t *testing.T, dir, id string, prov provenanceFlags) publication {
 	t.Helper()
-	pub, err := preparePublication(dir, prov, nil, id)
+	pub, err := preparePublication(dir, prov, "", id)
 	must(t, err)
 	return pub
 }
@@ -271,7 +271,7 @@ func TestCheckAccess(t *testing.T) {
 func TestPublishIDMustBeMinted(t *testing.T) {
 	dir := dataset(t, map[string]string{"a.txt": "a"})
 	for _, bad := range []string{"test", "20261001-fancy-dassie", "20261001-Fancy-dassie-eadb", "20261001-fancy-dassie-eadb/x"} {
-		if _, err := preparePublication(dir, provenanceFlags{}, nil, bad); err == nil {
+		if _, err := preparePublication(dir, provenanceFlags{}, "", bad); err == nil {
 			t.Errorf("--id %q accepted", bad)
 		}
 	}
@@ -292,20 +292,20 @@ func TestCrateProvenanceReadsBackWhatWasStated(t *testing.T) {
 		Name:        "Run 1",
 		Description: "Cells, imaged",
 	}
-	prof := &profile{rules: []rule{{id: "https://example.org/p", raw: []byte("{}")}}}
+	prof := &profile{rules: []rule{{id: "https://example.org/p"}}}
 	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: prov, Profile: prof}.buildCrate(target{SubscriptionName: "sub"}, time.Now())
 	must(t, err)
-	got, schemas, err := crateStatement(raw)
+	got, conformsTo, err := crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(prov) || !maps.Equal(schemas, map[string]string{processRunCrate: "", "https://example.org/p": "{}"}) {
-		t.Fatalf("got %+v %v", got, schemas)
+	if !got.sameAs(prov) || !slices.Equal(slices.Sorted(slices.Values(conformsTo)), []string{"https://example.org/p", processRunCrate}) {
+		t.Fatalf("got %+v %v", got, conformsTo)
 	}
 
 	raw, err = publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}}.buildCrate(target{}, time.Now())
 	must(t, err)
-	got, schemas, err = crateStatement(raw)
+	got, conformsTo, err = crateStatement(raw)
 	must(t, err)
-	if !got.sameAs(provenance{Properties: map[string]string{}}) || len(schemas) != 0 {
-		t.Fatalf("got %+v %v", got, schemas)
+	if !got.sameAs(provenance{Properties: map[string]string{}}) || len(conformsTo) != 0 {
+		t.Fatalf("got %+v %v", got, conformsTo)
 	}
 }

@@ -50,7 +50,7 @@ type publication struct {
 }
 
 // Everything that can fail without Azure happens here, so a bad dataset never reaches sign-in or upload.
-func preparePublication(input string, provFlags provenanceFlags, profileDirs []string, id string) (publication, error) {
+func preparePublication(input string, provFlags provenanceFlags, profileDir, id string) (publication, error) {
 	if id == "" {
 		id = newID()
 	} else if !mintedID.MatchString(id) {
@@ -60,7 +60,7 @@ func preparePublication(input string, provFlags provenanceFlags, profileDirs []s
 	if err != nil {
 		return publication{}, err
 	}
-	prof, err := loadProfiles(profileDirs)
+	prof, err := loadProfile(profileDir)
 	if err != nil {
 		return publication{}, err
 	}
@@ -80,19 +80,37 @@ func preparePublication(input string, provFlags provenanceFlags, profileDirs []s
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
 func (p publication) validate(t target) (time.Time, error) {
 	published := time.Now()
-	crate, err := p.buildCrate(t, published)
-	if err != nil {
-		return time.Time{}, err
-	}
-	view, err := framedRoot(crate)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if err := p.Profile.validate(view); err != nil {
+	if err := p.Profile.validate(p.view(t, published)); err != nil {
 		return time.Time{}, err
 	}
 	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
 	return published, nil
+}
+
+// What profiles check: the dataset's files beside what its crate records.
+func (p publication) view(t target, published time.Time) map[string]any {
+	name := filepath.Base(p.Source)
+	files := make([]map[string]any, len(p.Files))
+	for i, f := range p.Files {
+		files[i] = map[string]any{"path": strings.TrimPrefix(f.Rel, name+"/"), "size": f.Size}
+	}
+	crate := map[string]any{
+		"identifier":         p.ID,
+		"datePublished":      timestamp(published),
+		"conformsTo":         p.Profile.conformsTo(p.Provenance.DerivedFrom != ""),
+		"additionalProperty": p.Provenance.Properties,
+	}
+	if user := strings.TrimSpace(t.User); user != "" {
+		crate["creator"] = user
+	}
+	if p.Provenance.DerivedFrom != "" {
+		crate["wasDerivedFrom"] = p.Provenance.DerivedFrom
+		crate["instrument"] = p.Provenance.Instruments
+	}
+	return map[string]any{
+		"data":  map[string]any{"name": name, "files": files},
+		"crate": crate,
+	}
 }
 
 func (p publication) crate(t target) ([]byte, error) {
@@ -232,7 +250,7 @@ func confirmPublished(ctx context.Context, cc *container.Client, pub publication
 	if problems := landedProblems(files, stored); len(problems) > 0 {
 		return idTaken{problemList(fmt.Sprintf("%s is published, but what is stored differs from its crate, so fetch will refuse it; publish without --id, or with a new ID from 'lbf new-id':", id), problems)}
 	}
-	stated, schemas, err := crateStatement(crate)
+	stated, conformsTo, err := crateStatement(crate)
 	if err != nil {
 		return idTaken{fmt.Errorf("%s is already published, but lbf cannot read what its crate states (%v), so this publish cannot be checked against it; publish without --id, or with a new ID from 'lbf new-id'", id, err)}
 	}
@@ -248,10 +266,8 @@ func confirmPublished(ctx context.Context, cc *container.Client, pub publication
 	if !stated.sameAs(pub.Provenance) {
 		problems = append(problems, "its name, description, parent, instruments or properties differ from these")
 	}
-	want := pub.Profile.conformsTo(pub.Provenance.DerivedFrom != "")
-	if len(schemas) != len(want) || slices.ContainsFunc(want, func(id string) bool { _, ok := schemas[id]; return !ok }) ||
-		slices.ContainsFunc(pub.Profile.rules, func(r rule) bool { return schemas[r.id] != string(r.raw) }) {
-		problems = append(problems, "it was checked against other profiles, or other versions of their schemas")
+	if !slices.Equal(slices.Sorted(slices.Values(conformsTo)), slices.Sorted(slices.Values(pub.Profile.conformsTo(pub.Provenance.DerivedFrom != "")))) {
+		problems = append(problems, "it was checked against other profiles")
 	}
 	recorded := map[string]crateFile{}
 	for _, f := range files {

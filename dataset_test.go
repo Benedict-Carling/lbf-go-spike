@@ -30,11 +30,8 @@ func TestSymlinkedRootIsNamedAfterTheLink(t *testing.T) {
 	if err != nil || rels(files) != "results/x.txt" || filepath.Base(source) != "results" {
 		t.Fatalf("folder link: %s %s %v", source, rels(files), err)
 	}
-	crate, err := publication{ID: newID(), Source: source, Files: files}.buildCrate(target{}, time.Now())
-	must(t, err)
-	view, err := framedRoot(crate)
-	must(t, err)
-	if got := view["hasPart"].([]any)[0].(map[string]any)["@id"]; got != "results/x.txt" {
+	pub := publication{ID: newID(), Source: source, Files: files}
+	if got := pub.view(target{}, time.Now())["data"].(map[string]any)["files"].([]map[string]any)[0]["path"]; got != "x.txt" {
 		t.Fatalf("profile sees %v", got)
 	}
 

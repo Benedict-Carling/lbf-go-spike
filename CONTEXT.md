@@ -40,11 +40,8 @@ A named text value describing a dataset, e.g. `sample_id`. Some names are reserv
 _Avoid_: tag, metadata field
 
 **Profile**:
-A named, versioned JSON Schema a dataset's crate must meet before it is published, checked against the crate's root as the frame lays it out. Identified by a URI that the crate records, with the schema itself. Profiles build on one another, and every dataset meets the bronze profile as well as its own.
+A named, versioned description of a dataset's files and its crate, which the dataset must meet before it is published. Identified by a URI that the crate records. Profiles build on one another, and every dataset meets the bronze profile as well as its own.
 _Avoid_: schema, shape, contract
-
-**Frame**:
-How lbf lays a crate's root out for profiles to check: what the root refers to embedded, its files as `hasPart`, its properties keyed by name. Part of the bronze profile's version.
 
 **Crate**:
 The RO-Crate record published beside a dataset's files: its ID, parent, instruments, properties, files and profiles.

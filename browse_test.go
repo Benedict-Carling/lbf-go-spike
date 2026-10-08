@@ -83,7 +83,7 @@ func TestFlattenCrateKeysLinksByIRIUnlessTheVersionIsNotInIt(t *testing.T) {
 }
 
 func TestFlattenCrateKeepsEachValueOfAMultiValuedProperty(t *testing.T) {
-	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}, Profile: &profile{rules: []rule{{id: "https://example.org/p1", raw: []byte("{}")}, {id: "https://example.org/p2", raw: []byte("{}")}}}}.buildCrate(target{}, time.Now())
+	raw, err := publication{ID: "20260102-a-b-1234", Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: provenance{Properties: map[string]string{}}, Profile: &profile{rules: []rule{{id: "https://example.org/p1"}, {id: "https://example.org/p2"}}}}.buildCrate(target{}, time.Now())
 	must(t, err)
 	row, _, _, err := flattenCrate(raw)
 	must(t, err)

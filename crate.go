@@ -7,6 +7,7 @@ import (
 	"maps"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -37,11 +38,9 @@ func refs(ids []entity) any {
 	return ids
 }
 
-const (
-	roCrateSpec = "https://w3id.org/ro/crate/1.3"
-	roleSchema  = "http://www.w3.org/ns/dx/prof/role/schema"
-	roleMapping = "http://www.w3.org/ns/dx/prof/role/mapping"
-)
+const roCrateSpec = "https://w3id.org/ro/crate/1.3"
+
+var profileVersion = regexp.MustCompile(`/v?[0-9]+(\.[0-9]+)*$`)
 
 // What lbf names a dataset and says of it when the publisher does not.
 func defaultName(source string) string { return filepath.Base(source) }
@@ -100,12 +99,9 @@ func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 		profiles := make([]entity, len(conformsTo))
 		for i, uri := range conformsTo {
 			profiles[i] = ref(uri)
-			graph = append(graph, p.Profile.crateEntities(uri)...)
+			graph = append(graph, p.Profile.crateEntity(uri))
 		}
 		root["conformsTo"] = refs(profiles)
-		graph = append(graph,
-			entity{"@id": roleSchema, "@type": "DefinedTerm", "name": "Schema", "description": "A schema the profile's data must meet"},
-			entity{"@id": roleMapping, "@type": "DefinedTerm", "name": "Mapping", "description": "How the crate is laid out for the profile's schema to check it"})
 	}
 	for _, f := range p.Files {
 		graph = append(graph, fileEntity(f))
@@ -196,61 +192,13 @@ func (p *profile) conformsTo(derived bool) []string {
 	return ids
 }
 
-// A file a profile's entity carries, in the role it plays for the profile.
-type resource struct {
-	role, suffix, format string
-	text                 []byte
-}
-
-// A profile's entity, which records what it builds on and carries the exact schema the dataset was checked against.
-func (p *profile) crateEntities(uri string) []entity {
-	e := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": uri}
-	at, atErr := publishedAs(uri)
-	if atErr == nil {
-		e["version"] = at.version
+// A profile's entity, named by its title and versioned by the end of its $id.
+func (p *profile) crateEntity(uri string) entity {
+	e := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": cmp.Or(p.titles()[uri], uri)}
+	if v := profileVersion.FindString(uri); v != "" {
+		e["version"] = strings.TrimPrefix(v, "/")
 	}
-	if uri == processRunCrate {
-		e["name"] = "Process Run Crate"
-		return []entity{e}
-	}
-	i := slices.IndexFunc(p.rules, func(r rule) bool { return r.id == uri })
-	r := p.rules[i]
-	e["name"] = cmp.Or(r.title, uri)
-	if r.parent != "" {
-		e["isProfileOf"] = ref(r.parent)
-	}
-	slug := fmt.Sprintf("#profile-%d", i)
-	if atErr == nil {
-		slug = "#profile-" + fileID(at.name+"-"+at.version)
-	}
-	resources := []resource{{roleSchema, "schema", "application/schema+json", r.raw}}
-	if i == 0 {
-		resources = append(resources, resource{roleMapping, "frame", "application/ld+json", bronzeFrameJSON})
-	}
-	out := []entity{e}
-	var ids []entity
-	for _, res := range resources {
-		descriptor := slug + "-" + res.suffix
-		name := fmt.Sprintf("The %s of %s", res.suffix, e["name"])
-		ids = append(ids, ref(descriptor))
-		artifact := entity{"@id": descriptor + ".json", "@type": "CreativeWork", "name": name, "encodingFormat": res.format, "text": string(res.text)}
-		if res.role == roleSchema {
-			artifact["conformsTo"] = ref(jsonSchemaDialect(res.text))
-		}
-		out = append(out,
-			entity{"@id": descriptor, "@type": []string{"CreativeWork", "ResourceDescriptor"}, "name": name, "hasRole": ref(res.role), "hasArtifact": ref(descriptor + ".json")},
-			artifact)
-	}
-	e["hasResource"] = refs(ids)
-	return out
-}
-
-func jsonSchemaDialect(raw []byte) string {
-	var head struct {
-		Schema string `json:"$schema"`
-	}
-	_ = json.Unmarshal(raw, &head)
-	return cmp.Or(head.Schema, "https://json-schema.org/draft/2020-12/schema")
+	return e
 }
 
 // Percent-encodes like Python's urllib.parse.quote, as ro-crate-py does.

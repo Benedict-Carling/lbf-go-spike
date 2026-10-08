@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sync"
@@ -18,9 +17,6 @@ const (
 
 //go:embed ro-crate-1.3-context.json
 var roCrateContextJSON []byte
-
-//go:embed profiles/bronze/frame.json
-var bronzeFrameJSON []byte
 
 // Relative @ids need a base to frame against; compaction turns them back into the crate's own.
 const frameBase = "https://crate.invalid/"
@@ -47,15 +43,6 @@ var jsonld = sync.OnceValues(func() (*ld.JsonLdOptions, error) {
 	return opts, nil
 })
 
-// What profiles check: the crate's root with everything it refers to embedded, laid out by bronze's frame.
-func framedRoot(crate []byte) (map[string]any, error) {
-	var frame map[string]any
-	if err := json.Unmarshal(bronzeFrameJSON, &frame); err != nil {
-		return nil, err
-	}
-	return frameCrate(crate, frame)
-}
-
 // How lbf reads a crate back, whichever version wrote it: earlier ones record the parent as wasDerivedFrom and do not mention the run.
 var statementFrame = map[string]any{
 	"@context": []any{roCrateContext, map[string]any{
@@ -64,7 +51,6 @@ var statementFrame = map[string]any{
 		"wasDerivedFrom":     map[string]any{"@id": "http://www.w3.org/ns/prov#wasDerivedFrom", "@container": "@set"},
 		"instrument":         map[string]any{"@id": "http://schema.org/instrument", "@container": "@set"},
 		"conformsTo":         map[string]any{"@id": "http://purl.org/dc/terms/conformsTo", "@container": "@set"},
-		"hasResource":        map[string]any{"@id": "http://www.w3.org/ns/dx/prof/hasResource", "@container": "@set"},
 	}},
 	"@id":      "./",
 	"@reverse": map[string]any{"result": map[string]any{}},
@@ -131,8 +117,8 @@ func setFilesAside(doc any) ([]any, any) {
 	return parts, map[string]any{"@context": d["@context"], "@graph": rest}
 }
 
-// What a crate lbf wrote states about its dataset, leaving out lbf's own properties, and the schema each declared profile carries by $id.
-func crateStatement(crate []byte) (provenance, map[string]string, error) {
+// What a crate lbf wrote states about its dataset, leaving out lbf's own properties, and the profiles it declares.
+func crateStatement(crate []byte) (provenance, []string, error) {
 	view, err := frameCrate(crate, statementFrame)
 	if err != nil {
 		return provenance{}, nil, err
@@ -162,14 +148,9 @@ func crateStatement(crate []byte) (provenance, map[string]string, error) {
 	if slices.Contains([]string{"Dataset " + id, "Bronze-layer dataset " + id, defaultDescription(source, len(asList(view["hasPart"])), p.DerivedFrom)}, p.Description) {
 		p.Description = ""
 	}
-	schemas := map[string]string{}
+	var conformsTo []string
 	for _, prof := range asList(view["conformsTo"]) {
-		schemas[str(prof, "@id")] = ""
-		for _, res := range asList(obj(prof)["hasResource"]) {
-			if artifact := obj(res)["hasArtifact"]; str(artifact, "encodingFormat") == "application/schema+json" {
-				schemas[str(prof, "@id")] = str(artifact, "text")
-			}
-		}
+		conformsTo = append(conformsTo, str(prof, "@id"))
 	}
-	return p, schemas, nil
+	return p, conformsTo, nil
 }
