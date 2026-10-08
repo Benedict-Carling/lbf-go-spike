@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,6 +59,50 @@ func defaultDescription(source string, files int, derivedFrom string) string {
 	return d
 }
 
+// Checked here rather than in preparePublication because the uploader is only known once signed in.
+func (p publication) validate(t target) (time.Time, error) {
+	published := time.Now()
+	if err := p.Profile.validate(p.view(t, published)); err != nil {
+		return time.Time{}, err
+	}
+	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
+	return published, nil
+}
+
+// What profiles check: the dataset's files beside what its crate records.
+func (p publication) view(t target, published time.Time) map[string]any {
+	name := filepath.Base(p.Source)
+	files := make([]map[string]any, len(p.Files))
+	for i, f := range p.Files {
+		files[i] = map[string]any{"path": strings.TrimPrefix(f.Rel, name+"/"), "size": f.Size}
+	}
+	crate := map[string]any{
+		"identifier":         p.ID,
+		"datePublished":      timestamp(published),
+		"conformsTo":         p.conformsTo(),
+		"additionalProperty": p.Provenance.Properties,
+	}
+	if user := strings.TrimSpace(t.User); user != "" {
+		crate["creator"] = user
+	}
+	if p.Provenance.DerivedFrom != "" {
+		crate["wasDerivedFrom"] = p.Provenance.DerivedFrom
+		crate["instrument"] = p.Provenance.Instruments
+	}
+	return map[string]any{
+		"data":  map[string]any{"name": name, "files": files},
+		"crate": crate,
+	}
+}
+
+func (p publication) crate(t target) ([]byte, error) {
+	published, err := p.validate(t)
+	if err != nil {
+		return nil, err
+	}
+	return p.buildCrate(t, published)
+}
+
 // RO-Crate 1.3, flattened; encoding/json sorts keys.
 func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 	props := p.properties(t)
@@ -95,7 +141,7 @@ func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 		root["mentions"] = ref("#run")
 		graph = append(graph, p.run(uploader != "")...)
 	}
-	if conformsTo := p.Profile.conformsTo(p.Provenance.DerivedFrom != ""); len(conformsTo) > 0 {
+	if conformsTo := p.conformsTo(); len(conformsTo) > 0 {
 		profiles := make([]entity, len(conformsTo))
 		for i, uri := range conformsTo {
 			profiles[i] = ref(uri)
@@ -181,12 +227,12 @@ func refsTo(entities []entity) []entity {
 }
 
 // The profiles a crate declares: Process Run Crate when lbf records how it was made, then bronze up to the chosen one.
-func (p *profile) conformsTo(derived bool) []string {
-	if p == nil {
+func (p publication) conformsTo() []string {
+	if p.Profile == nil {
 		return nil
 	}
-	ids := p.ids()
-	if derived {
+	ids := p.Profile.ids()
+	if p.Provenance.DerivedFrom != "" {
 		ids = append([]string{processRunCrate}, ids...)
 	}
 	return ids
@@ -199,6 +245,147 @@ func (p *profile) crateEntity(uri string) entity {
 		e["version"] = strings.TrimPrefix(v, "/")
 	}
 	return e
+}
+
+type crateFile struct {
+	Rel    string
+	Size   int64
+	SHA256 string
+}
+
+// A crate as stored. The crate, written last, is the record of what landed; fetch trusts it over the listing.
+type storedCrate struct {
+	raw    []byte
+	Files  []crateFile
+	stated map[string]any
+}
+
+func readCrate(raw []byte) (storedCrate, error) {
+	var doc struct {
+		Context any              `json:"@context"`
+		Graph   []map[string]any `json:"@graph"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return storedCrate{}, fmt.Errorf("its %s is not valid JSON: %w", crateName, err)
+	}
+	entities := map[string]map[string]any{}
+	for _, e := range doc.Graph {
+		if id, ok := e["@id"].(string); ok {
+			entities[id] = e
+		}
+	}
+	c := storedCrate{raw: raw}
+	files := map[string]bool{}
+	for _, part := range asList(entities["./"]["hasPart"]) {
+		id := refID(part)
+		files[id] = entities[id]["@type"] == "File"
+		rel, err := url.PathUnescape(id)
+		if err != nil || rel == "" {
+			return storedCrate{}, fmt.Errorf("its %s lists an unreadable file %q", crateName, id)
+		}
+		size, err := strconv.ParseInt(fmt.Sprint(entities[id]["contentSize"]), 10, 64)
+		if err != nil {
+			return storedCrate{}, fmt.Errorf("its %s gives no size for %s", crateName, rel)
+		}
+		sum, _ := entities[id]["sha256"].(string)
+		c.Files = append(c.Files, crateFile{Rel: rel, Size: size, SHA256: sum})
+	}
+	if len(c.Files) == 0 {
+		return storedCrate{}, fmt.Errorf("its %s lists no files", crateName)
+	}
+	// Framing time grows with the square of the entities, so what the crate states is read without its files, which refer to nothing.
+	delete(entities["./"], "hasPart")
+	var graph []any
+	for _, e := range doc.Graph {
+		if !files[refID(e)] {
+			graph = append(graph, e)
+		}
+	}
+	c.stated = map[string]any{"@context": doc.Context, "@graph": graph}
+	return c, nil
+}
+
+func (c storedCrate) byPath() map[string]crateFile {
+	files := make(map[string]crateFile, len(c.Files))
+	for _, f := range c.Files {
+		files[f.Rel] = f
+	}
+	return files
+}
+
+// Why what is stored is not what the crate records; sums also compares sha256s, which files stored before lbf recorded them lack.
+func (c storedCrate) differences(stored map[string]crateFile, sums bool) []string {
+	var problems []string
+	listed := map[string]bool{crateName: true}
+	for _, f := range c.Files {
+		listed[f.Rel] = true
+		s, ok := stored[f.Rel]
+		switch {
+		case !ok:
+			problems = append(problems, f.Rel+": listed in the crate but not stored")
+		case s.Size != f.Size:
+			problems = append(problems, fmt.Sprintf("%s: stored as %d bytes, but the crate records %d", f.Rel, s.Size, f.Size))
+		case sums && s.SHA256 != f.SHA256:
+			problems = append(problems, fmt.Sprintf("%s: stored with sha256 %q, but the crate records %q", f.Rel, s.SHA256, f.SHA256))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(stored)) {
+		if !listed[name] {
+			problems = append(problems, name+": stored but not listed in the crate")
+		}
+	}
+	return problems
+}
+
+// How lbf reads a crate back, whichever version wrote it: earlier ones record the parent as wasDerivedFrom and do not mention the run.
+var statementFrame = map[string]any{
+	"@context": []any{roCrateContext, map[string]any{
+		"additionalProperty": map[string]any{"@id": "http://schema.org/additionalProperty", "@container": "@index", "@index": "name"},
+		"isBasedOn":          map[string]any{"@id": "http://schema.org/isBasedOn", "@container": "@set"},
+		"wasDerivedFrom":     map[string]any{"@id": "http://www.w3.org/ns/prov#wasDerivedFrom", "@container": "@set"},
+		"instrument":         map[string]any{"@id": "http://schema.org/instrument", "@container": "@set"},
+		"conformsTo":         map[string]any{"@id": "http://purl.org/dc/terms/conformsTo", "@container": "@set"},
+	}},
+	"@id":      "./",
+	"@reverse": map[string]any{"result": map[string]any{}},
+}
+
+// What the crate states about its dataset, leaving out lbf's own properties, and the profiles it declares.
+func (c storedCrate) statement() (provenance, []string, error) {
+	view, err := frameCrate(c.stated, statementFrame)
+	if err != nil {
+		return provenance{}, nil, err
+	}
+	obj := func(v any) map[string]any { m, _ := v.(map[string]any); return m }
+	str := func(v any, key string) string { s, _ := obj(v)[key].(string); return s }
+
+	p := provenance{Name: str(view, "name"), Description: str(view, "description"), Properties: map[string]string{}}
+	for name, pv := range obj(view["additionalProperty"]) {
+		if !slices.Contains(lbfProperties, name) {
+			p.Properties[name] = str(pv, "value")
+		}
+	}
+	for _, parent := range slices.Concat(asList(view["isBasedOn"]), asList(view["wasDerivedFrom"])) {
+		p.DerivedFrom = str(parent, "identifier")
+	}
+	for _, run := range asList(obj(view["@reverse"])["result"]) {
+		for _, in := range asList(obj(run)["instrument"]) {
+			p.Instruments = append(p.Instruments, instrument{str(in, "name"), str(in, "version"), str(in, "url")})
+		}
+	}
+	// What lbf wrote when the publisher gave nothing, this version or an earlier one, is not what they stated.
+	id, source := str(view, "identifier"), str(obj(view["additionalProperty"])["source_path"], "value")
+	if p.Name == id || p.Name == defaultName(source) {
+		p.Name = ""
+	}
+	if slices.Contains([]string{"Dataset " + id, "Bronze-layer dataset " + id, defaultDescription(source, len(c.Files), p.DerivedFrom)}, p.Description) {
+		p.Description = ""
+	}
+	var conformsTo []string
+	for _, prof := range asList(view["conformsTo"]) {
+		conformsTo = append(conformsTo, str(prof, "@id"))
+	}
+	return p, conformsTo, nil
 }
 
 // Percent-encodes like Python's urllib.parse.quote, as ro-crate-py does.

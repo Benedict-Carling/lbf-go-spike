@@ -118,6 +118,14 @@ func TestRepublishingChecksOnlyTheNameAndDescriptionGiven(t *testing.T) {
 	must(t, upload(ctx, tg, same))
 }
 
+func statementOf(raw []byte) (provenance, []string, error) {
+	c, err := readCrate(raw)
+	if err != nil {
+		return provenance{}, nil, err
+	}
+	return c.statement()
+}
+
 const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "@graph": [
  {"@id": "./", "@type": "Dataset", "identifier": "20261005-vocal-unicorn-112d", "name": "20261005-vocal-unicorn-112d",
   "description": "Dataset 20261005-vocal-unicorn-112d", "license": "https://rightsstatements.org/vocab/InC/1.0/",
@@ -134,14 +142,14 @@ const earlierLbfCrate = `{"@context": "https://w3id.org/ro/crate/1.2/context", "
  {"@id": "data/a.csv", "@type": "File", "contentSize": "1"}]}`
 
 func TestCratesFromAnEarlierLbfAreReadBack(t *testing.T) {
-	p, conformsTo, err := crateStatement([]byte(earlierLbfCrate))
+	p, conformsTo, err := statementOf([]byte(earlierLbfCrate))
 	must(t, err)
 	want := provenance{DerivedFrom: "20261005-crucial-lab-cccb",
 		Instruments: []instrument{{"pipe", "0.1.0", "https://example.org/pipe"}}, Properties: map[string]string{"sample_id": "SAM-0001"}}
 	if !p.sameAs(want) || len(conformsTo) != 2 {
 		t.Fatalf("got %+v %v", p, conformsTo)
 	}
-	if _, _, err := crateStatement([]byte(`{"@context": "https://example.org/other", "@graph": []}`)); err == nil {
+	if _, _, err := statementOf([]byte(`{"@context": "https://example.org/other", "@graph": [{"@id": "./", "hasPart": {"@id": "a"}}, {"@id": "a", "contentSize": "1"}]}`)); err == nil {
 		t.Fatal("a crate in an unknown context was read")
 	}
 }
@@ -175,7 +183,7 @@ func TestPropertyNamesAreSafeInTheCrate(t *testing.T) {
 	if !strings.Contains(string(crate), `"@id": "#plate%20id"`) {
 		t.Fatalf("property id not encoded:\n%s", crate)
 	}
-	stated, _, err := crateStatement(crate)
+	stated, _, err := statementOf(crate)
 	must(t, err)
 	if stated.Properties["plate id"] != "P 1" || stated.Properties["a/b"] != "c" {
 		t.Fatalf("read back %v", stated.Properties)

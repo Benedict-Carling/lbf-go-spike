@@ -95,8 +95,7 @@ func TestFlattenCrateKeepsEachValueOfAMultiValuedProperty(t *testing.T) {
 
 func TestSyncCratesCachesCratesAndAsksAgainForTheRest(t *testing.T) {
 	tg := emulator(t, uploadPerms)
-	cc, err := tg.client()
-	must(t, err)
+	cc := blobsOf(t, tg, "").cc
 	ctx := context.Background()
 	put := func(name string) {
 		_, err := cc.NewBlockBlobClient(name).UploadBuffer(ctx, []byte(`{}`), nil)

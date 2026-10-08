@@ -26,7 +26,7 @@ func TestInstrumentsSharingAURLMustBeTheSame(t *testing.T) {
 	pub := publication{ID: newID(), Source: "/data/run1", Files: []localFile{{Rel: "run1/a", Size: 1}}, Provenance: repeated, Profile: prof}
 	raw, err := pub.crate(target{Container: "bronze", User: "u"})
 	must(t, err)
-	got, _, err := crateStatement(raw)
+	got, _, err := statementOf(raw)
 	must(t, err)
 	if !got.sameAs(repeated) {
 		t.Fatalf("read back %+v", got)

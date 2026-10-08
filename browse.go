@@ -149,7 +149,7 @@ func syncCrates(ctx context.Context, cc *container.Client, cache string) ([]stri
 			continue
 		}
 		g.Go(func() error {
-			crate, err := downloadBuffer(gctx, cc, id+"/"+crateName)
+			crate, err := blobs{cc: cc, id: id}.read(gctx, crateName)
 			if bloberror.HasCode(err, bloberror.BlobNotFound) {
 				return nil
 			}
