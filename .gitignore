@@ -1,4 +1,5 @@
 /lbf
 /lbf.exe
 /dist/
+*.syso
 .claude/

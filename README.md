@@ -4,6 +4,9 @@ A single-binary replacement for the Nextflow upload, download and mint-sas
 pipelines. No Nextflow, Java, Python, bash or azcopy; runs natively on macOS,
 Linux and Windows.
 
+MIT licensed; see [LICENSE](LICENSE). Windows releases follow the
+[code signing policy](#code-signing-policy).
+
 ## Install
 
 Windows: open PowerShell (Start menu, type "PowerShell") and paste:
@@ -56,6 +59,16 @@ lbf checks for a newer release at most once an hour and prints a warning after
 any command when it is out of date. Set `LBF_NO_UPDATE_CHECK=1` to turn the
 check off. Pre-releases (tags such as `v0.2.0-rc1`) are never offered; anyone
 running one is offered the release that follows it.
+
+## Uninstall
+
+Run `lbf logout` first to delete saved sign-ins.
+
+Windows: delete the `%LOCALAPPDATA%\lbf` folder and remove that folder from
+your user PATH (Start menu, "Edit environment variables for your account").
+
+macOS / Linux: delete `~/.local/bin/lbf` (or the file in `LBF_INSTALL_DIR`).
+The PATH line the installer added to your startup files can stay or be removed.
 
 ## Use
 
@@ -249,3 +262,33 @@ npx -p azurite azurite-blob --inMemoryPersistence &   # optional: the publish te
 go test ./...
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/lbf-windows-amd64.exe .
 ```
+
+## Code signing policy
+
+Windows releases are built from this repository by GitHub Actions
+(`.github/workflows/release.yml`) and, once SignPath Foundation accepts the
+project, signed through it before they are published.
+
+Free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org).
+
+Team roles:
+
+- Committers and reviewers: [Benedict Carling](https://github.com/Benedict-Carling)
+- Approvers: [Benedict Carling](https://github.com/Benedict-Carling)
+
+Every change from outside the team is reviewed before it is merged, and every
+signing request is approved by an approver.
+
+### Privacy
+
+lbf sends no telemetry. It only contacts other systems to do what you asked:
+
+- Microsoft Entra ID, to sign you in (`lbf login`, or when a command needs Azure access).
+- Azure Resource Manager and the Azure Storage accounts you choose, to list, publish and fetch datasets.
+- GitHub, to check for a newer release at most once an hour (turn off with
+  `LBF_NO_UPDATE_CHECK=1`) and to download one when you run `lbf upgrade`.
+
+Sign-ins saved by `lbf login` stay on your machine, in the macOS Keychain or
+an encrypted file in `%LOCALAPPDATA%\.IdentityService` on Windows, until
+`lbf logout`.
