@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -62,7 +61,7 @@ func psCall(t *testing.T, env map[string]string, body string) lbfResult {
 	ps := powershell(t)
 	script := psScriptVersion(t, "dev")
 	command := fmt.Sprintf("$env:LBF_TEST_NO_MAIN = '1'; . '%s'; Remove-Item Env:LBF_TEST_NO_MAIN\n%s", strings.ReplaceAll(script, "'", "''"), body)
-	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
+	cmd := psCommand(ps, command)
 	cmd.Env = psEnviron(env)
 	r := runCmd(t, cmd)
 	r.stdout = strings.ReplaceAll(r.stdout, "\r\n", "\n")
@@ -82,7 +81,7 @@ func psRunScript(t *testing.T, script string, env map[string]string, args ...str
 		quoted[i] = "'" + psSingleQuotes.Replace(a) + "'"
 	}
 	command := fmt.Sprintf("& '%s' %s; exit $LASTEXITCODE", strings.ReplaceAll(script, "'", "''"), strings.Join(quoted, " "))
-	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
+	cmd := psCommand(ps, command)
 	cmd.Env = psEnviron(env)
 	r := runCmd(t, cmd)
 	r.stdout = strings.ReplaceAll(r.stdout, "\r\n", "\n")
@@ -465,7 +464,7 @@ func startPSBrowse(t *testing.T, f *fakeAccount, home string) (string, func() st
 	script := psScriptVersion(t, "dev")
 	command := fmt.Sprintf("$env:LBF_TEST_NO_MAIN = '1'; . %s; Remove-Item Env:LBF_TEST_NO_MAIN\n%s\nfunction Get-LbfBrowseAccountUrl { param($Account) %s }\nInvoke-LbfMain -Raw @('browse', '--tag', 'tag=storage-test')",
 		psQuote(script), psStubSignIn, psQuote(f.srv.URL))
-	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
+	cmd := psCommand(ps, command)
 	cmd.Env = psEnviron(psHomeEnv(home))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

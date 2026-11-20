@@ -14,7 +14,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -296,14 +295,16 @@ func TestConformanceTransferWriteSASEnv(t *testing.T) {
 	if !bytes.Equal(g, p) {
 		t.Errorf("files differ:\ngo %q\nps %q", g, p)
 	}
-	if info, err := os.Stat(psPath); err == nil && info.Mode().Perm() != 0o600 {
-		t.Errorf("ps wrote mode %v", info.Mode().Perm())
+	if gi, gerr := os.Stat(goPath); gerr == nil {
+		if pi, perr := os.Stat(psPath); perr == nil && pi.Mode().Perm() != gi.Mode().Perm() {
+			t.Errorf("ps wrote mode %v, go %v", pi.Mode().Perm(), gi.Mode().Perm())
+		}
 	}
 }
 
 func runPS(t *testing.T, ps, command string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
+	cmd := psCommand(ps, command)
 	cmd.Env = append(os.Environ(), "LBF_NO_UPDATE_CHECK=1", "TERM=dumb")
 	out, err := cmd.CombinedOutput()
 	return string(out), err

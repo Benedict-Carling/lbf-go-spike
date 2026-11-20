@@ -100,7 +100,8 @@ type conformCase struct {
 
 func newWorld(t *testing.T, name, perms string, files map[string]string) *world {
 	t.Helper()
-	root := t.TempDir()
+	// By long name: Windows runners' TEMP is an 8.3 short name, which no real user's folders are.
+	root := longPath(t.TempDir())
 	w := &world{name: name, dir: filepath.Join(root, "work"), home: filepath.Join(root, "home")}
 	must(t, os.MkdirAll(w.dir, 0o755))
 	// Windows' known-folder lookup follows USERPROFILE and fails where these do not exist, as they always do on a real profile.
@@ -198,6 +199,11 @@ func (w *world) lbfPS(t *testing.T, env map[string]string, raw string, args ...s
 
 // PowerShell ends a single-quoted string at any of the single quotation marks, so each is doubled.
 var psSingleQuotes = strings.NewReplacer("'", "''", "\u2018", "\u2018\u2018", "\u2019", "\u2019\u2019", "\u201a", "\u201a\u201a", "\u201b", "\u201b\u201b")
+
+// PowerShell running command; Windows PowerShell would otherwise write module-loading progress to a redirected stderr as CLIXML.
+func psCommand(ps, command string) *exec.Cmd {
+	return exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand("$ProgressPreference = 'SilentlyContinue'; "+command))
+}
 
 func encodeCommand(s string) string {
 	u := utf16.Encode([]rune(s))

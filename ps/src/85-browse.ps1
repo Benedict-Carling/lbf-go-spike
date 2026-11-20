@@ -669,6 +669,7 @@ function ConvertTo-LbfListenPort {
 function Format-LbfSocketReason {
     param($ErrorOrException)
     $e = Get-LbfException $ErrorOrException
+    if ($script:OnWindows -and $e -is [System.Net.Sockets.SocketException]) { return Get-LbfWin32Message $e.ErrorCode }
     if ($script:OnWindows -or $e -isnot [System.Net.Sockets.SocketException]) { return $e.Message }
     switch ($e.SocketErrorCode) {
         'AddressAlreadyInUse' { return 'address already in use' }

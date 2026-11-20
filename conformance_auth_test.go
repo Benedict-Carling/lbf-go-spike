@@ -16,7 +16,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -470,6 +469,10 @@ func (f *fakeAzure) approve(t *testing.T, signIn *url.URL, tenant string, reply 
 func (f *fakeAzure) runPS(t *testing.T, w *world, env map[string]string, browser func(*url.URL), args ...string) lbfResult {
 	t.Helper()
 	urlFile := filepath.Join(w.home, "sign-in-url")
+	// A URL left by an earlier command in this world is not this command's sign-in.
+	if err := os.Remove(urlFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
 	full := f.env(urlFile)
 	full["PATH"] = noAzPath(t)
 	for k, v := range env {
@@ -1031,7 +1034,7 @@ func psEval(t *testing.T, body string, input any) (string, string) {
 	must(t, os.WriteFile(in, raw, 0o644))
 	command := fmt.Sprintf("[Console]::OutputEncoding = New-Object Text.UTF8Encoding $false; $env:LBF_TEST_NO_MAIN = '1'; . '%s'; $data = [IO.File]::ReadAllText('%s') | ConvertFrom-Json\n%s",
 		strings.ReplaceAll(script, "'", "''"), strings.ReplaceAll(in, "'", "''"), body)
-	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
+	cmd := psCommand(ps, command)
 	cmd.Env = append(os.Environ(), "LBF_NO_UPDATE_CHECK=1", "TERM=dumb")
 	r := runCmd(t, cmd)
 	if r.code != 0 {
