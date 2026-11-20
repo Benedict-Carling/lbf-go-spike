@@ -771,8 +771,8 @@ func TestConformanceTransferInterrupted(t *testing.T) {
 		w := newWorld(t, "ps", "rlw", manyFiles(20))
 		goOK(t, w, "publish", "data/run1", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID)
 		r := w.lbfPS(t, map[string]string{"LBF_TEST_INTERRUPT": `^GET .*f0005\.csv`}, "", "fetch", fixedID, "--sas-env", "{sas}", "--container", "{container}", "--out", "out")
-		want := "error: interrupted; nothing was saved as " + filepath.Join(w.dir, "out", fixedID) + ", and the next fetch starts again\n"
-		if r.code != 1 || !strings.HasSuffix(strings.ReplaceAll(r.stderr, "\r\n", "\n"), want) {
+		want := "error: interrupted; nothing was saved as " + filepath.Join("{dir}", "out", fixedID) + ", and the next fetch starts again\n"
+		if r.code != 1 || !strings.HasSuffix(w.normalize(r.stderr, nil), want) {
 			t.Fatalf("exit %d, stderr:\n%s", r.code, r.stderr)
 		}
 		if entries, _ := os.ReadDir(filepath.Join(w.dir, "out")); len(entries) != 0 {

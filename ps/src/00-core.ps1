@@ -99,13 +99,27 @@ function Format-LbfOsError {
     return "$Op ${Path}: $(Get-LbfOsReason $ErrorOrException)"
 }
 
+# FormatMessage's text as Go prints it; .NET Framework drops the final full stop.
+function Get-LbfWin32Message {
+    param([Parameter(Mandatory)][int]$Code)
+    $m = (New-Object System.ComponentModel.Win32Exception $Code).Message.TrimEnd()
+    if (-not $m.EndsWith('.', [StringComparison]::Ordinal)) { $m += '.' }
+    return $m
+}
+
+# What Go reports when a path runs through a file: ERROR_PATH_NOT_FOUND on Windows, ENOTDIR elsewhere.
+function Get-LbfNotDirReason {
+    if ($script:OnWindows) { return Get-LbfWin32Message 3 }
+    return 'not a directory'
+}
+
 function Get-LbfOsReason {
     param([Parameter(Mandatory)]$ErrorOrException)
     $e = Get-LbfException $ErrorOrException
     if ($script:OnWindows) {
         $hr = $e.HResult
         if (($hr -band 0xFFFF0000) -eq 0x80070000) {
-            return (New-Object System.ComponentModel.Win32Exception ([int]($hr -band 0xFFFF))).Message
+            return Get-LbfWin32Message ([int]($hr -band 0xFFFF))
         }
         return $e.Message
     }

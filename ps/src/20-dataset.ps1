@@ -15,7 +15,7 @@ $script:ControlChars = New-Object System.Text.RegularExpressions.Regex ('[\x00-\
 
 # Where Unicode case folding differs from lower(upper(c)), as cases.Fold does it.
 $script:FoldExceptions = @{}
-foreach ($pair in ('DF:73 73,130:69 307,131:131,149:2BC 6E,1F0:6A 30C,390:3B9 308 301,3B0:3C5 308 301,587:565 582,13F8:13F0,13F9:13F1,13FA:13F2,13FB:13F3,13FC:13F4,13FD:13F5,' +
+foreach ($pair in ('B5:3BC,17F:73,345:3B9,3C2:3C3,3D0:3B2,3D1:3B8,3D5:3C6,3D6:3C0,3F0:3BA,3F1:3C1,3F5:3B5,1E9B:1E61,1FBE:3B9,DF:73 73,130:69 307,131:131,149:2BC 6E,1F0:6A 30C,390:3B9 308 301,3B0:3C5 308 301,587:565 582,13F8:13F0,13F9:13F1,13FA:13F2,13FB:13F3,13FC:13F4,13FD:13F5,' +
         '1E96:68 331,1E97:74 308,1E98:77 30A,1E99:79 30A,1E9A:61 2BE,1E9E:73 73,1F50:3C5 313,1F52:3C5 313 300,1F54:3C5 313 301,1F56:3C5 313 342,1F80:1F00 3B9,1F81:1F01 3B9,' +
         '1F82:1F02 3B9,1F83:1F03 3B9,1F84:1F04 3B9,1F85:1F05 3B9,1F86:1F06 3B9,1F87:1F07 3B9,1F88:1F00 3B9,1F89:1F01 3B9,1F8A:1F02 3B9,1F8B:1F03 3B9,1F8C:1F04 3B9,1F8D:1F05 3B9,' +
         '1F8E:1F06 3B9,1F8F:1F07 3B9,1F90:1F20 3B9,1F91:1F21 3B9,1F92:1F22 3B9,1F93:1F23 3B9,1F94:1F24 3B9,1F95:1F25 3B9,1F96:1F26 3B9,1F97:1F27 3B9,1F98:1F20 3B9,1F99:1F21 3B9,' +
@@ -217,7 +217,7 @@ function Resolve-LbfSymlinks {
         if (-not (Test-LbfSymlink $dest $attr)) {
             $isDir = ($attr -band [IO.FileAttributes]::Directory) -ne 0
             if ($script:OnWindows -and ($attr -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and (Get-LbfLinkInfo $dest).Type -eq 'Junction') { $isDir = $false }
-            if (-not $isDir -and $end -lt $Path.Length) { throw (New-LbfError 'not a directory') }
+            if (-not $isDir -and $end -lt $Path.Length) { throw (New-LbfError (Get-LbfNotDirReason)) }
             $start = $end
             continue
         }
@@ -407,6 +407,8 @@ function Test-LbfSamePath {
 # Go's walkDataset: loops are found by each folder's real path, since .NET cannot compare file identities.
 function Invoke-LbfWalk {
     param([hashtable]$State, [string]$Dir, [string]$Rel, [string]$Real, [System.Collections.Generic.List[string]]$Ancestors)
+    # A junction may name a folder by its long name where the input used its 8.3 short name.
+    if ($script:OnWindows -and $Real.IndexOf([char]'~') -ge 0) { $Real = Get-LbfStoredCase $Real }
     foreach ($a in $Ancestors) {
         if (Test-LbfSamePath $a $Real $State.CaseInsensitive) {
             $State.Problems.Add("${Rel}: symlink loop back to a folder above it")

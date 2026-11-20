@@ -988,6 +988,9 @@ function Step-LbfRange {
             $etag = Get-LbfHeaderValue $resp 'ETag'
             if ($null -ne $etag) { $Job.ETag = $etag }
             if ($Range.Count -le 0) { $resp.Dispose(); $Range.Count = 0; return $true }
+            # As Go's DownloadFile truncates first; .NET Framework otherwise lets one range's write shrink the file under another's.
+            $pre = New-Object System.IO.FileStream ((Get-LbfIoPath $Job.Path), [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+            try { $pre.SetLength($Job.Total) } finally { $pre.Dispose() }
         }
         $Range.Response = $resp
         $Range.Fs = New-Object System.IO.FileStream ((Get-LbfIoPath $Job.Path), [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite, 65536, $true)
@@ -1182,7 +1185,7 @@ function New-LbfDirectoryAll {
     $p = $Path
     while (-not [string]::IsNullOrEmpty($p)) {
         if ([IO.Directory]::Exists($p)) { break }
-        if ([IO.File]::Exists($p)) { throw (New-LbfError "mkdir ${p}: not a directory") }
+        if ([IO.File]::Exists($p)) { throw (New-LbfError "mkdir ${p}: $(Get-LbfNotDirReason)") }
         $p = [IO.Path]::GetDirectoryName($p)
     }
     try { [void][IO.Directory]::CreateDirectory($Path) } catch { throw (New-LbfError (Format-LbfOsError 'mkdir' $Path $_)) }
