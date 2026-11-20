@@ -122,7 +122,6 @@ func TestConformanceDatasetNames(t *testing.T) {
 		"crate name inside the folder": {files: map[string]string{"inside/RO-CRATE-METADATA.JSON": "x", "inside/ro-crate-metadata.json": "y"}, args: datasetDryRun("inside")},
 		"crate name as a folder": {setup: func(t *testing.T, w *world) { datasetCreate(t, w, "Ro-Crate-Metadata.json/a.txt") },
 			args: datasetDryRun("Ro-Crate-Metadata.json")},
-		"long segment":     {files: map[string]string{"run1/" + strings.Repeat("文", 200) + ".csv": "x"}, args: datasetDryRun("run1")},
 		"255-byte segment": {files: map[string]string{"run1/" + strings.Repeat("文", 85): "x"}, args: datasetDryRun("run1")},
 		"blob name too long": {files: map[string]string{"x": "x"},
 			args: []string{"publish", "x", "--dry-run", "--id", "20260101-" + strings.Repeat("a", 1010) + "-y-0000"}},
@@ -136,6 +135,10 @@ func TestConformanceDatasetNames(t *testing.T) {
 			"run1/console.txt": "x", "run1/nully": "x", "run1/COM10": "x", "run1/com0": "x", "run1/LPT": "x", "run1/conin": "x", "run1/my nul.txt": "x", "run1/aux_data": "x",
 		}, args: datasetDryRun("run1")},
 		"reserved folder": {files: map[string]string{"run1/sub/Aux/a.txt": "x", "run1/ok.txt": "x"}, args: datasetDryRun("run1")},
+	}
+	// Linux allows 255 bytes per name, so only macOS and Windows can hold a 600-byte one.
+	if runtime.GOOS != "linux" {
+		cases["long segment"] = conformCase{files: map[string]string{"run1/" + strings.Repeat("文", 200) + ".csv": "x"}, args: datasetDryRun("run1")}
 	}
 	if runtime.GOOS != "windows" {
 		for name, rel := range map[string]string{
@@ -448,8 +451,11 @@ func TestConformanceDatasetProfiles(t *testing.T) {
 		"unrelated profile.json nearby": {files: with(cellRun, map[string]string{"app/cfg/profile.json": `{"theme": "dark"}`, "work/notes/profile.json": `not json`, "work/myprof/profile.json": minimalSilverProfile}),
 			args: datasetDryRun(append([]string{"run1", "--profile", "work/myprof"}, good...)...)},
 		"profile without id": {files: with(cellRun, map[string]string{"work/bad/profile.json": `{"theme": "dark"}`}), args: datasetDryRun("run1", "--profile", "work/bad")},
-		"properties schema from the docs": {files: with(cellRun, map[string]string{"p/docs/profile.json": strings.Replace(datasetRead(t, "docs/research/profile-properties.schema.json"), `"$id": "https://w3id.org/lbf/schemas/profile-properties/0.1.0"`, `"$id": "https://example.org/docs"`, 1)}),
-			args: datasetDryRun("run1", "--profile", "p/docs")},
+	}
+	// docs/research is not in the repository, so this case runs only where someone keeps it.
+	if raw, err := os.ReadFile("docs/research/profile-properties.schema.json"); err == nil {
+		cases["properties schema from the docs"] = conformCase{files: with(cellRun, map[string]string{"p/docs/profile.json": strings.Replace(string(raw), `"$id": "https://w3id.org/lbf/schemas/profile-properties/0.1.0"`, `"$id": "https://example.org/docs"`, 1)}),
+			args: datasetDryRun("run1", "--profile", "p/docs")}
 	}
 	for _, id := range []string{"./", "run1/a.txt", crateName, "#uploader", "profiles/x", "https://example.org/p#part", "urn:example:p", "file:///p"} {
 		cases["profile id "+id] = conformCase{files: with(cellRun, map[string]string{"p/x/profile.json": `{"$id": "` + id + `"}`}), args: datasetDryRun("run1", "--profile", "p/x")}
@@ -551,13 +557,6 @@ func TestConformanceDatasetProfiles(t *testing.T) {
 		cases[name] = c
 	}
 	runDatasetCases(t, cases)
-}
-
-func datasetRead(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	must(t, err)
-	return string(raw)
 }
 
 func TestConformanceDatasetNewID(t *testing.T) {

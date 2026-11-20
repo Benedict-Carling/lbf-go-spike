@@ -49,7 +49,17 @@ jobs:
           $main = Join-Path $prefix 'node_modules\azurite\dist\src\blob\main.js'
           Start-Process -FilePath node -ArgumentList "`"$main`" --inMemoryPersistence --skipApiVersionCheck --silent" -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'azurite.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'azurite.err')
-      - run: npx -y wait-on@9.5.1 -t 180000 tcp:127.0.0.1:10000
+      - if: runner.os != 'Windows'
+        run: npx -y wait-on@9.5.1 -t 180000 tcp:127.0.0.1:10000
+      # wait-on never sees Azurite listening on Windows runners, so connect directly.
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          for ($i = 0; $i -lt 180; $i++) {
+            $c = New-Object System.Net.Sockets.TcpClient
+            try { $c.Connect('127.0.0.1', 10000); 'Azurite is listening'; exit 0 } catch { Start-Sleep 1 } finally { $c.Dispose() }
+          }
+          exit 1
       - if: failure() && runner.os == 'Windows'
         shell: pwsh
         run: Get-Content (Join-Path $env:RUNNER_TEMP 'azurite.out'), (Join-Path $env:RUNNER_TEMP 'azurite.err') -ErrorAction SilentlyContinue
