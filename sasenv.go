@@ -104,5 +104,7 @@ func readSASEnv(path, mode, expectContainer string) (target, error) {
 		User:             values["USER_IDENTITY"],
 		SubscriptionName: values["SUBSCRIPTION_NAME"],
 		SubscriptionID:   values["SUBSCRIPTION_ID"],
+		// An emulator's account URL, for conformance tests.
+		endpoint: os.Getenv("LBF_BLOB_ENDPOINT"),
 	}, nil
 }
