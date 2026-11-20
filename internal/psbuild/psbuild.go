@@ -3,6 +3,7 @@ package psbuild
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -120,13 +121,18 @@ var word = regexp.MustCompile(`"([a-z]+)"`)
 
 // The two-word lists petname.Generate(2, "-") draws from, read from the module lbf builds with.
 func petnameWords(root string) (adjectives, names []string, err error) {
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", petnameModule)
+	// go list -m names no directory until the module is downloaded, which a fresh CI runner has not done.
+	cmd := exec.Command("go", "mod", "download", "-json", petnameModule)
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, nil, fmt.Errorf("finding %s: %w", petnameModule, err)
+		return nil, nil, fmt.Errorf("downloading %s: %w", petnameModule, err)
 	}
-	src, err := os.ReadFile(filepath.Join(strings.TrimSpace(string(out)), "petname.go"))
+	var mod struct{ Dir string }
+	if err := json.Unmarshal(out, &mod); err != nil || mod.Dir == "" {
+		return nil, nil, fmt.Errorf("finding %s: go mod download printed %q", petnameModule, out)
+	}
+	src, err := os.ReadFile(filepath.Join(mod.Dir, "petname.go"))
 	if err != nil {
 		return nil, nil, err
 	}

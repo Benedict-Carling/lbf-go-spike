@@ -39,11 +39,20 @@ jobs:
           node-version: 22
       - if: runner.os != 'Windows'
         run: npx -y -p azurite@3.37.0 azurite-blob --inMemoryPersistence --skipApiVersionCheck --silent &
-      # A process started this way outlives the step.
+      # Installed first, so the wait below never includes a download; a process started this way outlives the step.
       - if: runner.os == 'Windows'
         shell: pwsh
-        run: Start-Process -FilePath npx.cmd -ArgumentList '-y -p azurite@3.37.0 azurite-blob --inMemoryPersistence --skipApiVersionCheck --silent' -WindowStyle Hidden
-      - run: npx -y wait-on@9.5.1 -t 60000 tcp:127.0.0.1:10000
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'azurite'
+          npm install --no-fund --no-audit --prefix $prefix azurite@3.37.0
+          if ($LASTEXITCODE) { exit 1 }
+          $main = Join-Path $prefix 'node_modules\azurite\dist\src\blob\main.js'
+          Start-Process -FilePath node -ArgumentList "`"$main`" --inMemoryPersistence --skipApiVersionCheck --silent" -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'azurite.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'azurite.err')
+      - run: npx -y wait-on@9.5.1 -t 180000 tcp:127.0.0.1:10000
+      - if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: Get-Content (Join-Path $env:RUNNER_TEMP 'azurite.out'), (Join-Path $env:RUNNER_TEMP 'azurite.err') -ErrorAction SilentlyContinue
       - name: Conformance with ${{ matrix.ps }}
         shell: bash
         run: |
