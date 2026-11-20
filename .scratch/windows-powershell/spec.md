@@ -55,6 +55,7 @@ The script must run on Windows PowerShell 5.1 (.NET Framework 4.x), which is wha
 
 - `LBF_AZURITE=1 LBF_PS=<path to pwsh> go test ./...` with Azurite running. Every scenario runs the Go lbf (the test binary re-executed with `LBF_CONFORMANCE_MAIN=1`) and `lbf.ps1` through `$LBF_PS -NoProfile -NonInteractive -Command`, invoking the script as a user does in a PowerShell session, then compares stdout, stderr, exit code, files written, and blobs stored.
 - `LBF_BLOB_ENDPOINT` points both lbfs at Azurite instead of `https://<account>.blob.core.windows.net`.
+- `LBF_TEST_NO_MAIN=1` makes the script define its functions without running, so a test can dot-source it and call them.
 - Test seams for code only the PowerShell side can test against fakes are named `LBF_TEST_*` and read only in PowerShell.
 - CI runs the conformance tests on `windows-latest` with `powershell.exe` (5.1) and on Linux with `pwsh`.
 
@@ -72,7 +73,7 @@ The script must run on Windows PowerShell 5.1 (.NET Framework 4.x), which is wha
   - `Read-LbfSasEnv <path> <mode> <container>`, `Write-LbfSasEnv -Path -Target`.
   - `Invoke-LbfUpload -Target -Publication`, `Invoke-LbfDownload -Target -Id -OutDir` (returns `Path`, `DataPath`, `Stated`), `Invoke-LbfCheckAccess -Target -Mode`.
   - Reading stored crates (Go's `readCrate`, `byPath`, `differences`, `differsFrom`, `statement`) lives here too.
-- Sign-in and Azure (`80`): `Get-LbfMintedTarget -Tenant -Tag -AccountName -ContainerName -Mode`, `Invoke-LbfLogin -Tenant` (returns a credential), `Get-LbfSignedInUser -Credential`, `Get-LbfTokenStoreError` (`$null`, or an error whose `Data` has `lbfNoStore` when this lbf cannot remember logins), `Invoke-LbfLogout` (returns `User`, `HadRecord`, `HadTokens`), `Get-LbfAzCliUser -Tenant` (`$null` when az is absent or signed out).
+- Sign-in and Azure (`80`): `Get-LbfMintedTarget -Tenant -Tag -AccountName -ContainerName -Mode`, `Invoke-LbfLogin -Tenant` (returns a credential), `Get-LbfSignedInUser -Credential`, `Get-LbfTokenStoreError` (`$null`, or an error whose `Data` has `lbfNoStore` when this lbf cannot remember logins), `Invoke-LbfLogout` (returns `User`, `HadRecord`, `HadTokens`), `Get-LbfAzCliUser -Tenant` (`$null` when az is absent or signed out). For browse: `Get-LbfCredential -Tenant` (Go's `credential`, returns `Credential` and `Source`), `Find-LbfAccounts -Credential -Tag`, `Select-LbfAccount -Matches -Tag -Want` (Go's `chooseAccount` with the terminal picker), `Get-LbfAccessToken -Credential -Scope`.
 - Browse and upgrade (`85`, `90`): `Invoke-LbfBrowse -Options`, `Invoke-LbfUpgrade` (returns `Latest`, `Upgraded`), `Start-LbfUpdateCheck <args>` and `Complete-LbfUpdateCheck <state>`.
 
 ## Allowed differences

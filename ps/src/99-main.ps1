@@ -101,4 +101,4 @@ function Invoke-LbfMain {
     exit $exit
 }
 
-Invoke-LbfMain -Raw $args -Invocation $MyInvocation
+if (-not $env:LBF_TEST_NO_MAIN) { Invoke-LbfMain -Raw $args -Invocation $MyInvocation }
