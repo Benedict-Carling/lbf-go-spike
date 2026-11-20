@@ -1,0 +1,195 @@
+name: powershell
+
+# The PowerShell lbf that Windows installs: conformance with the Go lbf, and the installer as a user meets it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # powershell.exe is Windows PowerShell 5.1, what Imperial's PCs run; pwsh is PowerShell 7.
+          - os: windows-latest
+            ps: powershell.exe
+          - os: windows-latest
+            ps: pwsh
+          - os: ubuntu-latest
+            ps: pwsh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # No Go cache: a job that runs npm code must not save what the build jobs restore.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Installed first, so the wait below never includes a download.
+      - run: npm install --no-fund --no-audit --prefix "$RUNNER_TEMP/azurite" azurite@3.37.0
+        shell: bash
+      # Azurite starts in the step that uses it: on Windows runners a process left running by an earlier step stops answering.
+      - name: Conformance with ${{ matrix.ps }}
+        shell: bash
+        run: |
+          node "$RUNNER_TEMP/azurite/node_modules/azurite/dist/src/blob/main.js" --inMemoryPersistence --skipApiVersionCheck --silent > azurite.log 2>&1 &
+          for i in $(seq 180); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
+          curl -s -o /dev/null http://127.0.0.1:10000/ || { echo "Azurite did not start"; cat azurite.log; exit 1; }
+          "$LBF_PS" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          go test -run 'TestConformance' -count=1 -timeout 60m -v . 2>&1 | tee conformance.log | grep -E '^(=== RUN|--- |ok|FAIL|PASS)'
+          exit "${PIPESTATUS[0]}"
+        env:
+          LBF_AZURITE: "1"
+          LBF_PS: ${{ matrix.ps }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-${{ matrix.os }}-${{ matrix.ps }}
+          path: conformance.log
+
+  # Installs from a release served on this machine, then uses lbf as Stuart would: from Windows PowerShell, PowerShell 7 and cmd.exe.
+  install:
+    runs-on: windows-latest
+    env:
+      LBF_NO_UPDATE_CHECK: "1"
+      LBF_TEST_INSTALL_FROM: http://127.0.0.1:8765
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Serve a release
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'release'
+          go run ./tools/buildps -version v0.0.0-ci -o "$rel/lbf.ps1"
+          if ($LASTEXITCODE) { exit 1 }
+          Copy-Item scripts/install.ps1 $rel
+          Get-ChildItem -File $rel | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } |
+            Set-Content (Join-Path $rel SHA256SUMS) -Encoding ascii
+          Start-Process -FilePath python -ArgumentList "-m http.server 8765 --bind 127.0.0.1 --directory `"$rel`"" -WindowStyle Hidden
+          for ($i = 0; $i -lt 60; $i++) {
+            try { Invoke-WebRequest "$env:LBF_TEST_INSTALL_FROM/SHA256SUMS" -UseBasicParsing | Out-Null; break } catch { Start-Sleep 1 }
+          }
+          Get-Content (Join-Path $rel SHA256SUMS)
+
+      # A PC as shipped: scripts not allowed, and an lbf.exe from an earlier install.
+      - name: Make Windows PowerShell refuse scripts, and leave an old lbf.exe
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -Command "try { Set-ExecutionPolicy -Scope LocalMachine Restricted -Force } catch {}; try { Set-ExecutionPolicy -Scope CurrentUser Undefined -Force } catch {}; Get-ExecutionPolicy -List"
+          $dir = Join-Path $env:LOCALAPPDATA 'lbf'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item "$env:SystemRoot\System32\whoami.exe" (Join-Path $dir 'lbf.exe')
+
+      - name: Install from Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          Remove-Item Env:PSExecutionPolicyPreference -ErrorAction SilentlyContinue
+          $out = powershell.exe -NoProfile -Command "irm $env:LBF_TEST_INSTALL_FROM/install.ps1 | iex" 2>&1 | Out-String
+          $out
+          if ($LASTEXITCODE) { exit 1 }
+          if ($out -notmatch 'Allowed PowerShell to run local scripts') { throw 'the installer did not allow scripts' }
+          if ($out -notmatch 'lbf v0\.0\.0-ci') { throw 'the installer did not run lbf version' }
+          $policy = powershell.exe -NoProfile -Command "Get-ExecutionPolicy -Scope CurrentUser"
+          if ($policy -ne 'RemoteSigned') { throw "CurrentUser policy is $policy" }
+          $dir = Join-Path $env:LOCALAPPDATA 'lbf'
+          Get-ChildItem $dir | Format-Table Name, Length
+          if (Test-Path (Join-Path $dir 'lbf.exe')) { throw 'the old lbf.exe is still there' }
+          foreach ($f in 'lbf.ps1', 'lbf.cmd') { if (-not (Test-Path (Join-Path $dir $f))) { throw "$f is missing" } }
+          $dir >> $env:GITHUB_PATH
+
+      - name: Use lbf from Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          $picked = (Get-Command lbf).Source
+          "lbf in PowerShell runs $picked"
+          if ($picked -notlike '*\lbf.ps1') { throw "PowerShell picked $picked, not lbf.ps1" }
+          $v = lbf version
+          if ($v -ne 'lbf v0.0.0-ci') { throw "lbf version printed $v" }
+          $id = lbf new-id
+          if ($id -isnot [string] -or $id -notmatch '^[0-9]{8}-[a-z]+-[a-z]+-[0-9a-f]{4}$') { throw "new-id printed $id" }
+          "captured $id"
+          New-Item -ItemType Directory -Force 'test data\run 1' | Out-Null
+          Set-Content 'test data\run 1\a.csv' "a,b`n1,2"
+          lbf publish 'test data\run 1' --dry-run
+          if ($LASTEXITCODE) { throw "publish --dry-run exited $LASTEXITCODE" }
+          $j = lbf publish 'test data\run 1' --dry-run --json --id $id | ConvertFrom-Json
+          if ($j.id -ne $id) { throw "publish --json printed $j" }
+          lbf fetch ../x
+          if ($LASTEXITCODE -ne 1) { throw "a failing fetch exited $LASTEXITCODE" }
+          $global:LASTEXITCODE = 0
+
+      - name: Use lbf from PowerShell 7
+        shell: pwsh
+        run: |
+          $picked = (Get-Command lbf).Source
+          "lbf in PowerShell 7 runs $picked"
+          if ($picked -notlike '*\lbf.ps1') { throw "PowerShell 7 picked $picked, not lbf.ps1" }
+          $id = lbf new-id
+          if ($id -isnot [string] -or $id -notmatch '^[0-9]{8}-[a-z]+-[a-z]+-[0-9a-f]{4}$') { throw "new-id printed $id" }
+          New-Item -ItemType Directory -Force 'test data\run 1' | Out-Null
+          Set-Content 'test data\run 1\a.csv' "a,b`n1,2"
+          lbf publish 'test data\run 1' --dry-run --json
+          if ($LASTEXITCODE) { throw "publish --dry-run exited $LASTEXITCODE" }
+
+      - name: Use lbf from cmd.exe
+        shell: cmd
+        run: |
+          where lbf
+          where lbf.exe && exit /b 1
+          for /f "delims=" %%v in ('lbf version') do if not "%%v"=="lbf v0.0.0-ci" (echo lbf version printed %%v & exit /b 1)
+          for /f "delims=" %%i in ('lbf new-id') do set ID=%%i
+          echo captured %ID%
+          if "%ID%"=="" exit /b 1
+          mkdir "test data\run 1"
+          echo a,b> "test data\run 1\a.csv"
+          call lbf publish "test data\run 1" --dry-run --id %ID% || exit /b 1
+          call lbf fetch ../x
+          if %ERRORLEVEL% NEQ 1 (echo a failing fetch exited %ERRORLEVEL% & exit /b 1)
+          exit /b 0
+
+      - name: Reinstall from PowerShell 7 while lbf is in use
+        shell: pwsh
+        run: |
+          $out = pwsh -NoProfile -Command "irm $env:LBF_TEST_INSTALL_FROM/install.ps1 | iex" 2>&1 | Out-String
+          $out
+          if ($LASTEXITCODE -or $out -notmatch 'lbf v0\.0\.0-ci') { exit 1 }
+          if (Test-Path "$env:LOCALAPPDATA\lbf\lbf.ps1.new") { throw 'left lbf.ps1.new behind' }
+
+      # Group Policy wins over -ExecutionPolicy, so the installer must stop rather than install an lbf that cannot run.
+      - name: Group Policy that allows only signed scripts
+        shell: pwsh
+        run: |
+          $key = 'HKLM:\Software\Policies\Microsoft\Windows\PowerShell'
+          New-Item -Force $key | Out-Null
+          New-ItemProperty -Force $key -Name EnableScripts -PropertyType DWord -Value 1 | Out-Null
+          New-ItemProperty -Force $key -Name ExecutionPolicy -PropertyType String -Value AllSigned | Out-Null
+          powershell.exe -NoProfile -Command "Get-ExecutionPolicy -List"
+          try {
+            $out = powershell.exe -NoProfile -Command "irm $env:LBF_TEST_INSTALL_FROM/install.ps1 | iex" 2>&1 | Out-String
+            $out
+            if ($out -notmatch 'Group Policy sets') { throw 'the installer did not explain the Group Policy' }
+            $shim = cmd /c "lbf version 2>&1"
+            "lbf.cmd under Group Policy: $shim"
+            if ($shim -match '^lbf v0\.0\.0-ci$') { throw 'lbf.cmd overrode Group Policy' }
+          } finally {
+            Remove-Item -Recurse -Force $key
+          }
+          $global:LASTEXITCODE = 0

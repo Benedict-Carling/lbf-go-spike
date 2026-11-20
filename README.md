@@ -1,8 +1,9 @@
 # lbf (Go spike)
 
 A single-binary replacement for the Nextflow upload, download and mint-sas
-pipelines. No Nextflow, Java, Python, bash or azcopy; runs natively on macOS,
-Linux and Windows.
+pipelines. No Nextflow, Java, Python, bash or azcopy; runs natively on macOS
+and Linux, and on Windows as one PowerShell script, `lbf.ps1`, that behaves
+exactly as the binary does.
 
 MIT licensed; see [LICENSE](LICENSE). Windows releases follow the
 [code signing policy](#code-signing-policy).
@@ -19,13 +20,25 @@ Nothing needs installing first: `irm` and `iex` are built into PowerShell
 (short for `Invoke-RestMethod` and `Invoke-Expression`), and both Windows
 PowerShell 5.1 and PowerShell 7 work. The first part turns on TLS 1.2, which
 GitHub requires and older Windows PowerShell does not use by default. No admin
-rights are needed. The script puts `lbf.exe` in `%LOCALAPPDATA%\lbf` and adds it
-to your PATH, so `lbf` works straight away in that window and in new ones. Run
-it again to reinstall, even while lbf is running. Then run `lbf login`.
+rights are needed. The script puts `lbf.ps1`, and `lbf.cmd` for Command Prompt,
+in `%LOCALAPPDATA%\lbf` and adds that folder to your PATH, so `lbf` works
+straight away in that window and in new ones, in PowerShell and in Command
+Prompt alike. It replaces an `lbf.exe` an earlier install left there. Run it
+again to reinstall, even while lbf is running. Then run `lbf login`.
 
-If your organisation blocks scripts this way, download `lbf-windows-amd64.exe`
-(or `-arm64.exe` on Arm laptops) from the releases page, rename it to `lbf.exe`
-and run it from its folder as `.\lbf.exe`.
+On Windows lbf is a PowerShell script rather than an exe because Imperial's
+Defender blocks unsigned programs, and a script run by Windows' own PowerShell
+needs no signature. Typed in PowerShell, `lbf` runs `lbf.ps1` itself, so
+`$id = lbf new-id` and PowerShell's quoting work as for any command;
+Command Prompt runs `lbf.cmd`, which starts Windows PowerShell on `lbf.ps1`.
+
+PowerShell runs scripts only if its execution policy allows them, and Windows
+ships refusing them. If nothing else has set it, the installer sets the policy
+for your account to `RemoteSigned` (local scripts run, downloaded ones must be
+signed) and says so. If your organisation's Group Policy allows only signed
+scripts (`AllSigned` or `Restricted`), the installer stops without installing
+anything and says to ask IT to allow `RemoteSigned` for your account; lbf
+never tries to get round Group Policy.
 
 macOS / Linux:
 
@@ -42,18 +55,22 @@ alone. Open a new terminal afterwards. Set `LBF_NO_MODIFY_PATH=1` to leave
 startup files alone.
 
 Both installers check the download against the release's `SHA256SUMS` before
-installing it, as `lbf upgrade` does. They and `lbf upgrade` fetch the build
-for the machine's own processor, even from an x64 PowerShell or terminal
-emulated on Arm.
+installing it, as `lbf upgrade` does. On macOS and Linux they and `lbf upgrade`
+fetch the build for the machine's own processor, even from a terminal emulated
+on Arm; `lbf.ps1` runs on any Windows processor.
 
-Binaries are also attached to each
-[release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
+Binaries, `lbf.ps1`, and the Windows exes earlier installs used are also
+attached to each [release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
 
 ## Update
 
 ```
 lbf upgrade
 ```
+
+On Windows this replaces `lbf.ps1` with the release's, checked against
+`SHA256SUMS`; an install that still has `lbf.exe` gets the newer exe, and the
+install command above moves it to `lbf.ps1`.
 
 lbf checks for a newer release at most once an hour and prints a warning after
 any command when it is out of date. Set `LBF_NO_UPDATE_CHECK=1` to turn the
@@ -64,8 +81,11 @@ running one is offered the release that follows it.
 
 Run `lbf logout` first to delete saved sign-ins.
 
-Windows: delete the `%LOCALAPPDATA%\lbf` folder and remove that folder from
-your user PATH (Start menu, "Edit environment variables for your account").
+Windows: delete the `%LOCALAPPDATA%\lbf` folder (it holds `lbf.ps1` and
+`lbf.cmd`) and remove that folder from your user PATH (Start menu, "Edit
+environment variables for your account"). The installer may have let your
+account run local scripts; `Set-ExecutionPolicy -Scope CurrentUser Undefined`
+in Windows PowerShell undoes that, if nothing else of yours needs it.
 
 macOS / Linux: delete `~/.local/bin/lbf` (or the file in `LBF_INSTALL_DIR`).
 The PATH line the installer added to your startup files can stay or be removed.
@@ -185,6 +205,20 @@ and record a new decision here.
   uploader the crate has no `creator`, rather than an invented one, so bronze
   refuses it. `lbf fetch --json` leaves out a name or description lbf filled
   in, so carrying it forward never passes off lbf's words as the publisher's.
+- **On Windows, lbf is `lbf.ps1`, a PowerShell port that must behave
+  byte for byte as the Go lbf does.** Imperial's Defender for Endpoint blocks
+  unsigned executables (its ransomware rule stopped `lbf.exe`), but not scripts
+  run by Microsoft's signed `powershell.exe`, so the same commands, flags,
+  messages, exit codes, crates and blobs come from a script that needs no
+  signature. The Go code stays the specification, and `conformance_*_test.go`
+  runs both on the same input on Windows PowerShell 5.1, PowerShell 7 and Linux.
+  The installer sets only the execution policy of the user's own account, and
+  stops where Group Policy forbids unsigned scripts rather than work round it.
+  `lbf.cmd` is there for Command Prompt; PowerShell picks `lbf.ps1` over it in
+  the same folder, so output can be captured. `lbf upgrade` replaces the
+  script, and `lbf browse` serves on a socket listener, which, unlike
+  Windows' HTTP listener, needs no URL reservation for a user without admin
+  rights.
 
 ## Browsing datasets
 
@@ -260,14 +294,21 @@ Pushing a `v*` tag builds every platform and publishes a release.
 ```
 npx -p azurite azurite-blob --inMemoryPersistence &   # optional: the publish tests skip without it
 go test ./...
+LBF_AZURITE=1 LBF_PS=pwsh go test -run TestConformance .   # lbf.ps1 against the Go lbf
+go run ./tools/buildps -version v0.2.0 -o dist/lbf.ps1      # what Windows installs
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/lbf-windows-amd64.exe .
 ```
 
 ## Code signing policy
 
 Windows releases are built from this repository by GitHub Actions
-(`.github/workflows/release.yml`) and, once SignPath Foundation accepts the
-project, signed through it before they are published.
+(`.github/workflows/release.yml`). What Windows installs is `lbf.ps1`, which is
+not signed: Windows needs no signature for a local script under the
+`RemoteSigned` execution policy. The `lbf-windows-*.exe` files are also
+published, unsigned, for installs made before `lbf.ps1`. If SignPath
+Foundation accepts the project, the exes and `lbf.ps1` will be signed through
+it before they are published, which would also let lbf run where Group Policy
+allows only signed scripts.
 
 Free code signing provided by [SignPath.io](https://about.signpath.io),
 certificate by [SignPath Foundation](https://signpath.org).
