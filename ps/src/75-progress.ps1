@@ -130,13 +130,13 @@ function Update-LbfProgress {
     if (($now - $Progress.LastDraw).TotalMilliseconds -lt $script:ProgressRedrawMs) { return }
     $Progress.LastDraw = $now
     $text = Format-LbfProgressFrame $Progress $now $false
-    if ($text -ne '' -and -not $Progress.Discard) { Write-LbfErr $text }
+    if (-not [string]::IsNullOrEmpty($text) -and -not $Progress.Discard) { Write-LbfErr $text }
 }
 
 function Close-LbfProgress {
     param([Parameter(Mandatory)][hashtable]$Progress)
     $text = Format-LbfProgressFrame $Progress ([DateTime]::UtcNow) $true
-    if ($text -ne '' -and -not $Progress.Discard) { Write-LbfErr $text }
+    if (-not [string]::IsNullOrEmpty($text) -and -not $Progress.Discard) { Write-LbfErr $text }
 }
 
 function Get-LbfProgressTransferred {
@@ -210,7 +210,7 @@ function Format-LbfProgressFrame {
         param([long]$n, [long]$total)
         $s = '  '
         $fb = Format-LbfBar $n $total $barWidth
-        if ($fb -ne '') { $s += $fb + ' ' }
+        if ($fb.Length -ne 0) { $s += $fb + ' ' }
         return $s + (Format-LbfCounts $n $total) + '  '
     }
     $line = {

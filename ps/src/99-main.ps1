@@ -18,7 +18,7 @@ function Get-LbfTypedArgs {
     for ($i = 1; $i -lt $elements.Count; $i++) {
         $e = $elements[$i]
         if ($e -is [System.Management.Automation.Language.CommandParameterAst]) {
-            if (-not $sawEnd -and $e.Extent.Text -eq '--' -and $null -eq $e.Argument) { $sawEnd = $true; $out.Add('--'); continue }
+            if (-not $sawEnd -and (Test-LbfSame $e.Extent.Text '--') -and $null -eq $e.Argument) { $sawEnd = $true; $out.Add('--'); continue }
             if ($null -ne $e.Argument) {
                 if ($r + 1 -ge $Raw.Count) { return $null }
                 $value = Get-LbfElementText $e.Argument

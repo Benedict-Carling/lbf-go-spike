@@ -69,16 +69,16 @@ function Read-LbfSasEnv {
 
     $values = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($line in ($raw.Replace("`r`n", "`n") -split "`n")) {
-        if ($line.Trim() -eq '') { continue }
+        if ($line.Trim().Length -eq 0) { continue }
         $m = [regex]::Match($line, "^([A-Z_]+)='([^']*)'[ \t]*\z")
         if (-not $m.Success) { throw (New-LbfError "${Path}: not a KEY='value' line: $(Format-LbfQuote $line -MaxRunes 60); $remedy") }
         $k = $m.Groups[1].Value
-        if ($script:SasEnvKeys -cnotcontains $k) { throw (New-LbfError "${Path}: unexpected key $k; $remedy") }
+        if (-not (Test-LbfIn $k $script:SasEnvKeys)) { throw (New-LbfError "${Path}: unexpected key $k; $remedy") }
         if ($values.ContainsKey($k)) { throw (New-LbfError "${Path}: $k appears more than once; $remedy") }
         $values[$k] = $m.Groups[2].Value
     }
     foreach ($k in $script:SasEnvKeys) {
-        if (-not $values.ContainsKey($k) -or $values[$k] -eq '') { throw (New-LbfError "$Path is missing a value for $k; $remedy") }
+        if (-not $values.ContainsKey($k) -or $values[$k].Length -eq 0) { throw (New-LbfError "$Path is missing a value for $k; $remedy") }
     }
     if ($values['AZURE_ACCOUNT'] -cnotmatch '^[a-z0-9]{3,24}\z') {
         throw (New-LbfError "$Path has an invalid storage account name $(Format-LbfQuote $values['AZURE_ACCOUNT']); $remedy")
@@ -86,10 +86,10 @@ function Read-LbfSasEnv {
     $expiry = ConvertFrom-LbfRfc3339 $values['AZURE_SAS_EXPIRY']
     if ($null -eq $expiry) { throw (New-LbfError "$Path has an unreadable AZURE_SAS_EXPIRY; $remedy") }
     if ([DateTimeOffset]::UtcNow -gt $expiry) { throw (New-LbfError "the SAS in $Path expired at $($values['AZURE_SAS_EXPIRY']); $remedy") }
-    if ($Mode -eq 'upload' -and $values['AZURE_SAS_PERMISSIONS'].IndexOf('w') -lt 0) {
+    if ((Test-LbfSame $Mode 'upload') -and $values['AZURE_SAS_PERMISSIONS'].IndexOf([char]'w') -lt 0) {
         throw (New-LbfError "$Path grants $(Format-LbfQuote $values['AZURE_SAS_PERMISSIONS']) and cannot be used to upload; re-mint with --mode upload")
     }
-    if ($values['AZURE_CONTAINER'] -cne $Container) {
+    if (-not (Test-LbfSame $values['AZURE_CONTAINER'] $Container)) {
         throw (New-LbfError "$Path was minted for container $(Format-LbfQuote $values['AZURE_CONTAINER']), not $(Format-LbfQuote $Container); pass --container $($values['AZURE_CONTAINER']), or mint a file for $Container")
     }
     Write-LbfLog "[sas] using $Path -> $($values['AZURE_ACCOUNT'])/$($values['AZURE_CONTAINER']) (permissions=$($values['AZURE_SAS_PERMISSIONS']), expires $($values['AZURE_SAS_EXPIRY']))`n"
@@ -106,13 +106,6 @@ function New-LbfTakenError {
     $Heading += "; publish without --id, or with a new ID from 'lbf new-id'"
     if ($Problems.Count -gt 0) { $Heading += ':' }
     return New-LbfError (New-LbfProblemList $Heading $Problems).Message -ExitCode $script:ExitIDTaken
-}
-
-function Get-LbfSortedOrdinal {
-    param([AllowEmptyCollection()][string[]]$Items)
-    $a = [string[]]@($Items)
-    [Array]::Sort($a, [StringComparer]::Ordinal)
-    return , $a
 }
 
 function New-LbfSha256 {
@@ -256,9 +249,9 @@ function Read-LbfStoredCrate {
         $id = Get-LbfCrateRefId $part
         $entity = $null
         if ($entities.ContainsKey($id)) { $entity = $entities[$id] }
-        $isFile[$id] = $null -ne $entity -and $entity.Contains('@type') -and $entity['@type'] -is [string] -and $entity['@type'] -ceq 'File'
+        $isFile[$id] = $null -ne $entity -and $entity.Contains('@type') -and $entity['@type'] -is [string] -and (Test-LbfSame $entity['@type'] 'File')
         $rel = ConvertFrom-LbfQueryEscape $id -Path
-        if ($null -eq $rel -or $rel -eq '') { throw (New-LbfError "its $crate lists an unreadable file $(Format-LbfQuote $id)") }
+        if ([string]::IsNullOrEmpty($rel)) { throw (New-LbfError "its $crate lists an unreadable file $(Format-LbfQuote $id)") }
         $size = $null
         if ($null -ne $entity -and $entity.Contains('contentSize')) { $size = ConvertFrom-LbfContentSize $entity['contentSize'] }
         if ($null -eq $size) { throw (New-LbfError "its $crate gives no size for $rel") }
@@ -294,9 +287,9 @@ function Get-LbfCrateDifferences {
         if (-not $Stored.ContainsKey($f.Rel)) { $problems.Add("$($f.Rel): listed in the crate but not stored"); continue }
         $s = $Stored[$f.Rel]
         if ($s.Size -ne $f.Size) { $problems.Add("$($f.Rel): stored as $($s.Size) bytes, but the crate records $($f.Size)") }
-        elseif ($Sums -and $s.SHA256 -cne $f.SHA256) { $problems.Add("$($f.Rel): stored with sha256 $(Format-LbfQuote $s.SHA256), but the crate records $(Format-LbfQuote $f.SHA256)") }
+        elseif ($Sums -and -not (Test-LbfSame $s.SHA256 $f.SHA256)) { $problems.Add("$($f.Rel): stored with sha256 $(Format-LbfQuote $s.SHA256), but the crate records $(Format-LbfQuote $f.SHA256)") }
     }
-    foreach ($name in (Get-LbfSortedOrdinal @($Stored.Keys))) {
+    foreach ($name in (Get-LbfSortedUtf8 @($Stored.Keys))) {
         if (-not $listed.Contains($name)) { $problems.Add("${name}: stored but not listed in the crate") }
     }
     return , $problems.ToArray()
@@ -322,7 +315,7 @@ function Get-LbfStatedNodes {
     foreach ($v in (Get-LbfJsonList $Node[$Key])) {
         if ($v -is [System.Collections.IDictionary]) {
             $id = Get-LbfCrateRefId $v
-            if ($id -ne '') {
+            if ($id.Length -ne 0) {
                 if (-not $seen.Add('@' + $id)) { continue }
                 if ($Entities.ContainsKey($id)) { $out.Add($Entities[$id]) } else { $out.Add($v) }
                 continue
@@ -346,7 +339,7 @@ function Test-LbfCrateContext {
             if (-not [Uri]::IsWellFormedUriString($uri, [UriKind]::Absolute)) {
                 try { $uri = (New-Object Uri ((New-Object Uri $script:CrateFrameBase), $c)).AbsoluteUri } catch { }
             }
-            if ($script:RoCrateContexts -cnotcontains $uri) {
+            if (-not (Test-LbfIn $uri $script:RoCrateContexts)) {
                 throw (New-LbfError "framing the crate: loading remote context failed: dereferencing a URL did not result in a valid JSON-LD context ($uri): loading document failed: the crate uses the context $uri, but lbf reads only the RO-Crate 1.2 and 1.3 contexts of the crates it writes; this crate was not written by lbf")
             }
             $known = $true
@@ -375,11 +368,11 @@ function Get-LbfCrateStatement {
     foreach ($pv in (Get-LbfStatedNodes $root 'additionalProperty' $entities)) {
         if (-not ($pv -is [System.Collections.IDictionary])) { continue }
         $key = Get-LbfStatedString $pv 'name'
-        if ($key -eq '' -and -not $pv.Contains('name')) { $key = '@none' }
+        if ($key.Length -eq 0 -and -not $pv.Contains('name')) { $key = '@none' }
         if ($indexed.ContainsKey($key)) { $indexed[$key] = $null } else { $indexed[$key] = $pv }
     }
     foreach ($name in $indexed.Keys) {
-        if ($script:LbfOwnProperties -cnotcontains $name) { $prov.Properties[$name] = Get-LbfStatedString $indexed[$name] 'value' }
+        if (-not (Test-LbfIn $name $script:LbfOwnProperties)) { $prov.Properties[$name] = Get-LbfStatedString $indexed[$name] 'value' }
     }
     $parents = New-Object System.Collections.Generic.List[object]
     foreach ($p in (Get-LbfStatedNodes $root 'isBasedOn' $entities)) { $parents.Add($p) }
@@ -388,7 +381,7 @@ function Get-LbfCrateStatement {
     foreach ($run in $Crate.Graph) {
         if (-not ($run -is [System.Collections.IDictionary]) -or -not $run.Contains('result')) { continue }
         $toRoot = $false
-        foreach ($r in (Get-LbfJsonList $run['result'])) { if ((Get-LbfCrateRefId $r) -ceq './') { $toRoot = $true } }
+        foreach ($r in (Get-LbfJsonList $run['result'])) { if (Test-LbfSame (Get-LbfCrateRefId $r) './') { $toRoot = $true } }
         if (-not $toRoot) { continue }
         foreach ($in in (Get-LbfStatedNodes $run 'instrument' $entities)) {
             $prov.Instruments.Add(@{ Name = (Get-LbfStatedString $in 'name'); Version = (Get-LbfStatedString $in 'version'); URL = (Get-LbfStatedString $in 'url') })
@@ -397,9 +390,9 @@ function Get-LbfCrateStatement {
     $id = Get-LbfStatedString $root 'identifier'
     $source = ''
     if ($indexed.ContainsKey('source_path')) { $source = Get-LbfStatedString $indexed['source_path'] 'value' }
-    if ($prov.Name -ceq $id -or $prov.Name -ceq (Get-LbfBase $source)) { $prov.Name = '' }
+    if ((Test-LbfSame $prov.Name $id) -or (Test-LbfSame $prov.Name (Get-LbfBase $source))) { $prov.Name = '' }
     $defaults = @("Dataset $id", "Bronze-layer dataset $id", (Get-LbfDefaultDescription $source $Crate.Files.Count $prov.DerivedFrom))
-    if ($defaults -ccontains $prov.Description) { $prov.Description = '' }
+    if (Test-LbfIn $prov.Description $defaults) { $prov.Description = '' }
     foreach ($c in (Get-LbfStatedNodes $root 'conformsTo' $entities)) {
         if ($c -is [System.Collections.IDictionary] -and $c.Contains('@id') -and $c['@id'] -is [string]) { $conformsTo.Add($c['@id']) } else { $conformsTo.Add('') }
     }
@@ -412,14 +405,14 @@ function Compare-LbfCrateWithPublication {
     $st = Get-LbfCrateStatement $Crate
     $stated = $st.Provenance
     $mine = $Publication.Provenance
-    if ($mine.Name -eq '') { $stated.Name = '' }
-    if ($mine.Description -eq '') { $stated.Description = '' }
+    if ([string]::IsNullOrEmpty($mine.Name)) { $stated.Name = '' }
+    if ([string]::IsNullOrEmpty($mine.Description)) { $stated.Description = '' }
     $problems = New-Object System.Collections.Generic.List[string]
     if (-not (Test-LbfSameProvenance $stated $mine)) { $problems.Add('its name, description, parent, instruments or properties differ from these') }
-    $a = Get-LbfSortedOrdinal $st.ConformsTo.ToArray()
-    $b = Get-LbfSortedOrdinal (Get-LbfPublicationConformsTo $Publication)
+    $a = Get-LbfSortedUtf8 $st.ConformsTo.ToArray()
+    $b = Get-LbfSortedUtf8 (Get-LbfPublicationConformsTo $Publication)
     $same = $a.Count -eq $b.Count
-    if ($same) { for ($i = 0; $i -lt $a.Count; $i++) { if ($a[$i] -cne $b[$i]) { $same = $false; break } } }
+    if ($same) { for ($i = 0; $i -lt $a.Count; $i++) { if (-not (Test-LbfSame $a[$i] $b[$i])) { $same = $false; break } } }
     if (-not $same) { $problems.Add('it was checked against other profiles') }
     return , $problems.ToArray()
 }
@@ -552,7 +545,7 @@ function Invoke-LbfTransferAll {
 function Get-LbfUploaderMetadata {
     param([hashtable]$Target)
     $u = ([string]$Target.User).Trim()
-    if ($u -eq '') { return $null }
+    if ($u.Length -eq 0) { return $null }
     foreach ($c in $u.ToCharArray()) { if ([int]$c -lt 0x20 -or [int]$c -gt 0x7E) { return $null } }
     return $u
 }
@@ -660,7 +653,7 @@ function Step-LbfPutJob {
             if (-not (Step-LbfBlobOp $op)) { return $false }
             $Job.Ops.Clear()
             try { $props = ConvertFrom-LbfPropertiesResult (Complete-LbfBlobOp $op @(200)) } catch { throw (New-LbfWrappedError "uploading $($f.Rel): " $_) }
-            if ($props.Size -ne $f.Size -or (Get-LbfMetadataValue $props.Metadata 'sha256') -cne $Job.Sum) {
+            if ($props.Size -ne $f.Size -or -not (Test-LbfSame (Get-LbfMetadataValue $props.Metadata 'sha256') $Job.Sum)) {
                 throw (New-LbfError "$($b.Id)/$($f.Rel) changed while this publish was writing it; is another publish of the same ID running?" -ExitCode $script:ExitIDTaken)
             }
             $f.SHA256 = $Job.Sum
@@ -713,7 +706,7 @@ function Step-LbfHashJob {
     $Job.Crypto.FlushFinalBlock()
     $sum = ConvertTo-LbfHex $Job.Sha.Hash
     Test-LbfUnchanged $f ([Math]::Min($read, $f.Size))
-    if ($sum -cne $Job.Recorded) {
+    if (-not (Test-LbfSame $sum $Job.Recorded)) {
         $Job.Problems.Add("$($f.Rel): its content differs from what is stored")
         return $true
     }
@@ -735,18 +728,18 @@ function Compare-LbfRecorded {
         if (-not $Recorded.ContainsKey($f.Rel)) { $toSend.Add($i); continue }
         $r = $Recorded[$f.Rel]
         if ($r.Size -ne $f.Size) { $problems.Add("$($f.Rel): $($f.Size) bytes here, $($r.Size) stored"); continue }
-        if ($r.SHA256 -eq '') { $problems.Add("$($f.Rel): stored without a sha256 (published before lbf recorded them), so it cannot be confirmed to match"); continue }
+        if ([string]::IsNullOrEmpty($r.SHA256)) { $problems.Add("$($f.Rel): stored without a sha256 (published before lbf recorded them), so it cannot be confirmed to match"); continue }
         $total += $f.Size
         $jobs.Add((New-LbfJob 'hash' $f.Rel $f.Size @{ File = $f; Recorded = $r.SHA256; Problems = $problems }))
     }
-    foreach ($rel in (Get-LbfSortedOrdinal @($Recorded.Keys))) {
-        if (-not $local.Contains($rel) -and $rel -cne $script:CrateName) { $problems.Add("${rel}: stored, but not here") }
+    foreach ($rel in (Get-LbfSortedUtf8 @($Recorded.Keys))) {
+        if (-not $local.Contains($rel) -and -not (Test-LbfSame $rel $script:CrateName)) { $problems.Add("${rel}: stored, but not here") }
     }
     if ($jobs.Count -gt 0) {
         Write-LbfLog "Checking $($jobs.Count) files ($(Format-LbfBytes $total)) against what is stored`n"
         Invoke-LbfTransferAll (New-LbfProgress $jobs.Count $total) $jobs
     }
-    return @{ ToSend = $toSend; Problems = (Get-LbfSortedOrdinal $problems.ToArray()) }
+    return @{ ToSend = $toSend; Problems = (Get-LbfSortedUtf8 $problems.ToArray()) }
 }
 
 function Send-LbfCrate {
@@ -905,21 +898,21 @@ function New-LbfFileIn {
     $name = $Rel
     if ($script:OnWindows) { $name = $name.Replace('/', '\') }
     $segments = New-Object System.Collections.Generic.List[string]
-    $absolute = $Rel.StartsWith('/') -or ($script:OnWindows -and ($Rel -match '^[A-Za-z]:' -or $Rel.StartsWith('\')))
+    $absolute = $Rel.StartsWith('/', [StringComparison]::Ordinal) -or ($script:OnWindows -and ($Rel -cmatch '^[A-Za-z]:' -or $Rel.StartsWith('\', [StringComparison]::Ordinal)))
     $parts = $Rel -split '[/]'
     if ($script:OnWindows) { $parts = $Rel -split '[/\\]' }
     for ($i = 0; $i -lt $parts.Count - 1; $i++) {
         $s = $parts[$i]
-        if ($s -eq '' -or $s -eq '.') { continue }
-        if ($s -eq '..' -and $segments.Count -gt 0 -and $segments[$segments.Count - 1] -ne '..') { $segments.RemoveAt($segments.Count - 1); continue }
+        if (Test-LbfIn $s '', '.') { continue }
+        if ((Test-LbfSame $s '..') -and $segments.Count -gt 0 -and -not (Test-LbfSame $segments[$segments.Count - 1] '..')) { $segments.RemoveAt($segments.Count - 1); continue }
         $segments.Add($s)
     }
     $dir = $segments -join $sep
     if ($absolute) { $dir = $sep + $dir }
-    if ($dir -eq '') { $dir = '.' }
+    if ($dir.Length -eq 0) { $dir = '.' }
     if ($absolute -or $segments.Contains('..')) { throw (New-LbfError "blob ${Rel}: mkdirat ${dir}: path escapes from parent") }
     $last = $parts[$parts.Count - 1]
-    if ($last -eq '..' -or $last -eq '.' -or $last -eq '') { throw (New-LbfError "blob ${Rel}: openat ${name}: path escapes from parent") }
+    if (Test-LbfIn $last '..', '.', '') { throw (New-LbfError "blob ${Rel}: openat ${name}: path escapes from parent") }
     $dirFull = $Root
     if ($segments.Count -gt 0) { $dirFull = [IO.Path]::Combine($Root, $dir) }
     $full = [IO.Path]::Combine($dirFull, $last)
@@ -1065,7 +1058,7 @@ function Step-LbfGetJob {
             }
             $info.Refresh()
             if ($info.Length -ne $f.Size) { throw (New-LbfError "$($f.Rel) is $($info.Length) bytes, not $($f.Size) after download; fetch again, and if it recurs the stored copy differs from what was published") }
-            if ($f.SHA256 -eq '') { return $true }
+            if ([string]::IsNullOrEmpty($f.SHA256)) { return $true }
             $Job.Fs = New-Object System.IO.FileStream ((Get-LbfIoPath $Job.Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite, 1048576, $true)
             $Job.Sha = New-LbfSha256
             $Job.Crypto = New-Object System.Security.Cryptography.CryptoStream ([IO.Stream]::Null), $Job.Sha, ([System.Security.Cryptography.CryptoStreamMode]::Write)
@@ -1081,7 +1074,7 @@ function Step-LbfGetJob {
             if ($t.IsFaulted) { throw (New-LbfError (Format-LbfOsError 'read' $f.Rel $t.Exception)) }
             $Job.Fs.Dispose(); $Job.Fs = $null
             $Job.Crypto.FlushFinalBlock()
-            if ((ConvertTo-LbfHex $Job.Sha.Hash) -cne $f.SHA256) {
+            if (-not (Test-LbfSame (ConvertTo-LbfHex $Job.Sha.Hash) $f.SHA256)) {
                 throw (New-LbfError "$($f.Rel) has the wrong sha256 after download; fetch again, and if it recurs the stored copy differs from what was published")
             }
             return $true
@@ -1100,9 +1093,9 @@ function Get-LbfFileProblem {
     }
     $size = (New-Object System.IO.FileInfo $path).Length
     if ($size -ne $File.Size) { return "$($File.Rel) is $size bytes, not $($File.Size)" }
-    if ($File.SHA256 -eq '') { return '' }
+    if ([string]::IsNullOrEmpty($File.SHA256)) { return '' }
     try { $sum = Get-LbfFileSha256 $path } catch { throw (New-LbfError (Format-LbfOsError 'read' $File.Rel $_)) }
-    if ($sum -cne $File.SHA256) { return "$($File.Rel) has the wrong sha256" }
+    if (-not (Test-LbfSame $sum $File.SHA256)) { return "$($File.Rel) has the wrong sha256" }
     return ''
 }
 
@@ -1118,7 +1111,7 @@ function Get-LbfDirProblem {
     foreach ($f in $Crate.Files) {
         [void]$want.Add($f.Rel)
         $problem = Get-LbfFileProblem $Root $f
-        if ($problem -ne '') { return $problem }
+        if ($problem.Length -ne 0) { return $problem }
     }
     $local = $null
     try { $local = [IO.File]::ReadAllBytes((Get-LbfIoPath (Join-LbfRel $Root $script:CrateName))) } catch { $local = $null }
@@ -1132,15 +1125,15 @@ function Find-LbfExtraFile {
     $entries = @([IO.Directory]::GetFileSystemEntries((Get-LbfIoPath $Dir)))
     $names = New-Object System.Collections.Generic.List[string]
     foreach ($e in $entries) { $names.Add([IO.Path]::GetFileName($e)) }
-    foreach ($n in (Get-LbfSortedOrdinal $names.ToArray())) {
+    foreach ($n in (Get-LbfSortedUtf8 $names.ToArray())) {
         $path = [IO.Path]::Combine($Dir, $n)
         $rel = $n
-        if ($Prefix -ne '') { $rel = "$Prefix/$n" }
+        if ($Prefix.Length -ne 0) { $rel = "$Prefix/$n" }
         $attrs = [IO.File]::GetAttributes((Get-LbfIoPath $path))
         $isDir = ($attrs -band [IO.FileAttributes]::Directory) -and -not ($attrs -band [IO.FileAttributes]::ReparsePoint)
         if ($isDir) {
             $found = Find-LbfExtraFile $path $rel $Want
-            if ($found -ne '') { return $found }
+            if ($found.Length -ne 0) { return $found }
         } elseif (-not $Want.Contains($rel)) {
             return "$rel is not part of the dataset"
         }
@@ -1151,7 +1144,7 @@ function Find-LbfExtraFile {
 function Assert-LbfExisting {
     param([string]$Root, [string]$Id, [hashtable]$Crate)
     $problem = Get-LbfDirProblem $Root $Crate
-    if ($problem -ne '') { throw (New-LbfError "$Root already exists but is not dataset $Id ($problem); move it aside or fetch with another --out") }
+    if ($problem.Length -ne 0) { throw (New-LbfError "$Root already exists but is not dataset $Id ($problem); move it aside or fetch with another --out") }
 }
 
 # The folder that was published, which every file sits under; root itself if they do not share one.
@@ -1159,13 +1152,13 @@ function Get-LbfDataDir {
     param([string]$Root, $Files)
     $top = ''
     foreach ($f in $Files) {
-        $slash = $f.Rel.IndexOf('/')
+        $slash = $f.Rel.IndexOf([char]'/')
         if ($slash -lt 0) { return $Root }
         $first = $f.Rel.Substring(0, $slash)
-        if ($top -ne '' -and $first -cne $top) { return $Root }
+        if ($top.Length -ne 0 -and -not (Test-LbfSame $first $top)) { return $Root }
         $top = $first
     }
-    if ($top -eq '') { return $Root }
+    if ($top.Length -eq 0) { return $Root }
     return Join-LbfRel $Root $top
 }
 
@@ -1176,7 +1169,7 @@ function Get-LbfStalePartials {
     $prefix = [IO.Path]::GetFileName($Root) + '.partial-'
     $names = New-Object System.Collections.Generic.List[string]
     try { foreach ($e in [IO.Directory]::GetFileSystemEntries($parent)) { $n = [IO.Path]::GetFileName($e); if ($n.StartsWith($prefix, [StringComparison]::Ordinal)) { $names.Add($n) } } } catch { }
-    foreach ($n in (Get-LbfSortedOrdinal $names.ToArray())) {
+    foreach ($n in (Get-LbfSortedUtf8 $names.ToArray())) {
         $p = [IO.Path]::Combine($parent, $n)
         if ([IO.Directory]::Exists($p) -and ([DateTime]::UtcNow - [IO.Directory]::GetLastWriteTimeUtc($p)).TotalHours -gt $Hours) { $stale.Add($p) }
     }
@@ -1187,7 +1180,7 @@ function Get-LbfStalePartials {
 function New-LbfDirectoryAll {
     param([Parameter(Mandatory)][string]$Path)
     $p = $Path
-    while ($p -ne '' -and $null -ne $p) {
+    while (-not [string]::IsNullOrEmpty($p)) {
         if ([IO.Directory]::Exists($p)) { break }
         if ([IO.File]::Exists($p)) { throw (New-LbfError "mkdir ${p}: not a directory") }
         $p = [IO.Path]::GetDirectoryName($p)
@@ -1231,7 +1224,7 @@ function Get-LbfLocalNameProblems {
         $rels.Add($f.Rel)
         if ($Goos -eq 'windows') {
             $p = Get-LbfNameProblem $f.Rel
-            if ($p -ne '') { $problems.Add("$($f.Rel): $p") }
+            if ($p.Length -ne 0) { $problems.Add("$($f.Rel): $p") }
         }
         if (Test-LbfClashesWithCrate $f.Rel $fold) { $problems.Add("$($f.Rel): would be replaced by the dataset's crate, which is saved beside it") }
     }
@@ -1283,7 +1276,7 @@ function Invoke-LbfDownload {
 
         $total = [long]0
         $hashed = 0
-        foreach ($f in $files) { $total += $f.Size; if ($f.SHA256 -ne '') { $hashed++ } }
+        foreach ($f in $files) { $total += $f.Size; if (-not [string]::IsNullOrEmpty($f.SHA256)) { $hashed++ } }
         Write-LbfLog "Downloading $($files.Count) files ($(Format-LbfBytes $total)) to $root`n"
         if ($hashed -lt $files.Count) {
             Write-LbfLog "[verify] $($files.Count - $hashed) of $($files.Count) files have no checksum in the crate (published before lbf recorded them); only their sizes are checked`n"

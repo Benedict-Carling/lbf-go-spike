@@ -11,7 +11,6 @@ $script:CaseInsensitiveFs = $script:OnWindows -or (Test-Path -LiteralPath '/Syst
 $script:NameSuspect = New-Object System.Text.RegularExpressions.Regex ('[\\:*?"<>|\x00-\x1F\x7F-\x9F\uD800-\uDFFF]|[. ](/|\z)|(\A|/)(con|prn|aux|nul|com|lpt)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
 $script:WindowsReserved = New-Object System.Text.RegularExpressions.Regex ('\A([cC][oO][nN]|[pP][rR][nN]|[aA][uU][xX]|[nN][uU][lL]|[cC][oO][mM][1-9\u00B9\u00B2\u00B3]|[lL][pP][tT][1-9\u00B9\u00B2\u00B3]|[cC][oO][nN][iI][nN]\$|[cC][oO][nN][oO][uU][tT]\$)\z')
 $script:BadUtf16 = New-Object System.Text.RegularExpressions.Regex ('[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]')
-$script:HighChars = New-Object System.Text.RegularExpressions.Regex ('[\uD800-\uFFFF]')
 $script:ControlChars = New-Object System.Text.RegularExpressions.Regex ('[\x00-\x1F\x7F-\x9F]')
 
 # Where Unicode case folding differs from lower(upper(c)), as cases.Fold does it.
@@ -55,7 +54,7 @@ function New-LbfId {
 
 function Test-LbfExcluded {
     param([string]$Name)
-    return $Name -ceq '.DS_Store' -or $Name.StartsWith('._', [StringComparison]::Ordinal)
+    return [string]::Equals($Name, '.DS_Store', [StringComparison]::Ordinal) -or $Name.StartsWith('._', [StringComparison]::Ordinal)
 }
 
 # A path .NET Framework can open however long it is.
@@ -90,16 +89,16 @@ function Get-LbfCleanPath {
     $volLen = Get-LbfVolumeLength $Path
     $vol = $Path.Substring(0, $volLen)
     $rest = $Path.Substring($volLen)
-    if ($rest -eq '') {
+    if ($rest.Length -eq 0) {
         if ($volLen -gt 1 -and $vol[1] -ne ':') { return $vol.Replace('/', '\') }
         return $vol + '.'
     }
     $rooted = Test-LbfSep $rest[0]
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($part in ($rest -split $script:SepPattern)) {
-        if ($part -eq '' -or $part -eq '.') { continue }
-        if ($part -eq '..') {
-            if ($out.Count -gt 0 -and $out[$out.Count - 1] -ne '..') { $out.RemoveAt($out.Count - 1) }
+        if ($part.Length -eq 0 -or (Test-LbfSame $part '.')) { continue }
+        if (Test-LbfSame $part '..') {
+            if ($out.Count -gt 0 -and -not (Test-LbfSame $out[$out.Count - 1] '..')) { $out.RemoveAt($out.Count - 1) }
             elseif (-not $rooted) { $out.Add('..') }
             continue
         }
@@ -107,21 +106,21 @@ function Get-LbfCleanPath {
     }
     $s = [string]::Join($script:PathSep, $out.ToArray())
     if ($rooted) { $s = $script:PathSep + $s }
-    if ($s -eq '') { $s = '.' }
+    if ($s.Length -eq 0) { $s = '.' }
     if ($script:OnWindows) { $vol = $vol.Replace('/', '\') }
     return $vol + $s
 }
 
 function Get-LbfBase {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
-    if ($Path -eq '') { return '.' }
+    if ($Path.Length -eq 0) { return '.' }
     $p = $Path
     while ($p.Length -gt 0 -and (Test-LbfSep $p[$p.Length - 1])) { $p = $p.Substring(0, $p.Length - 1) }
     $p = $p.Substring((Get-LbfVolumeLength $p))
     $i = $p.Length - 1
     while ($i -ge 0 -and -not (Test-LbfSep $p[$i])) { $i-- }
     $p = $p.Substring($i + 1)
-    if ($p -eq '') { return $script:PathSep }
+    if ($p.Length -eq 0) { return $script:PathSep }
     return $p
 }
 
@@ -131,13 +130,13 @@ function Get-LbfDir {
     $i = $Path.Length - 1
     while ($i -ge $volLen -and -not (Test-LbfSep $Path[$i])) { $i-- }
     $dir = Get-LbfCleanPath ($Path.Substring($volLen, $i + 1 - $volLen))
-    if ($dir -eq '.' -and $volLen -gt 2) { return $Path.Substring(0, $volLen) }
+    if ((Test-LbfSame $dir '.') -and $volLen -gt 2) { return $Path.Substring(0, $volLen) }
     return $Path.Substring(0, $volLen) + $dir
 }
 
 function Join-LbfPath {
     param([string]$A, [string]$B)
-    if ($A -eq '') { return Get-LbfCleanPath $B }
+    if ($A.Length -eq 0) { return Get-LbfCleanPath $B }
     return Get-LbfCleanPath ($A + $script:PathSep + $B)
 }
 
@@ -199,11 +198,11 @@ function Resolve-LbfSymlinks {
         while ($end -lt $Path.Length -and -not (Test-LbfSep $Path[$end])) { $end++ }
         if ($end -eq $start) { break }
         $part = $Path.Substring($start, $end - $start)
-        if ($part -eq '.') { $start = $end; continue }
-        if ($part -eq '..') {
+        if (Test-LbfSame $part '.') { $start = $end; continue }
+        if (Test-LbfSame $part '..') {
             $r = $dest.Length - 1
             while ($r -ge $volLen -and -not (Test-LbfSep $dest[$r])) { $r-- }
-            if ($r -lt $volLen -or $dest.Substring($r + 1) -eq '..') {
+            if ($r -lt $volLen -or (Test-LbfSame $dest.Substring($r + 1) '..')) {
                 if ($dest.Length -gt $volLen) { $dest += $script:PathSep }
                 $dest += '..'
             } else {
@@ -258,16 +257,16 @@ function Get-LbfStoredCase {
     $vol = $Path.Substring(0, $volLen)
     if ($volLen -eq 2) { $vol = $vol.ToUpperInvariant() }
     $rest = $Path.Substring($volLen)
-    if ($rest -eq '' -or $rest -eq '.' -or $rest -eq '\') { return $vol + $rest }
+    if (Test-LbfIn $rest '', '.', '\') { return $vol + $rest }
     $parts = $rest.Split([char]'\')
     $built = $vol
     $out = New-Object System.Collections.Generic.List[string]
     for ($i = 0; $i -lt $parts.Length; $i++) {
         $p = $parts[$i]
-        if ($p -eq '' -and $i -eq 0) { $built += '\'; continue }
-        if ($p -eq '..' -or $p -eq '.') { $out.Add($p); $built = $built.TrimEnd('\') + '\' + $p; continue }
+        if ($p.Length -eq 0 -and $i -eq 0) { $built += '\'; continue }
+        if (Test-LbfIn $p '..', '.') { $out.Add($p); $built = $built.TrimEnd('\') + '\' + $p; continue }
         $parent = $built
-        if ($parent -eq $vol) { $parent = $vol + '\' }
+        if (Test-LbfSame $parent $vol) { $parent = $vol + '\' }
         $name = $p
         try {
             $found = @([IO.Directory]::GetFileSystemEntries((Get-LbfIoPath $parent), $p))
@@ -288,12 +287,12 @@ function Get-LbfRealPath {
     if ($volLen -lt $Path.Length -and (Test-LbfSep $Path[$volLen])) { $volLen++ }
     $dest = $Path.Substring(0, $volLen)
     $todo = New-Object System.Collections.Generic.Queue[string]
-    foreach ($p in ($Path.Substring($volLen) -split $script:SepPattern)) { if ($p -ne '') { $todo.Enqueue($p) } }
+    foreach ($p in ($Path.Substring($volLen) -split $script:SepPattern)) { if ($p.Length -ne 0) { $todo.Enqueue($p) } }
     $hops = 0
     while ($todo.Count -gt 0) {
         $part = $todo.Dequeue()
-        if ($part -eq '.') { continue }
-        if ($part -eq '..') { $dest = Get-LbfDir $dest; continue }
+        if (Test-LbfSame $part '.') { continue }
+        if (Test-LbfSame $part '..') { $dest = Get-LbfDir $dest; continue }
         if ($dest.Length -gt 0 -and -not (Test-LbfSep $dest[$dest.Length - 1])) { $dest += $script:PathSep }
         $dest += $part
         $attr = Get-LbfLinkAttributes $dest
@@ -303,7 +302,7 @@ function Get-LbfRealPath {
         if (++$hops -gt 255) { throw (New-LbfError 'EvalSymlinks: too many links') }
         $link = $info.Target
         $rest = New-Object System.Collections.Generic.List[string]
-        foreach ($p in ($link -split $script:SepPattern)) { if ($p -ne '') { $rest.Add($p) } }
+        foreach ($p in ($link -split $script:SepPattern)) { if ($p.Length -ne 0) { $rest.Add($p) } }
         while ($todo.Count -gt 0) { $rest.Add($todo.Dequeue()) }
         $v = Get-LbfVolumeLength $link
         if ($v -gt 0) {
@@ -374,19 +373,6 @@ function Get-LbfDatasetFiles {
     return @{ Source = $source; Files = $files }
 }
 
-# Sorts by UTF-8 bytes, as Go's strings.Compare does, which differs from UTF-16 order only above U+D7FF.
-function Get-LbfUtf8SortKey {
-    param([string]$Text)
-    if (-not $script:HighChars.IsMatch($Text)) { return $Text }
-    $chars = $Text.ToCharArray()
-    for ($i = 0; $i -lt $chars.Length; $i++) {
-        $c = [int]$chars[$i]
-        if ($c -ge 0xD800 -and $c -le 0xDFFF) { $chars[$i] = [char]($c + 0x2000) }
-        elseif ($c -ge 0xE000) { $chars[$i] = [char]($c - 0x800) }
-    }
-    return New-Object string (, $chars)
-}
-
 function Sort-LbfFiles {
     param([System.Collections.Generic.List[hashtable]]$Files)
     $arr = $Files.ToArray()
@@ -448,7 +434,7 @@ function Invoke-LbfWalk {
                 Invoke-LbfWalk $State $path $r ($Real + $script:PathSep + $name) $Ancestors
                 continue
             }
-            if ($name -ceq '.DS_Store' -or $name.StartsWith('._', [StringComparison]::Ordinal)) { continue }
+            if ([string]::Equals($name, '.DS_Store', [StringComparison]::Ordinal) -or $name.StartsWith('._', [StringComparison]::Ordinal)) { continue }
             $f = @{ Path = $path; Rel = $r; Size = $e.Length; ModTime = $e.LastWriteTimeUtc; SHA256 = '' }
             if ($script:OnUnix -and $e.Length -eq 0) {
                 $State.Pending.Add(@{ At = $State.Problems.Count; File = $f })
@@ -588,7 +574,7 @@ function Get-LbfNameKey {
 function Test-LbfClashesWithCrate {
     param([string]$Rel, [bool]$Fold)
     $top = $Rel.Split([char]'/')[0]
-    return $top -ceq $script:CrateName -or ($Fold -and (Get-LbfNameKey $top) -ceq (Get-LbfNameKey $script:CrateName))
+    return (Test-LbfSame $top $script:CrateName) -or ($Fold -and (Test-LbfSame (Get-LbfNameKey $top) (Get-LbfNameKey $script:CrateName)))
 }
 
 # Go's encodingProblem: Azure names are UTF-8 and Linux allows 255 bytes per name.
@@ -638,8 +624,8 @@ function Get-LbfFileProblems {
         $rels[$i] = $rel
         if ($rel.Length -gt 85 -or $script:NameSuspect.IsMatch($rel) -or $script:HighChars.IsMatch($rel)) {
             $p = Get-LbfEncodingProblem $rel
-            if ($p -eq '') { $p = Get-LbfNameProblem $rel }
-            if ($p -ne '') { $problems.Add("${rel}: $p") }
+            if ($p.Length -eq 0) { $p = Get-LbfNameProblem $rel }
+            if ($p.Length -ne 0) { $problems.Add("${rel}: $p") }
         }
         try {
             $fs = [IO.File]::Open((Get-LbfIoPath $f.Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
@@ -679,11 +665,11 @@ function Get-LbfSameNameProblems {
             $other = $null
             if (-not $seen.TryGetValue($key, [ref]$other)) {
                 $seen[$key] = $path
-            } elseif ($other -cne $path) {
+            } elseif (-not [string]::Equals($other, $path, [StringComparison]::Ordinal)) {
                 $how = 'differ only in case'
                 $a = $other; $b = $path
                 try { $a = $other.Normalize([Text.NormalizationForm]::FormC); $b = $path.Normalize([Text.NormalizationForm]::FormC) } catch { }
-                if ($a -ceq $b) { $how = 'are the same name in different Unicode forms' }
+                if ([string]::Equals($a, $b, [StringComparison]::Ordinal)) { $how = 'are the same name in different Unicode forms' }
                 $p = "$other and $path $how, so $Where cannot hold both"
                 if ($reported.Add($p)) { $problems.Add($p) }
                 break

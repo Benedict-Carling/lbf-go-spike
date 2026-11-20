@@ -165,10 +165,10 @@ function Get-LbfSasPairs {
     $byKey = New-Object 'System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[string]]' ([StringComparer]::Ordinal)
     $order = New-Object System.Collections.Generic.List[string]
     foreach ($part in ($Sas -split '&')) {
-        if ($part -eq '') { continue }
+        if ($part.Length -eq 0) { continue }
         $k = $part
         $v = ''
-        $eq = $part.IndexOf('=')
+        $eq = $part.IndexOf([char]'=')
         if ($eq -ge 0) { $k = $part.Substring(0, $eq); $v = $part.Substring($eq + 1) }
         $k = ConvertFrom-LbfQueryEscape $k
         $v = ConvertFrom-LbfQueryEscape $v
@@ -187,7 +187,7 @@ function New-LbfBlobRequest {
     param([Parameter(Mandatory)][hashtable]$Target, [AllowNull()][string]$Blob, [string]$Method = 'GET', [object[]]$Params = @(),
         [hashtable]$Headers = @{}, [byte[]]$Body = $null, [int]$Offset = 0, [int]$Count = -1, [string]$ContentType = '', [switch]$Stream)
     $display = Get-LbfContainerUrl $Target
-    if ($null -ne $Blob -and $Blob -ne '') { $display += '/' + (ConvertTo-LbfPathEscape $Blob) }
+    if (-not [string]::IsNullOrEmpty($Blob)) { $display += '/' + (ConvertTo-LbfPathEscape $Blob) }
     $query = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($kv in (Get-LbfSasPairs $Target.SAS)) { $query[$kv[0]] = $kv[1] }
     for ($i = 0; $i + 1 -lt $Params.Count; $i += 2) {
@@ -196,12 +196,12 @@ function New-LbfBlobRequest {
     }
     $keys = New-Object string[] $query.Count
     $query.Keys.CopyTo($keys, 0)
-    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    $keys = Get-LbfSortedUtf8 $keys
     $pairs = New-Object string[] $keys.Length
     for ($i = 0; $i -lt $keys.Length; $i++) { $pairs[$i] = $query[$keys[$i]] }
     $q = ($pairs -join '&').Replace('+', '%20')
     $url = $display
-    if ($q -ne '') { $url += '?' + $q }
+    if ($q.Length -ne 0) { $url += '?' + $q }
     if ($null -ne $Body -and $Count -lt 0) { $Count = $Body.Length - $Offset }
     return @{
         Method = $Method; Url = $url; Display = $display; Headers = $Headers; Body = $Body; Offset = $Offset; Count = $Count
@@ -399,7 +399,7 @@ function New-LbfTransportError {
     $m = $Op.Request.Method
     $verb = $m.Substring(0, 1) + $m.Substring(1).ToLowerInvariant()
     $e = New-LbfError "$verb $(Format-LbfQuote $Op.Request.Url): $Reason"
-    if ($Reason -eq 'context canceled') { $e.Data['lbfCanceled'] = $true }
+    if (Test-LbfSame $Reason 'context canceled') { $e.Data['lbfCanceled'] = $true }
     return $e
 }
 
@@ -413,7 +413,7 @@ function Get-LbfHostPort {
             if ($addrs.Count -gt 0) { $h = $addrs[0].ToString() }
         } catch { }
     }
-    if ($h.Contains(':') -and -not $h.StartsWith('[')) { $h = "[$h]" }
+    if ($h.Contains(':') -and -not $h.StartsWith('[', [StringComparison]::Ordinal)) { $h = "[$h]" }
     return @{ Host = $u.Host; HostPort = "${h}:$($u.Port)" }
 }
 
@@ -463,7 +463,7 @@ function Get-LbfNetReason {
 function Get-LbfResponseErrorCode {
     param([hashtable]$Result)
     $vals = $null
-    if ($Result.Response.Headers.TryGetValues('x-ms-error-code', [ref]$vals)) { foreach ($v in $vals) { if ($v -ne '') { return $v } } }
+    if ($Result.Response.Headers.TryGetValues('x-ms-error-code', [ref]$vals)) { foreach ($v in $vals) { if ($v.Length -ne 0) { return $v } } }
     $body = $Result.Body
     if ($null -eq $body -or $body.Length -eq 0) { return '' }
     $text = $script:Utf8NoBom.GetString($body)
@@ -513,7 +513,7 @@ function Test-LbfAzCode {
     param([Parameter(Mandatory)]$ErrorOrException, [Parameter(Mandatory)][string[]]$Codes)
     $e = Get-LbfException $ErrorOrException
     if (-not $e.Data.Contains('azCode')) { return $false }
-    return $Codes -ccontains [string]$e.Data['azCode']
+    return Test-LbfIn ([string]$e.Data['azCode']) $Codes
 }
 
 # Go's fmt.Errorf("prefix: %w", err): the cause's code and exit code carry through.
@@ -534,9 +534,27 @@ function Test-LbfErrorFlag {
 
 # ---------- One dataset's blobs ----------
 
+# Go's strings.EqualFold: simple Unicode case folding, under which the Kelvin sign is k but dotted and dotless I fold only to themselves.
+function Test-LbfEqualFold {
+    param([AllowEmptyString()][string]$A, [AllowEmptyString()][string]$B)
+    if ([string]::Equals($A, $B, [StringComparison]::OrdinalIgnoreCase) -and $A -cmatch '\A[\x00-\x7F]*\z') { return $true }
+    $ra = Get-LbfRunes $A
+    $rb = Get-LbfRunes $B
+    if ($ra.Length -ne $rb.Length) { return $false }
+    for ($i = 0; $i -lt $ra.Length; $i++) {
+        $x = $ra[$i]; $y = $rb[$i]
+        if ($x -eq $y) { continue }
+        if ($x -eq 0x130 -or $x -eq 0x131 -or $y -eq 0x130 -or $y -eq 0x131) { return $false }
+        $fx = ([char]::ConvertFromUtf32($x)).ToUpperInvariant().ToLowerInvariant()
+        $fy = ([char]::ConvertFromUtf32($y)).ToUpperInvariant().ToLowerInvariant()
+        if (-not [string]::Equals($fx, $fy, [StringComparison]::Ordinal)) { return $false }
+    }
+    return $true
+}
+
 function Get-LbfMetadataValue {
     param($Metadata, [string]$Key)
-    foreach ($k in $Metadata.Keys) { if ([string]::Equals([string]$k, $Key, [StringComparison]::OrdinalIgnoreCase)) { return [string]$Metadata[$k] } }
+    foreach ($k in $Metadata.Keys) { if (Test-LbfEqualFold ([string]$k) $Key) { return [string]$Metadata[$k] } }
     return ''
 }
 
@@ -557,7 +575,7 @@ function Get-LbfStoredFiles {
     $marker = ''
     while ($true) {
         $params = @('restype', 'container', 'comp', 'list', 'include', 'metadata', 'prefix', $prefix)
-        if ($marker -ne '') { $params += @('marker', $marker) }
+        if ($marker.Length -ne 0) { $params += @('marker', $marker) }
         try {
             $r = Invoke-LbfBlobRequest (New-LbfBlobRequest -Target $Target -Blob $null -Params $params -Headers @{ Accept = 'application/xml' }) -Token $Token
         } catch {
@@ -567,23 +585,23 @@ function Get-LbfStoredFiles {
         foreach ($blob in $doc.DocumentElement.SelectNodes('Blobs/Blob')) {
             $nameNode = $blob.SelectSingleNode('Name')
             $name = $nameNode.InnerText
-            if ($nameNode.GetAttribute('Encoded') -eq 'true') {
+            if (Test-LbfSame $nameNode.GetAttribute('Encoded') 'true') {
                 $decoded = ConvertFrom-LbfQueryEscape $name
                 if ($null -ne $decoded) { $name = $decoded }
             }
-            $meta = @{}
+            $meta = New-LbfMap
             $metaNode = $blob.SelectSingleNode('Metadata')
             if ($null -ne $metaNode) { foreach ($c in $metaNode.ChildNodes) { if ($c.NodeType -eq [System.Xml.XmlNodeType]::Element) { $meta[$c.LocalName] = $c.InnerText } } }
-            if ((Get-LbfMetadataValue $meta 'hdi_isfolder') -eq 'true') { continue }
+            if (Test-LbfSame (Get-LbfMetadataValue $meta 'hdi_isfolder') 'true') { continue }
             $size = [long]0
             $len = $blob.SelectSingleNode('Properties/Content-Length')
-            if ($null -ne $len -and $len.InnerText -ne '') { $size = [long]::Parse($len.InnerText, $script:Invariant) }
+            if ($null -ne $len -and $len.InnerText.Length -ne 0) { $size = [long]::Parse($len.InnerText, $script:Invariant) }
             $rel = $name
             if ($rel.StartsWith($prefix, [StringComparison]::Ordinal)) { $rel = $rel.Substring($prefix.Length) }
             $stored[$rel] = @{ Rel = $rel; Size = $size; SHA256 = (Get-LbfMetadataValue $meta 'sha256') }
         }
         $next = $doc.DocumentElement.SelectSingleNode('NextMarker')
-        if ($null -eq $next -or $next.InnerText -eq '') { break }
+        if ($null -eq $next -or $next.InnerText.Length -eq 0) { break }
         $marker = $next.InnerText
     }
     return , $stored
@@ -605,7 +623,7 @@ function Get-LbfBlobProperties {
 function ConvertFrom-LbfPropertiesResult {
     param([hashtable]$Result)
     $resp = $Result.Response
-    $meta = @{}
+    $meta = New-LbfMap
     foreach ($h in $resp.Headers) {
         if ($h.Key.StartsWith('x-ms-meta-', [StringComparison]::OrdinalIgnoreCase)) { $meta[$h.Key.Substring(10)] = ($h.Value -join ',') }
     }
@@ -663,7 +681,7 @@ function Invoke-LbfCheckAccess {
             }
             throw (New-LbfWrappedError "checking access to $($Target.Account)/$($Target.Container): " $_)
         }
-        if ($Mode -eq 'upload') { Test-LbfWriteAccess $Target }
+        if (Test-LbfSame $Mode 'upload') { Test-LbfWriteAccess $Target }
     } finally {
         Set-LbfStatus ''
     }

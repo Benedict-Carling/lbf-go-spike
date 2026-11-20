@@ -79,7 +79,7 @@ func psRunScript(t *testing.T, script string, env map[string]string, args ...str
 	ps := powershell(t)
 	quoted := make([]string, len(args))
 	for i, a := range args {
-		quoted[i] = "'" + strings.ReplaceAll(a, "'", "''") + "'"
+		quoted[i] = "'" + psSingleQuotes.Replace(a) + "'"
 	}
 	command := fmt.Sprintf("& '%s' %s; exit $LASTEXITCODE", strings.ReplaceAll(script, "'", "''"), strings.Join(quoted, " "))
 	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
@@ -90,7 +90,7 @@ func psRunScript(t *testing.T, script string, env map[string]string, args ...str
 	return r
 }
 
-func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+func psQuote(s string) string { return "'" + psSingleQuotes.Replace(s) + "'" }
 
 // Each crate's flattenCrate result as JSON, or ERR and the error.
 func goFlattened(raw []byte) string {

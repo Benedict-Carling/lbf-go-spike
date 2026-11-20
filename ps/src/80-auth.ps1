@@ -90,27 +90,25 @@ function ConvertTo-LbfAuthQueryEscape {
 # Go's url.Values.Encode: keys sorted, each value query-escaped.
 function ConvertTo-LbfAuthQueryString {
     param([Parameter(Mandatory)][hashtable]$Values)
-    [string[]]$keys = @($Values.Keys)
-    [Array]::Sort($keys, [StringComparer]::Ordinal)
     $parts = New-Object System.Collections.Generic.List[string]
-    foreach ($k in $keys) { $parts.Add((ConvertTo-LbfAuthQueryEscape $k) + '=' + (ConvertTo-LbfAuthQueryEscape ([string]$Values[$k]))) }
+    foreach ($k in (Get-LbfSortedUtf8 @($Values.Keys))) { $parts.Add((ConvertTo-LbfAuthQueryEscape $k) + '=' + (ConvertTo-LbfAuthQueryEscape ([string]$Values[$k]))) }
     return $parts -join '&'
 }
 
 function ConvertFrom-LbfFormEncoded {
     param([AllowEmptyString()][string]$Text)
-    $form = @{}
-    if ($Text -eq '') { return $form }
-    foreach ($pair in ($Text -split '&')) {
-        if ($pair -eq '') { continue }
-        if ($pair.Contains(';')) { throw (New-LbfError 'invalid semicolon separator in query') }
-        $i = $pair.IndexOf('=')
+    $form = New-LbfMap
+    if ($Text.Length -eq 0) { return , $form }
+    foreach ($pair in $Text.Split([char]'&')) {
+        if ($pair.Length -eq 0) { continue }
+        if ($pair.IndexOf([char]';') -ge 0) { throw (New-LbfError 'invalid semicolon separator in query') }
+        $i = $pair.IndexOf([char]'=')
         if ($i -ge 0) { $k = $pair.Substring(0, $i); $v = $pair.Substring($i + 1) } else { $k = $pair; $v = '' }
         $k = ConvertFrom-LbfAuthQueryEscape $k
         $v = ConvertFrom-LbfAuthQueryEscape $v
         if (-not $form.ContainsKey($k)) { $form[$k] = $v }
     }
-    return $form
+    return , $form
 }
 
 function ConvertFrom-LbfAuthQueryEscape {
@@ -137,6 +135,7 @@ function ConvertTo-LbfBase64Url {
 
 function ConvertFrom-LbfBase64Url {
     param([AllowEmptyString()][string]$Text)
+    $Text = $Text.Replace("`r", '').Replace("`n", '')
     if ($Text -cmatch '[^A-Za-z0-9_-]') { return $null }
     $s = $Text.Replace('-', '+').Replace('_', '/')
     switch ($s.Length % 4) {
@@ -156,13 +155,26 @@ function ConvertTo-LbfHtmlEscape {
 # The claims of a JWT, or $null when it is not one.
 function Get-LbfJwtClaims {
     param([AllowEmptyString()][string]$Token)
-    $parts = $Token.Split('.')
+    $parts = $Token.Split([char]'.')
     if ($parts.Count -ne 3) { return $null }
     $raw = ConvertFrom-LbfBase64Url $parts[1]
     if ($null -eq $raw) { return $null }
     try { $claims = ConvertFrom-LbfJson ($script:Utf8NoBom.GetString($raw)) -LastWins } catch { return $null }
     if ($claims -isnot [System.Collections.Specialized.OrderedDictionary]) { return $null }
     return , $claims
+}
+
+# encoding/json's foldName as far as ASCII field names need it: only the Kelvin sign and long s fold onto ASCII letters.
+function ConvertTo-LbfJsonFoldName {
+    param([AllowEmptyString()][string]$Name)
+    $chars = $Name.ToCharArray()
+    for ($i = 0; $i -lt $chars.Length; $i++) {
+        $c = [int]$chars[$i]
+        if ($c -ge 0x61 -and $c -le 0x7A) { $chars[$i] = [char]($c - 0x20) }
+        elseif ($c -eq 0x212A) { $chars[$i] = [char]0x4B }
+        elseif ($c -eq 0x17F) { $chars[$i] = [char]0x53 }
+    }
+    return New-Object string (, $chars)
 }
 
 function Get-LbfClaimString {
@@ -175,7 +187,7 @@ function Get-LbfClaimString {
 
 function Test-LbfTenantId {
     param([AllowEmptyString()][string]$Tenant)
-    return $Tenant -cmatch '^[A-Za-z0-9.-]+$'
+    return $Tenant -cmatch '\A[A-Za-z0-9.-]+\z'
 }
 
 function Assert-LbfTenantId {
@@ -192,12 +204,12 @@ function Find-LbfExecutable {
     if ($script:OnWindows) {
         $pathext = [Environment]::GetEnvironmentVariable('PATHEXT')
         if ([string]::IsNullOrEmpty($pathext)) { $pathext = '.com;.exe;.bat;.cmd' }
-        $exts = @($pathext.ToLowerInvariant().Split(';') | Where-Object { $_ -ne '' -and $_.StartsWith('.') })
+        $exts = @($pathext.ToLowerInvariant().Split([char]';') | Where-Object { $_.Length -gt 0 } | ForEach-Object { if ($_.StartsWith('.', [StringComparison]::Ordinal)) { $_ } else { '.' + $_ } })
         if ([IO.Path]::HasExtension($Name)) { $exts = @('') + $exts }
     }
     foreach ($dir in $path.Split([IO.Path]::PathSeparator)) {
         if ($script:OnWindows) { $dir = $dir.Trim('"') }
-        if ($dir -eq '') { $dir = '.' }
+        if ($dir.Length -eq 0) { $dir = '.' }
         foreach ($ext in $exts) {
             $candidate = [IO.Path]::Combine($dir, $Name + $ext)
             if (-not [IO.File]::Exists($candidate)) { continue }
@@ -339,7 +351,7 @@ function Format-LbfGoIndent {
 # The error code azcore's ResponseError reports.
 function Get-LbfAuthErrorCode {
     param([Parameter(Mandatory)][hashtable]$Response)
-    if ($Response.Headers.ContainsKey('x-ms-error-code') -and $Response.Headers['x-ms-error-code'] -ne '') { return $Response.Headers['x-ms-error-code'] }
+    if ($Response.Headers.ContainsKey('x-ms-error-code') -and ([string]$Response.Headers['x-ms-error-code']).Length -gt 0) { return $Response.Headers['x-ms-error-code'] }
     if ($Response.Body.Length -eq 0) { return '' }
     $code = ''
     $obj = $null
@@ -350,7 +362,7 @@ function Get-LbfAuthErrorCode {
         elseif ($obj.Contains('odata.error')) { $inner = $obj['odata.error'] }
         if ($inner -is [System.Collections.Specialized.OrderedDictionary] -and $inner.Contains('code') -and $inner['code'] -is [string]) { $code = $inner['code'] }
     }
-    if ($code -ne '') { return $code }
+    if ($code.Length -gt 0) { return $code }
     $m = [regex]::Match($Response.Text, '<(?:[0-9A-Za-z_]+:)?[c|C]ode>[\t\n\f\r ]*([0-9A-Za-z_]+)[\t\n\f\r ]*</(?:[0-9A-Za-z_]+:)?[c|C]ode>')
     if ($m.Success) { return $m.Groups[1].Value }
     return ''
@@ -372,7 +384,7 @@ function Format-LbfAzureResponseError {
     [void]$sb.Append("$script:HttpRule`n")
     [void]$sb.Append("RESPONSE $($Response.Status): $(Get-LbfHttpStatusLine $Response)`n")
     $code = Get-LbfAuthErrorCode $Response
-    if ($code -ne '') { [void]$sb.Append("ERROR CODE: $code`n") } else { [void]$sb.Append("ERROR CODE UNAVAILABLE`n") }
+    if ($code.Length -gt 0) { [void]$sb.Append("ERROR CODE: $code`n") } else { [void]$sb.Append("ERROR CODE UNAVAILABLE`n") }
     [void]$sb.Append("$script:HttpRule`n")
     if ($Response.Body.Length -gt 0) { [void]$sb.Append((Format-LbfGoIndent $Response.Text)).Append("`n") }
     else { [void]$sb.Append("Response contained no body`n") }
@@ -416,7 +428,7 @@ function Get-LbfUserConfigDir {
         if ([string]::IsNullOrEmpty($h)) { throw (New-LbfError 'neither $XDG_CONFIG_HOME nor $HOME are defined') }
         return $h.TrimEnd('/') + '/.config'
     }
-    if (-not $x.StartsWith('/')) { throw (New-LbfError 'path in $XDG_CONFIG_HOME is relative') }
+    if (-not $x.StartsWith('/', [StringComparison]::Ordinal)) { throw (New-LbfError 'path in $XDG_CONFIG_HOME is relative') }
     return $x
 }
 
@@ -432,9 +444,10 @@ function Read-LbfAuthRecord {
     try { $obj = ConvertFrom-LbfJson $raw -LastWins } catch { return $null }
     if ($obj -isnot [System.Collections.Specialized.OrderedDictionary]) { return $null }
     $rec = @{ Authority = ''; ClientId = ''; HomeAccountId = ''; TenantId = ''; Username = ''; Version = '' }
-    $fields = @{ authority = 'Authority'; clientid = 'ClientId'; homeaccountid = 'HomeAccountId'; tenantid = 'TenantId'; username = 'Username'; version = 'Version' }
+    $fields = New-LbfMap
+    foreach ($f in @('Authority', 'ClientId', 'HomeAccountId', 'TenantId', 'Username', 'Version')) { $fields[(ConvertTo-LbfJsonFoldName $f)] = $f }
     foreach ($k in $obj.Keys) {
-        $f = $fields[([string]$k).ToLowerInvariant()]
+        $f = $fields[(ConvertTo-LbfJsonFoldName ([string]$k))]
         if ($null -eq $f) { continue }
         $v = $obj[$k]
         if ($null -eq $v) { continue }
@@ -574,7 +587,7 @@ function Get-LbfBrowserUnavailable {
 function Assert-LbfBrowser {
     param([string]$Tenant)
     $reason = Get-LbfBrowserUnavailable
-    if ($reason -ne '') {
+    if ($reason.Length -gt 0) {
         throw (New-LbfError "cannot sign in with a browser here: $reason`nSign in with 'az login --tenant $Tenant' first ('az login --tenant $Tenant --use-device-code' works over SSH and on HPC), or use --sas-env with a file from 'lbf mint-sas' run on a machine with a browser")
     }
 }
@@ -597,8 +610,8 @@ function Get-LbfEntraEndpoints {
     try { $doc = ConvertFrom-LbfJson $r.Text -LastWins } catch { $doc = $null }
     $authorize = Get-LbfClaimString $doc 'authorization_endpoint'
     $token = Get-LbfClaimString $doc 'token_endpoint'
-    if ($authorize -eq '') { throw (New-LbfError "${script:BrowserCredName}: ResolveEndpoints(): TenantDiscoveryResponse: authorize endpoint was not found in the openid configuration") }
-    if ($token -eq '') { throw (New-LbfError "${script:BrowserCredName}: ResolveEndpoints(): TenantDiscoveryResponse: token endpoint was not found in the openid configuration") }
+    if ($authorize.Length -eq 0) { throw (New-LbfError "${script:BrowserCredName}: ResolveEndpoints(): TenantDiscoveryResponse: authorize endpoint was not found in the openid configuration") }
+    if ($token.Length -eq 0) { throw (New-LbfError "${script:BrowserCredName}: ResolveEndpoints(): TenantDiscoveryResponse: token endpoint was not found in the openid configuration") }
     return @{ Authorize = $authorize.Replace('{tenant}', $Tenant); Token = $token.Replace('{tenant}', $Tenant) }
 }
 
@@ -611,8 +624,8 @@ function Invoke-LbfTokenRequest {
     $doc = $null
     try { $doc = ConvertFrom-LbfJson $r.Text -LastWins } catch { throw (New-LbfError "${script:BrowserCredName}: $((Get-LbfException $_).Data['jsonDetail'])") }
     $err = Get-LbfClaimString $doc 'error'
-    if ($err -ne '') { throw (New-LbfError "${script:BrowserCredName}: ${err}: $(Get-LbfClaimString $doc 'error_description')") }
-    if ((Get-LbfClaimString $doc 'access_token') -eq '') { throw (New-LbfError "${script:BrowserCredName}: response is missing access_token") }
+    if ($err.Length -gt 0) { throw (New-LbfError "${script:BrowserCredName}: ${err}: $(Get-LbfClaimString $doc 'error_description')") }
+    if ((Get-LbfClaimString $doc 'access_token').Length -eq 0) { throw (New-LbfError "${script:BrowserCredName}: response is missing access_token") }
     return , $doc
 }
 
@@ -624,9 +637,9 @@ function Add-LbfTokenResponse {
     if ($null -ne $raw) { $n = 0L; if ([long]::TryParse([string]$raw, [ref]$n)) { $seconds = $n } }
     $Credential.Tokens[$Scope] = @{ Token = $Response['access_token']; ExpiresOn = [DateTime]::UtcNow.AddSeconds($seconds) }
     $rt = Get-LbfClaimString $Response 'refresh_token'
-    if ($rt -ne '') {
+    if ($rt.Length -gt 0) {
         $Credential.RefreshToken = $rt
-        if ($Credential.Persist -and $Credential.HomeAccountId -ne '') { Save-LbfLoginTokens -HomeAccountId $Credential.HomeAccountId -RefreshToken $rt }
+        if ($Credential.Persist -and $Credential.HomeAccountId.Length -gt 0) { Save-LbfLoginTokens -HomeAccountId $Credential.HomeAccountId -RefreshToken $rt }
     }
 }
 
@@ -641,20 +654,20 @@ function Get-LbfTokenAccount {
             $ci = ConvertFrom-LbfJson ($script:Utf8NoBom.GetString($info)) -LastWins
             $uid = Get-LbfClaimString $ci 'uid'
             $utid = Get-LbfClaimString $ci 'utid'
-            if ($uid -ne '' -and $utid -ne '') { $homeId = "$uid.$utid" }
+            if ($uid.Length -gt 0 -and $utid.Length -gt 0) { $homeId = "$uid.$utid" }
         } catch { $homeId = '' }
     }
-    if ($homeId -eq '' -and $null -ne $id) { $homeId = "$(Get-LbfClaimString $id 'oid').$(Get-LbfClaimString $id 'tid')" }
+    if ($homeId.Length -eq 0 -and $null -ne $id) { $homeId = "$(Get-LbfClaimString $id 'oid').$(Get-LbfClaimString $id 'tid')" }
     $issuer = Get-LbfClaimString $id 'iss'
     $authority = ''
     $tenant = Get-LbfClaimString $id 'tid'
     $u = $null
     if ([Uri]::TryCreate($issuer, [UriKind]::Absolute, [ref]$u)) {
         $authority = "$($u.Scheme)://$($u.Authority)"
-        if ($tenant -eq '') { $tenant = $u.AbsolutePath.Trim('/') }
+        if ($tenant.Length -eq 0) { $tenant = $u.AbsolutePath.Trim('/') }
     }
     $username = Get-LbfClaimString $id 'preferred_username'
-    if ($username -eq '') { $username = Get-LbfClaimString $id 'upn' }
+    if ($username.Length -eq 0) { $username = Get-LbfClaimString $id 'upn' }
     return @{ HomeAccountId = $homeId; Record = @{ Authority = $authority; ClientId = (Get-LbfClaimString $id 'aud'); HomeAccountId = $homeId; TenantId = $tenant; Username = $username } }
 }
 
@@ -707,19 +720,19 @@ function Receive-LbfRedirect {
     if ($got) { $Conn.Since = [DateTime]::UtcNow }
     $latin = [Text.Encoding]::GetEncoding(28591)
     $text = $latin.GetString($Conn.Data.ToArray())
-    $end = $text.IndexOf("`r`n`r`n")
+    $end = $text.IndexOf("`r`n`r`n", [StringComparison]::Ordinal)
     if ($end -lt 0) { return $null }
     $lines = $text.Substring(0, $end) -split "`r`n"
     $method = ($lines[0] -split ' ')[0]
     $length = 0
     $type = ''
     foreach ($h in $lines) {
-        $i = $h.IndexOf(':')
+        $i = $h.IndexOf([char]':')
         if ($i -lt 0) { continue }
         $name = $h.Substring(0, $i).Trim().ToLowerInvariant()
         $value = $h.Substring($i + 1).Trim()
-        if ($name -eq 'content-length') { [void][int]::TryParse($value, [ref]$length) }
-        if ($name -eq 'content-type') { $type = $value }
+        if ([string]::Equals($name, 'content-length', [StringComparison]::Ordinal)) { [void][int]::TryParse($value, [ref]$length) }
+        if ([string]::Equals($name, 'content-type', [StringComparison]::Ordinal)) { $type = $value }
     }
     if ($text.Length - ($end + 4) -lt $length) { return $null }
     $body = $script:Utf8NoBom.GetString($Conn.Data.ToArray(), $end + 4, $length)
@@ -727,22 +740,22 @@ function Receive-LbfRedirect {
         Send-LbfHttpReply $client 405 'Method Not Allowed' 'text/html; charset=utf-8' $script:GetPage
         return @{ Error = 'response was received via a GET operation, which is not supported' }
     }
-    $form = @{}
-    if ($type.ToLowerInvariant().StartsWith('application/x-www-form-urlencoded')) {
+    $form = New-LbfMap
+    if ($type.ToLowerInvariant().StartsWith('application/x-www-form-urlencoded', [StringComparison]::Ordinal)) {
         try { $form = ConvertFrom-LbfFormEncoded $body }
         catch { return Send-LbfHttpError $client 400 'Bad Request' "failed to parse form data: $(Get-LbfErrorText $_)" }
     }
     $err = [string]$form['error']
-    if ($err -ne '') {
+    if ($err.Length -gt 0) {
         $desc = ConvertTo-LbfHtmlEscape ([string]$form['error_description'])
         Send-LbfHttpReply $client 200 'OK' 'text/html; charset=utf-8' ($script:FailPage -f (ConvertTo-LbfHtmlEscape $err), $desc)
         return @{ Error = $desc }
     }
     $respState = [string]$form['state']
-    if ($respState -eq '') { return Send-LbfHttpError $client 500 'Internal Server Error' "server didn't send OAuth state" }
+    if ($respState.Length -eq 0) { return Send-LbfHttpError $client 500 'Internal Server Error' "server didn't send OAuth state" }
     if (-not [string]::Equals($respState, $State)) { return Send-LbfHttpError $client 500 'Internal Server Error' "mismatched OAuth state, req($State), resp($respState)" }
     $code = [string]$form['code']
-    if ($code -eq '') { return Send-LbfHttpError $client 500 'Internal Server Error' 'authorization code missing in response' }
+    if ($code.Length -eq 0) { return Send-LbfHttpError $client 500 'Internal Server Error' 'authorization code missing in response' }
     Send-LbfHttpReply $client 200 'OK' 'text/html; charset=utf-8' $script:OkPage
     return @{ Code = $code }
 }
@@ -840,7 +853,7 @@ function Invoke-LbfBrowserSignIn {
             code_challenge = $challenge; code_challenge_method = 'S256'; prompt = 'select_account'; response_mode = 'form_post'
         }
         $base = $ep.Authorize
-        $q = $base.IndexOf('?')
+        $q = $base.IndexOf([char]'?')
         if ($q -ge 0) { $base = $base.Substring(0, $q) }
         Open-LbfSignInBrowser ($base + '?' + $query)
         $code = Wait-LbfRedirect $loop.Listeners $state $Deadline
@@ -876,7 +889,7 @@ function Invoke-LbfLogin {
     $canStore = $null -eq (Get-LbfTokenStoreError)
     try {
         Invoke-LbfBrowserSignIn -Credential $cred -Scope $script:ArmScope -Deadline ([DateTime]::UtcNow + $timeout)
-        if ($canStore -and $cred.HomeAccountId -ne '') {
+        if ($canStore -and $cred.HomeAccountId.Length -gt 0) {
             $cred.Persist = $true
             try { Save-LbfLoginTokens -HomeAccountId $cred.HomeAccountId -RefreshToken $cred.RefreshToken }
             catch { throw (New-LbfError "${script:BrowserCredName}: $(Get-LbfErrorText $_)") }
@@ -899,7 +912,7 @@ function Get-LbfSavedLogin {
     Assert-LbfTenantId $Tenant
     $cred = New-LbfBrowserCredential -Tenant $Tenant -SilentOnly
     $saved = Read-LbfLoginTokens
-    if ($null -ne $saved -and [string]::Equals((Get-LbfClaimString $saved 'homeAccountId'), $Record.HomeAccountId) -and $Record.HomeAccountId -ne '') {
+    if ($null -ne $saved -and [string]::Equals((Get-LbfClaimString $saved 'homeAccountId'), $Record.HomeAccountId) -and $Record.HomeAccountId.Length -gt 0) {
         $cred.HomeAccountId = $Record.HomeAccountId
         $cred.RefreshToken = Get-LbfClaimString $saved 'refreshToken'
         $cred.Persist = $true
@@ -920,7 +933,7 @@ function New-LbfAzCli {
 function New-LbfAzFailure {
     param([string]$Message)
     $sep = '. '
-    if ($Message.EndsWith('.')) { $sep = ' ' }
+    if ($Message.EndsWith('.', [StringComparison]::Ordinal)) { $sep = ' ' }
     return New-LbfError "${script:AzCredName}: $Message$sep$script:AzTroubleshoot"
 }
 
@@ -969,7 +982,7 @@ function Invoke-LbfAzCommand {
     if ($p.ExitCode -ne 0) {
         $msg = $stderr.Trim("`r`n".ToCharArray())
         if ($p.ExitCode -eq 127 -or $msg.Contains("' is not recognized")) { throw (New-LbfError "${script:AzCredName}: executable not found on path") }
-        if ($msg -eq '') { $msg = "exit status $($p.ExitCode)" }
+        if ($msg.Length -eq 0) { $msg = "exit status $($p.ExitCode)" }
         throw (New-LbfAzFailure $msg)
     }
     return $stdout
@@ -979,14 +992,14 @@ function Invoke-LbfAzCommand {
 function Get-LbfJsonLiteralError {
     param([AllowEmptyString()][string]$Text)
     $s = $Text.TrimStart(" `t`r`n".ToCharArray())
-    if ($s -eq '') { return $null }
+    if ($s.Length -eq 0) { return $null }
     $word = @{ [char]'t' = 'true'; [char]'f' = 'false'; [char]'n' = 'null' }[$s[0]]
     if ($null -eq $word) { return $null }
     for ($i = 1; $i -lt $word.Length; $i++) {
         if ($i -ge $s.Length) { return 'unexpected end of JSON input' }
         if ($s[$i] -cne $word[$i]) {
             $c = [string]$s[$i]
-            if ($c -eq "'") { $c = "\'" }
+            if ($c -ceq "'") { $c = "\'" }
             return "invalid character '$c' in literal $word (expecting '$($word[$i])')"
         }
     }
@@ -997,9 +1010,9 @@ function Get-LbfAzToken {
     param([hashtable]$Credential, [string]$Scope)
     $c = $Credential.Tokens[$Scope]
     if ($null -ne $c -and ($c.ExpiresOn - [DateTime]::UtcNow).TotalMinutes -gt 5) { return $c.Token }
-    if ($Scope -cnotmatch '^[A-Za-z0-9._/:-]*$') { throw (New-LbfError "${script:AzCredName}.GetToken(): invalid scope $(Format-LbfQuote $Scope)") }
+    if ($Scope -cnotmatch '\A[A-Za-z0-9._/:-]*\z') { throw (New-LbfError "${script:AzCredName}.GetToken(): invalid scope $(Format-LbfQuote $Scope)") }
     $resource = $Scope
-    if ($resource.EndsWith('/.default')) { $resource = $resource.Substring(0, $resource.Length - '/.default'.Length) }
+    if ($resource.EndsWith('/.default', [StringComparison]::Ordinal)) { $resource = $resource.Substring(0, $resource.Length - '/.default'.Length) }
     $out = Invoke-LbfAzCommand "az account get-access-token -o json --resource $resource --tenant $($Credential.Tenant)"
     try { $doc = ConvertFrom-LbfJson $out -LastWins }
     catch {
@@ -1044,7 +1057,7 @@ function Get-LbfAccessToken {
     $c = $Credential.Tokens[$Scope]
     if ($null -ne $c -and ($c.ExpiresOn - [DateTime]::UtcNow).TotalMinutes -gt 5) { return $c.Token }
     $ok = $false
-    if ($Credential.RefreshToken -ne '') {
+    if ($Credential.RefreshToken.Length -gt 0) {
         try { Invoke-LbfRefresh $Credential $Scope; $ok = $true } catch { $ok = $false }
     }
     if (-not $ok) {
@@ -1066,7 +1079,7 @@ function Get-LbfSignedInUser {
     $claims = Get-LbfJwtClaims (Get-LbfAccessToken -Credential $Credential -Scope $script:ArmScope)
     foreach ($k in @('upn', 'email', 'preferred_username', 'unique_name')) {
         $v = Get-LbfClaimString $claims $k
-        if ($v -ne '') { return $v }
+        if ($v.Length -gt 0) { return $v }
     }
     return 'unknown'
 }
@@ -1081,7 +1094,7 @@ function Get-LbfCredential {
             return @{ Credential = $cred; Source = 'lbf login' }
         } catch {
             $who = $rec.Username
-            if ($who -eq '') { $who = 'you' }
+            if ($who.Length -eq 0) { $who = 'you' }
             Write-LbfLog "[auth] cannot use the login 'lbf login' saved for ${who}: $(Get-LbfErrorText $_)`n"
         }
     }
@@ -1122,23 +1135,23 @@ function Get-LbfArmPage {
 # Go's findAccounts: every storage account carrying the tag in every enabled subscription the user can see.
 function Find-LbfAccounts {
     param([Parameter(Mandatory)][hashtable]$Credential, [Parameter(Mandatory)][AllowEmptyString()][string]$Tag)
-    $i = $Tag.IndexOf('=')
+    $i = $Tag.IndexOf([char]'=')
     if ($i -lt 1) { throw (New-LbfError "--tag must be KEY=VALUE, got $(Format-LbfQuote $Tag)") }
     $key = $Tag.Substring(0, $i)
     $value = $Tag.Substring($i + 1)
     $arm = Get-LbfArmEndpoint
     $found = New-Object System.Collections.Generic.List[hashtable]
     $next = "$arm/subscriptions?api-version=2022-12-01"
-    while ($next -ne '') {
+    while ($next.Length -gt 0) {
         try { $page = Get-LbfArmPage (Invoke-LbfArmGet $Credential $next) }
         catch { throw (New-LbfError "listing subscriptions failed (an access or connectivity problem, not a tagging problem): $(Get-LbfErrorText $_)") }
         foreach ($sub in $page.Items) {
             if (-not [string]::Equals((Get-LbfClaimString $sub 'state'), 'Enabled')) { continue }
             $subId = Get-LbfClaimString $sub 'subscriptionId'
             $subName = Get-LbfClaimString $sub 'displayName'
-            if ($subId -eq '') { throw (New-LbfError 'parameter subscriptionID cannot be empty') }
+            if ($subId.Length -eq 0) { throw (New-LbfError 'parameter subscriptionID cannot be empty') }
             $accNext = "$arm/subscriptions/$([Uri]::EscapeDataString($subId))/providers/Microsoft.Storage/storageAccounts?api-version=2024-01-01"
-            while ($accNext -ne '') {
+            while ($accNext.Length -gt 0) {
                 try { $accPage = Get-LbfArmPage (Invoke-LbfArmGet $Credential $accNext) }
                 catch { throw (New-LbfError "listing storage accounts in $subName failed: $(Get-LbfErrorText $_)") }
                 foreach ($acc in $accPage.Items) {
@@ -1187,14 +1200,14 @@ function Select-LbfAccount {
     $sorted = New-Object System.Collections.Generic.List[object]
     foreach ($m in $list) {
         $at = $sorted.Count
-        while ($at -gt 0 -and [string]::CompareOrdinal([string]$sorted[$at - 1].Name, [string]$m.Name) -gt 0) { $at-- }
+        while ($at -gt 0 -and (Compare-LbfUtf8 ([string]$sorted[$at - 1].Name) ([string]$m.Name)) -gt 0) { $at-- }
         $sorted.Insert($at, $m)
     }
     $labels = Get-LbfAccountLabels $sorted
     $choices = '  ' + ($labels -join "`n  ") + "`nChoose one by adding one of:"
     foreach ($m in $sorted) { $choices += "`n  --account $($m.Name)" }
-    if ($Want -ne '') {
-        foreach ($m in $sorted) { if ([string]::Equals([string]$m.Name, $Want)) { return $m } }
+    if ($Want.Length -gt 0) {
+        foreach ($m in $sorted) { if ([string]::Equals([string]$m.Name, $Want, [StringComparison]::Ordinal)) { return $m } }
         throw (New-LbfError "no storage account named $(Format-LbfQuote $Want) is tagged $(Format-LbfQuote $Tag); those that are:`n$choices")
     }
     if ($sorted.Count -eq 1) { return $sorted[0] }
@@ -1403,7 +1416,7 @@ function New-LbfUserDelegationSas {
         skoid = $Key.SignedOid; sktid = $Key.SignedTid; skt = $Key.SignedStart; ske = $Key.SignedExpiry; sks = $Key.SignedService; skv = $Key.SignedVersion
         sig = $sig
     }
-    if ($Key.SignedDelegatedUserTid -ne '') { $q['skdutid'] = $Key.SignedDelegatedUserTid }
+    if ($Key.SignedDelegatedUserTid.Length -gt 0) { $q['skdutid'] = $Key.SignedDelegatedUserTid }
     return ConvertTo-LbfAuthQueryString $q
 }
 
@@ -1432,7 +1445,7 @@ function Get-LbfMintedTarget {
         catch { throw (New-LbfError "getting a user delegation key for $account needs the 'Storage Blob Delegator' role at storage account scope: $(Get-LbfErrorText $_)") }
 
         $perms = 'rl'
-        if ($Mode -eq 'upload') { $perms = 'rwl' }
+        if ([string]::Equals($Mode, 'upload', [StringComparison]::Ordinal)) { $perms = 'rwl' }
         $sas = New-LbfUserDelegationSas -Account $account -Container $ContainerName -Permissions $perms -Start $start -Expiry $expiry -Key $key
 
         Write-LbfLog "[auth] $user via $($signedIn.Source) -> $account/$ContainerName (subscription $($chosen.SubscriptionName), requested=$perms)`n"

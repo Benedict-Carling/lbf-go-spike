@@ -6,6 +6,49 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 $script:Invariant = [Globalization.CultureInfo]::InvariantCulture
 $script:OnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
+# PowerShell's -eq, -ceq, -contains, switch and @{} compare by culture, which ignores some characters and Unicode forms.
+function Test-LbfSame {
+    param([AllowNull()][AllowEmptyString()][string]$A, [AllowNull()][AllowEmptyString()][string]$B)
+    return [string]::Equals($A, $B, [StringComparison]::Ordinal)
+}
+
+function Test-LbfIn {
+    param([AllowNull()][AllowEmptyString()][string]$Value, [AllowEmptyCollection()][string[]]$Choices)
+    foreach ($c in $Choices) { if ([string]::Equals($Value, $c, [StringComparison]::Ordinal)) { return $true } }
+    return $false
+}
+
+$script:HighChars = New-Object System.Text.RegularExpressions.Regex ('[\uD800-\uFFFF]')
+
+# A key whose UTF-16 ordinal order is the UTF-8 byte order Go sorts by; the two differ only above U+D7FF.
+function Get-LbfUtf8SortKey {
+    param([AllowEmptyString()][string]$Text)
+    if (-not $script:HighChars.IsMatch($Text)) { return $Text }
+    $chars = $Text.ToCharArray()
+    for ($i = 0; $i -lt $chars.Length; $i++) {
+        $c = [int]$chars[$i]
+        if ($c -ge 0xD800 -and $c -le 0xDFFF) { $chars[$i] = [char]($c + 0x2000) }
+        elseif ($c -ge 0xE000) { $chars[$i] = [char]($c - 0x800) }
+    }
+    return New-Object string (, $chars)
+}
+
+# Go's strings.Compare.
+function Compare-LbfUtf8 {
+    param([AllowEmptyString()][string]$A, [AllowEmptyString()][string]$B)
+    return [Math]::Sign([string]::CompareOrdinal((Get-LbfUtf8SortKey $A), (Get-LbfUtf8SortKey $B)))
+}
+
+# Go's slices.Sort of strings.
+function Get-LbfSortedUtf8 {
+    param([AllowEmptyCollection()][string[]]$Strings)
+    $keys = New-Object string[] $Strings.Length
+    for ($i = 0; $i -lt $keys.Length; $i++) { $keys[$i] = Get-LbfUtf8SortKey $Strings[$i] }
+    $out = [string[]]$Strings.Clone()
+    [Array]::Sort([Array]$keys, [Array]$out, [Collections.IComparer][StringComparer]::Ordinal)
+    return , $out
+}
+
 function New-LbfError {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Message, [int]$ExitCode = 1, [System.Exception]$Inner)
     if ($Inner) { $e = New-Object System.Exception -ArgumentList $Message, $Inner } else { $e = New-Object System.Exception -ArgumentList $Message }
@@ -84,7 +127,7 @@ function Write-LbfErr {
 
 function Test-LbfStderrLive {
     if ($null -eq $script:StderrLive) {
-        $live = -not [Console]::IsErrorRedirected -and $env:TERM -ne 'dumb'
+        $live = -not [Console]::IsErrorRedirected -and -not (Test-LbfSame $env:TERM 'dumb')
         if ($live -and $script:OnWindows) {
             $vt = $false
             try { $vt = [bool]$Host.UI.SupportsVirtualTerminal } catch { $vt = $false }
@@ -109,7 +152,7 @@ function Set-LbfStatus {
     param([AllowEmptyString()][string]$Message = '')
     if (-not (Test-LbfStderrLive)) { return }
     $text = "`r$([char]27)[K"
-    $script:StatusShown = $Message -ne ''
+    $script:StatusShown = $Message.Length -ne 0
     if ($script:StatusShown) {
         $size = Get-LbfTermSize
         $text += Format-LbfFit ((Format-LbfPrintable $Message) + '...') ($size[0] - 1)
@@ -355,7 +398,7 @@ function Get-LbfJsonMembers {
     }
     [string[]]$keys = @($Value.Keys | ForEach-Object { [string]$_ })
     if (-not ($Value -is [System.Collections.Specialized.OrderedDictionary])) {
-        [Array]::Sort($keys, [StringComparer]::Ordinal)
+        $keys = Get-LbfSortedUtf8 $keys
     }
     foreach ($k in $keys) { $pairs.Add(@($k, $Value[$k])) }
     return , $pairs
@@ -445,7 +488,7 @@ function New-LbfJsonError {
 function ConvertFrom-LbfJsonStringToken {
     param([string]$Raw, [int]$Offset)
     $body = $Raw.Substring(1, $Raw.Length - 2)
-    if ($body.IndexOf('\') -lt 0) { return $body }
+    if ($body.IndexOf([char]'\') -lt 0) { return $body }
     $bad = [regex]::Match($body, '\\(?!u[0-9a-fA-F]{4}|["\\/bfnrt])')
     if ($bad.Success) { throw (New-LbfJsonError 'escape' ($Offset + 1 + $bad.Index) $body.Substring($bad.Index, [Math]::Min(2, $body.Length - $bad.Index))) }
     return $script:JsonEscape.Replace($body, {

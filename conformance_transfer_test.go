@@ -822,7 +822,7 @@ function Show-Crate([string]$b64) {
   for ($i = 0; $i -lt $c.Files.Count; $i += 2) { $f = $c.Files[$i]; $stored[$f.Rel] = @{ Rel = $f.Rel; Size = $f.Size + $i; SHA256 = 'x' } }
   foreach ($p in (Get-LbfCrateDifferences $c $stored $true)) { [void]$sb.Append("problem $p` + "`n" + `") }
   try { $st = Get-LbfCrateStatement $c } catch { [void]$sb.Append("statement error: $(Get-LbfErrorText $_)` + "`n" + `"); return $sb.ToString() }
-  $sorted = Get-LbfSortedOrdinal $st.ConformsTo.ToArray()
+  $sorted = Get-LbfSortedUtf8 $st.ConformsTo.ToArray()
   $q = @(); foreach ($x in $sorted) { $q += Format-LbfQuote $x }
   [void]$sb.Append("stated $(ConvertTo-LbfJson (ConvertTo-LbfProvenanceValue $st.Provenance))` + "`n" + `conformsTo [$($q -join ' ')]` + "`n" + `")
   return $sb.ToString()

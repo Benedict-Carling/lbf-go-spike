@@ -4,18 +4,21 @@ $script:LicenseUrl = 'https://rightsstatements.org/vocab/InC/1.0/'
 $script:ProfileVersion = New-Object System.Text.RegularExpressions.Regex ('/v?[0-9]+(\.[0-9]+)*\z')
 
 # A fixed table, not the OS's, so a crate is the same wherever it is written.
-$script:MediaTypes = @{
-    '.csv' = 'text/csv'; '.tsv' = 'text/tab-separated-values'; '.txt' = 'text/plain'; '.md' = 'text/markdown'
-    '.json' = 'application/json'; '.xml' = 'application/xml'; '.pdf' = 'application/pdf'
-    '.tif' = 'image/tiff'; '.tiff' = 'image/tiff'; '.png' = 'image/png'; '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'
-    '.zip' = 'application/zip'; '.gz' = 'application/gzip'; '.parquet' = 'application/vnd.apache.parquet'
-    '.h5' = 'application/x-hdf5'; '.hdf5' = 'application/x-hdf5'; '.fcs' = 'application/vnd.isac.fcs'
+$script:MediaTypes = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+foreach ($pair in @(
+        '.csv=text/csv', '.tsv=text/tab-separated-values', '.txt=text/plain', '.md=text/markdown',
+        '.json=application/json', '.xml=application/xml', '.pdf=application/pdf',
+        '.tif=image/tiff', '.tiff=image/tiff', '.png=image/png', '.jpg=image/jpeg', '.jpeg=image/jpeg',
+        '.zip=application/zip', '.gz=application/gzip', '.parquet=application/vnd.apache.parquet',
+        '.h5=application/x-hdf5', '.hdf5=application/x-hdf5', '.fcs=application/vnd.isac.fcs')) {
+    $kv = $pair.Split([char]'=')
+    $script:MediaTypes[$kv[0]] = $kv[1]
 }
 
 # Go's preparePublication: everything that can fail without Azure, so a bad dataset never reaches sign-in or upload.
 function New-LbfPublication {
     param([Parameter(Mandatory)][string]$InputPath, [Parameter(Mandatory)][hashtable]$Provenance, [AllowEmptyString()][string]$ProfileDir = '', [AllowEmptyString()][string]$Id = '')
-    if ($Id -eq '') { $Id = New-LbfId }
+    if ($Id.Length -eq 0) { $Id = New-LbfId }
     elseif (-not (Test-LbfMintedId $Id)) { throw (New-LbfError "--id $(Format-LbfQuote $Id) is not an ID from 'lbf new-id'") }
     $prov = Get-LbfProvenance $Provenance
     $prof = Get-LbfProfile $ProfileDir
@@ -58,7 +61,7 @@ function Get-LbfDefaultDescription {
     $noun = 'files'
     if ($Files -eq 1) { $noun = 'file' }
     $d = "Dataset of $Files $noun from $(Get-LbfBase $Source)"
-    if ($DerivedFrom -ne '') { $d += ', derived from ' + $DerivedFrom }
+    if ($DerivedFrom.Length -ne 0) { $d += ', derived from ' + $DerivedFrom }
     return $d
 }
 
@@ -67,7 +70,7 @@ function Get-LbfConformsTo {
     param([hashtable]$Publication)
     $ids = New-Object System.Collections.Generic.List[string]
     if ($null -eq $Publication.Profile) { return , $ids }
-    if ($Publication.Provenance.DerivedFrom -ne '') { $ids.Add($script:ProcessRunCrate) }
+    if (-not [string]::IsNullOrEmpty($Publication.Provenance.DerivedFrom)) { $ids.Add($script:ProcessRunCrate) }
     $ids.AddRange((Get-LbfProfileIds $Publication.Profile))
     return , $ids
 }
@@ -100,8 +103,8 @@ function Get-LbfPublicationView {
     $crate['additionalProperty'] = $props
     $user = ''
     if ($null -ne $Target.User) { $user = ([string]$Target.User).Trim() }
-    if ($user -ne '') { $crate['creator'] = $user }
-    if ($prov.DerivedFrom -ne '') {
+    if ($user.Length -ne 0) { $crate['creator'] = $user }
+    if (-not [string]::IsNullOrEmpty($prov.DerivedFrom)) {
         $crate['wasDerivedFrom'] = $prov.DerivedFrom
         $ins = New-Object System.Collections.Generic.List[object]
         foreach ($in in $prov.Instruments) {
@@ -227,7 +230,7 @@ function Get-LbfProfileEntity {
     $titles = Get-LbfProfileTitles $Profile
     $name = $Uri
     $t = $null
-    if ($titles.TryGetValue($Uri, [ref]$t) -and $t -ne '') { $name = $t }
+    if ($titles.TryGetValue($Uri, [ref]$t) -and -not [string]::IsNullOrEmpty($t)) { $name = $t }
     $e = New-LbfMap
     $e['@id'] = $Uri
     $e['@type'] = [object[]]@('CreativeWork', 'Profile')
@@ -246,9 +249,9 @@ function New-LbfCrateText {
     $propRefs = New-Object System.Collections.Generic.List[object]
     foreach ($e in $props) { $propRefs.Add((New-LbfRef $e['@id'])) }
     $name = $prov.Name
-    if ($name -eq '') { $name = Get-LbfDefaultName $p.Source }
+    if ([string]::IsNullOrEmpty($name)) { $name = Get-LbfDefaultName $p.Source }
     $desc = $prov.Description
-    if ($desc -eq '') { $desc = Get-LbfDefaultDescription $p.Source $p.Files.Count $prov.DerivedFrom }
+    if ([string]::IsNullOrEmpty($desc)) { $desc = Get-LbfDefaultDescription $p.Source $p.Files.Count $prov.DerivedFrom }
     $root = New-LbfMap
     $root['@id'] = './'
     $root['@type'] = 'Dataset'
@@ -270,15 +273,15 @@ function New-LbfCrateText {
                 'description' = "This item is protected by copyright and/or related rights; uses beyond those the law permits need the rights-holders' permission." }))
     $uploader = ''
     if ($null -ne $Target.User) { $uploader = ([string]$Target.User).Trim() }
-    if ($uploader -ne '') {
+    if ($uploader.Length -ne 0) {
         $root['creator'] = New-LbfRef '#uploader'
         $graph.Add((New-LbfEntity @{ '@id' = '#uploader'; '@type' = 'Person'; 'name' = $uploader }))
     }
     $graph.AddRange($props)
-    if ($prov.DerivedFrom -ne '') {
+    if (-not [string]::IsNullOrEmpty($prov.DerivedFrom)) {
         $root['isBasedOn'] = New-LbfRef (Get-LbfParentId $prov.DerivedFrom)
         $root['mentions'] = New-LbfRef '#run'
-        $graph.AddRange((Get-LbfRunEntities $p ($uploader -ne '')))
+        $graph.AddRange((Get-LbfRunEntities $p ($uploader.Length -ne 0)))
     }
     $conformsTo = Get-LbfConformsTo $p
     if ($conformsTo.Count -gt 0) {
@@ -326,12 +329,12 @@ function Get-LbfRenderedFiles {
         [void]$ents.Append("{`n            `"@id`": `"").Append($id).Append("`",`n            `"@type`": `"File`",`n            `"contentSize`": `"").Append(([long]$f.Size).ToString($script:Invariant)).Append('"')
         $dot = $base.LastIndexOf([char]'.')
         if ($dot -ge 0) {
-            $fmt = $script:MediaTypes[$base.Substring($dot).ToLowerInvariant()]
-            if ($null -ne $fmt) { [void]$ents.Append(",`n            `"encodingFormat`": `"").Append($fmt).Append('"') }
+            $fmt = $null
+            if ($script:MediaTypes.TryGetValue($base.Substring($dot).ToLowerInvariant(), [ref]$fmt)) { [void]$ents.Append(",`n            `"encodingFormat`": `"").Append($fmt).Append('"') }
         }
         if ($script:JsonPlain.IsMatch($base)) { $q = ConvertTo-LbfJsonString $base } else { $q = '"' + $base + '"' }
         [void]$ents.Append(",`n            `"name`": ").Append($q)
-        if ($null -ne $f.SHA256 -and $f.SHA256 -ne '') { [void]$ents.Append(",`n            `"sha256`": ").Append((ConvertTo-LbfCrateString $f.SHA256)) }
+        if (-not [string]::IsNullOrEmpty($f.SHA256)) { [void]$ents.Append(",`n            `"sha256`": ").Append((ConvertTo-LbfCrateString $f.SHA256)) }
         [void]$ents.Append("`n        }")
         $i++
     }

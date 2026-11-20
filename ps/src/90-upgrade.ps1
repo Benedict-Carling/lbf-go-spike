@@ -56,7 +56,7 @@ function Format-LbfUpgradeWarning {
 # A version golang.org/x/mod/semver accepts in canonical form, as major, minor, patch and prerelease; $null otherwise.
 function ConvertFrom-LbfSemver {
     param([AllowEmptyString()][string]$Version)
-    $m = [regex]::Match($Version, '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$')
+    $m = [regex]::Match($Version, '\Av(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?\z')
     if (-not $m.Success) { return $null }
     return @{ Nums = @($m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value); Pre = $m.Groups[4].Value }
 }
@@ -69,16 +69,16 @@ function Compare-LbfNumber {
 
 function Compare-LbfPrerelease {
     param([string]$A, [string]$B)
-    if ($A -ceq $B) { return 0 }
-    if ($A -eq '') { return 1 }
-    if ($B -eq '') { return -1 }
+    if (Test-LbfSame $A $B) { return 0 }
+    if ($A.Length -eq 0) { return 1 }
+    if ($B.Length -eq 0) { return -1 }
     $pa = @($A -split '\.')
     $pb = @($B -split '\.')
     for ($i = 0; $i -lt [Math]::Min($pa.Count, $pb.Count); $i++) {
         $x = $pa[$i]; $y = $pb[$i]
-        if ($x -ceq $y) { continue }
-        $xn = $x -match '^[0-9]+$'
-        $yn = $y -match '^[0-9]+$'
+        if (Test-LbfSame $x $y) { continue }
+        $xn = $x -cmatch '\A[0-9]+\z'
+        $yn = $y -cmatch '\A[0-9]+\z'
         if ($xn -and $yn) { return Compare-LbfNumber $x $y }
         if ($xn) { return -1 }
         if ($yn) { return 1 }
@@ -92,7 +92,7 @@ function Test-LbfNewerVersion {
     param([AllowEmptyString()][string]$Latest, [AllowEmptyString()][string]$Current)
     $l = ConvertFrom-LbfSemver $Latest
     $c = ConvertFrom-LbfSemver $Current
-    if ($null -eq $l -or $null -eq $c -or $l.Pre -ne '') { return $false }
+    if ($null -eq $l -or $null -eq $c -or $l.Pre.Length -gt 0) { return $false }
     for ($i = 0; $i -lt 3; $i++) {
         $d = Compare-LbfNumber $l.Nums[$i] $c.Nums[$i]
         if ($d -ne 0) { return $d -gt 0 }
@@ -126,7 +126,7 @@ function Get-LbfLatestVersionFromHead {
     $i = $loc.IndexOf('/releases/tag/', [StringComparison]::Ordinal)
     $tag = ''
     if ($i -ge 0) { $tag = $loc.Substring($i + '/releases/tag/'.Length) }
-    if ($i -lt 0 -or $tag -eq '') { throw (New-LbfError "no lbf release found at $($Head.Base) (HTTP $code)") }
+    if ($i -lt 0 -or $tag.Length -eq 0) { throw (New-LbfError "no lbf release found at $($Head.Base) (HTTP $code)") }
     return $tag
 }
 
@@ -178,7 +178,7 @@ function Get-LbfCachedLatestVersion {
 # Go's startUpdateCheck: looks up the latest release while the command runs.
 function Start-LbfUpdateCheck {
     param([AllowEmptyCollection()][string[]]$Arguments)
-    if ($script:LbfVersion -eq 'dev' -or $env:LBF_NO_UPDATE_CHECK -or ($Arguments.Count -gt 0 -and $Arguments[0] -ceq 'upgrade')) { return $null }
+    if ($script:LbfVersion -eq 'dev' -or $env:LBF_NO_UPDATE_CHECK -or ($Arguments.Count -gt 0 -and (Test-LbfSame $Arguments[0] 'upgrade'))) { return $null }
     try { $dir = Get-LbfUserCacheDir } catch { return @{ Lookup = $null } }
     $cache = [IO.Path]::Combine($dir, 'lbf', 'latest-version')
     return @{ Lookup = (Start-LbfCachedLatestVersion (Get-LbfReleasesUrl) $cache) }
@@ -215,11 +215,11 @@ function Get-LbfChecksumFor {
     $text = $script:Utf8NoBom.GetString($Sums)
     foreach ($line in ($text -split "`n")) {
         $line = $line.TrimEnd("`r")
-        $fields = @($line -split '\s+' | Where-Object { $_ -ne '' })
+        $fields = @($line -split '\s+' | Where-Object { $_.Length -gt 0 })
         if ($fields.Count -eq 2) {
             $f = $fields[1]
             if ($f.StartsWith('*', [StringComparison]::Ordinal)) { $f = $f.Substring(1) }
-            if ($f -ceq $Name) { return $fields[0] }
+            if (Test-LbfSame $f $Name) { return $fields[0] }
         }
     }
     throw (New-LbfError "SHA256SUMS has no entry for $Name")
@@ -282,7 +282,7 @@ function Invoke-LbfUpgrade {
     $sums = Invoke-LbfHttpGet ($download + 'SHA256SUMS')
     $want = Get-LbfChecksumFor $sums $script:UpgradeAsset
     $bin = Invoke-LbfHttpGet ($download + $script:UpgradeAsset)
-    if ((Get-LbfSha256Hex -Bytes $bin) -cne $want) {
+    if (-not (Test-LbfSame (Get-LbfSha256Hex -Bytes $bin) $want)) {
         throw (New-LbfError "downloaded $($script:UpgradeAsset) does not match its published checksum; nothing was changed")
     }
     try {

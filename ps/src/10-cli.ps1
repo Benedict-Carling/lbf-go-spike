@@ -33,7 +33,7 @@ $script:SasLifetime = [TimeSpan]::FromHours(144)
 # Writes text to stdout as fmt.Print would, one pipeline string per line so PowerShell adds no blank line.
 function Write-LbfOut {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    if ($Text.EndsWith("`n")) { $Text = $Text.Substring(0, $Text.Length - 1) }
+    if ($Text.EndsWith("`n", [StringComparison]::Ordinal)) { $Text = $Text.Substring(0, $Text.Length - 1) }
     # A crate can be tens of megabytes; one string prints the same bytes far faster than a line each.
     if ($Text.Length -gt 65536) { Write-Output $Text; return }
     foreach ($l in ($Text -split "`n", 0, 'SimpleMatch')) { Write-Output $l }
@@ -81,7 +81,7 @@ function New-LbfCommand {
     $jsonFlag = { param($desc) & $bool 'json' 'json' $desc }
     $sasEnv = { & $str 'sasEnv' 'sas-env' 'FILE' '' "pre-minted credential file from 'lbf mint-sas'" }
 
-    switch -CaseSensitive ($Name) {
+    switch -CaseSensitive (Select-LbfCommandName $Name) {
         { $_ -eq 'publish' -or $_ -eq 'upload' } {
             $c.synopsis = "$Name <path> [options]"
             $c.arg = '<path>'; $c.argDesc = 'dataset directory to upload'
@@ -155,9 +155,18 @@ function New-LbfCommand {
     return $c
 }
 
+$script:CommandNames = [string[]]@('publish', 'upload', 'fetch', 'download', 'browse', 'new-id', 'check', 'mint-sas', 'login', 'logout', 'upgrade')
+
+# The command a name is, compared as Go does, so the switches below see only exact names.
+function Select-LbfCommandName {
+    param([AllowEmptyString()][string]$Name)
+    foreach ($n in $script:CommandNames) { if ([string]::Equals($n, $Name, [StringComparison]::Ordinal)) { return $n } }
+    return ''
+}
+
 function Get-LbfFlag {
     param([hashtable]$Command, [string]$Name)
-    foreach ($f in $Command.flags) { if ($f.name -ceq $Name) { return $f } }
+    foreach ($f in $Command.flags) { if (Test-LbfSame $f.name $Name) { return $f } }
     return $null
 }
 
@@ -183,7 +192,7 @@ function Test-LbfHelpRequest {
 
 # Go's FlagSet.parseOne over the whole list; returns the arguments left after the flags.
 function Invoke-LbfFlagParse {
-    param([hashtable]$Command, [string[]]$Arguments, [hashtable]$Set)
+    param([hashtable]$Command, [string[]]$Arguments, $Set)
     $rest = New-Object System.Collections.Generic.List[string]
     foreach ($a in $Arguments) { $rest.Add($a) }
     while ($rest.Count -gt 0) {
@@ -209,7 +218,7 @@ function Invoke-LbfFlagParse {
         }
         $flag = Get-LbfFlag $Command $name
         if ($null -eq $flag) {
-            if ($name -ceq 'help' -or $name -ceq 'h') { throw (New-LbfHelpRequest) }
+            if (Test-LbfIn $name 'help', 'h') { throw (New-LbfHelpRequest) }
             throw (New-LbfError "flag provided but not defined: -$name")
         }
         if ($flag.kind -eq 'bool') {
@@ -236,17 +245,15 @@ function Invoke-LbfFlagParse {
                 $flag.into[$flag.key] = $value
             }
         }
-        $Set[$name] = $true
+        $Set[$flag.name] = $true
     }
     return , $rest.ToArray()
 }
 
 function ConvertFrom-LbfGoBool {
     param([string]$Text)
-    switch -CaseSensitive ($Text) {
-        { @('1', 't', 'T', 'TRUE', 'true', 'True') -ccontains $_ } { return $true }
-        { @('0', 'f', 'F', 'FALSE', 'false', 'False') -ccontains $_ } { return $false }
-    }
+    if (Test-LbfIn $Text '1', 't', 'T', 'TRUE', 'true', 'True') { return $true }
+    if (Test-LbfIn $Text '0', 'f', 'F', 'FALSE', 'false', 'False') { return $false }
     return $null
 }
 
@@ -255,7 +262,7 @@ $script:FlagErrorName = '^(flag provided but not defined: |flag needs an argumen
 # Go's command.parse: flags anywhere, then the checks lbf adds.
 function Invoke-LbfCommandParse {
     param([hashtable]$Command, [string[]]$Arguments)
-    $set = @{}
+    $set = New-LbfMap
     $positional = New-Object System.Collections.Generic.List[string]
     $args2 = $Arguments
     try {
@@ -271,7 +278,7 @@ function Invoke-LbfCommandParse {
         throw (New-LbfUsageError $Command $msg)
     }
     foreach ($f in $Command.flags) {
-        if ($f.str -and $set.ContainsKey($f.name) -and (Get-LbfFlagValue $f).Trim() -eq '') {
+        if ($f.str -and $set.ContainsKey($f.name) -and (Get-LbfFlagValue $f).Trim().Length -eq 0) {
             throw (New-LbfError "--$($f.name) is empty; give it a value, or leave it out for the default")
         }
     }
@@ -288,7 +295,7 @@ function Invoke-LbfCommandParse {
     if ($positional.Count -gt $want) { throw (New-LbfUsageError $Command "unexpected argument $(Format-LbfQuote $positional[$want])") }
     if ($positional.Count -lt $want) { throw (New-LbfUsageError $Command "missing $($Command.arg)") }
     foreach ($f in $Command.flags) {
-        if ($f.required -and (Get-LbfFlagValue $f) -eq '') { throw (New-LbfUsageError $Command "missing --$($f.name)") }
+        if ($f.required -and (Get-LbfFlagValue $f).Length -eq 0) { throw (New-LbfUsageError $Command "missing --$($f.name)") }
     }
     return , $positional.ToArray()
 }
@@ -330,7 +337,7 @@ function Invoke-LbfParseArgs {
     $o = New-LbfOptions
     $c = New-LbfCommand $Name $o
     $positional = Invoke-LbfCommandParse $c $Arguments
-    if ($o.tenant -eq '') { $o.tenant = $script:ImperialTenant }
+    if ($o.tenant.Length -eq 0) { $o.tenant = $script:ImperialTenant }
     return @{ options = $o; positional = $positional; command = $c }
 }
 
@@ -361,13 +368,13 @@ function Format-LbfRfc3339 {
 
 function Get-LbfOrUnknown {
     param([AllowNull()][string]$Text)
-    if ($null -eq $Text -or $Text.Trim() -eq '') { return 'unknown' }
+    if ($null -eq $Text -or $Text.Trim().Length -eq 0) { return 'unknown' }
     return $Text.Trim()
 }
 
 function Get-LbfCheckSummary {
     param([hashtable]$Target, [string]$Mode)
-    if ($Target.Source -eq '') {
+    if ([string]::IsNullOrEmpty($Target.Source)) {
         return "$(Get-LbfOrUnknown $Target.User) can $Mode $($Target.Account)/$($Target.Container) until $(Format-LbfRfc3339 $Target.Expiry)"
     }
     return "$(Get-LbfOrUnknown $Target.User) can $Mode $($Target.Account)/$($Target.Container), signed in via $($Target.Source)"
@@ -383,7 +390,7 @@ function Get-LbfLoginMessage {
 function Get-LbfLogoutMessage {
     param([string]$User, [bool]$HadRecord, [bool]$HadTokens, $StoreError)
     $who = $User
-    if ($who -eq '') { $who = 'you' }
+    if ($who.Length -eq 0) { $who = 'you' }
     if ($HadTokens) { return "Signed $who out of lbf and deleted its saved tokens" }
     if ($HadRecord) { return "Signed $who out of lbf" }
     if ($null -ne $StoreError -and (Get-LbfException $StoreError).Data.Contains('lbfNoStore')) { return 'This build of lbf never saves a login, so there was nothing to sign out of' }
@@ -393,17 +400,17 @@ function Get-LbfLogoutMessage {
 # The storage account and container the options pick, from --sas-env or by signing in.
 function Get-LbfTarget {
     param([hashtable]$Options, [string]$Mode, [string]$Container)
-    if ($Options.sasEnv -ne '') { return Read-LbfSasEnv $Options.sasEnv $Mode $Container }
+    if ($Options.sasEnv.Length -ne 0) { return Read-LbfSasEnv $Options.sasEnv $Mode $Container }
     return Get-LbfMintedTarget -Tenant $Options.tenant -Tag $Options.tag -AccountName $Options.account -ContainerName $Container -Mode $Mode
 }
 
 function Invoke-Lbf {
     param([string[]]$Arguments)
-    if ($Arguments.Count -eq 0 -or $Arguments[0] -ceq '-h' -or $Arguments[0] -ceq '--help' -or $Arguments[0] -ceq 'help') {
+    if ($Arguments.Count -eq 0 -or (Test-LbfIn $Arguments[0] '-h', '--help', 'help')) {
         Write-LbfOut $script:Usage
         return
     }
-    if ($Arguments[0] -ceq 'version' -or $Arguments[0] -ceq '--version') {
+    if (Test-LbfIn $Arguments[0] 'version', '--version') {
         Write-LbfOut "lbf $($script:LbfVersion)`n"
         return
     }
@@ -422,7 +429,7 @@ function Invoke-Lbf {
     $o = $parsed.options
     $positional = $parsed.positional
 
-    switch -CaseSensitive ($cmd) {
+    switch -CaseSensitive (Select-LbfCommandName $cmd) {
         { $_ -eq 'publish' -or $_ -eq 'upload' } {
             $pub = New-LbfPublication -InputPath $positional[0] -Provenance $o.prov -ProfileDir $o.profile -Id $o.id
             if ($o.dryRun) {
@@ -465,7 +472,7 @@ function Invoke-Lbf {
             return
         }
         'check' {
-            if ($o.mode -cne 'upload' -and $o.mode -cne 'download') { throw (New-LbfError "--mode must be 'upload' or 'download'") }
+            if (-not (Test-LbfIn $o.mode 'upload', 'download')) { throw (New-LbfError "--mode must be 'upload' or 'download'") }
             $t = Get-LbfTarget $o $o.mode $o.container
             Invoke-LbfCheckAccess -Target $t -Mode $o.mode
             Write-LbfOut "$(Get-LbfCheckSummary $t $o.mode)`n"
@@ -494,7 +501,7 @@ function Invoke-Lbf {
             return
         }
         'mint-sas' {
-            if ($o.mode -cne 'upload' -and $o.mode -cne 'download') { throw (New-LbfError "--mode must be 'upload' or 'download'") }
+            if (-not (Test-LbfIn $o.mode 'upload', 'download')) { throw (New-LbfError "--mode must be 'upload' or 'download'") }
             $t = Get-LbfMintedTarget -Tenant $o.tenant -Tag $o.tag -AccountName $o.account -ContainerName $o.container -Mode $o.mode
             Write-LbfSasEnv -Path $o.out -Target $t
             Write-LbfOut "Wrote $($o.out) ($($t.Account)/$($t.Container), permissions=$($t.Permissions), expires $(Format-LbfRfc3339 $t.Expiry))`n"

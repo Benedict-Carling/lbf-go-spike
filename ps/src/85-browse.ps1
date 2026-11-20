@@ -49,9 +49,7 @@ function Format-LbfGoSprint {
     if ($Value -is [bool]) { if ($Value) { return 'true' } return 'false' }
     if ($Value -is [long] -or $Value -is [int] -or $Value -is [double]) { return Format-LbfGoFloat ([double]$Value) }
     if ($Value -is [System.Collections.IDictionary]) {
-        [string[]]$keys = @($Value.Keys | ForEach-Object { [string]$_ })
-        [Array]::Sort($keys, [StringComparer]::Ordinal)
-        $parts = foreach ($k in $keys) { $k + ':' + (Format-LbfGoSprint $Value[$k]) }
+        $parts = foreach ($k in (Get-LbfSortedUtf8 @($Value.Keys | ForEach-Object { [string]$_ }))) { $k + ':' + (Format-LbfGoSprint $Value[$k]) }
         return 'map[' + (@($parts) -join ' ') + ']'
     }
     if ($Value -is [System.Collections.IEnumerable]) {
@@ -76,9 +74,9 @@ function ConvertFrom-LbfGoScanInt {
         $digits = '01234567_'
         if ($i -lt $Text.Length) {
             switch -CaseSensitive ([string]$Text[$i]) {
-                { $_ -eq 'b' -or $_ -eq 'B' } { $digits = '01_'; $prefix += $_; $i++ }
-                { $_ -eq 'o' -or $_ -eq 'O' } { $prefix += $_; $i++ }
-                { $_ -eq 'x' -or $_ -eq 'X' } { $digits = '0123456789abcdefABCDEF_'; $prefix += $_; $i++ }
+                { Test-LbfIn $_ @('b', 'B') } { $digits = '01_'; $prefix += $_; $i++ }
+                { Test-LbfIn $_ @('o', 'O') } { $prefix += $_; $i++ }
+                { Test-LbfIn $_ @('x', 'X') } { $digits = '0123456789abcdefABCDEF_'; $prefix += $_; $i++ }
             }
         }
     }
@@ -151,7 +149,7 @@ function Test-LbfGoUrlHasScheme {
         $c = [string]$u[$i]
         if ($c -cmatch '^[A-Za-z]$') { continue }
         if ($c -cmatch '^[0-9+.-]$') { if ($i -eq 0) { return $false }; continue }
-        if ($c -ceq ':') { $colon = $i }
+        if ($u[$i] -eq [char]':') { $colon = $i }
         break
     }
     if ($colon -le 0) { return $false }
@@ -170,7 +168,7 @@ function Test-LbfGoUrlHasScheme {
         if ($at -ge 0) {
             $userinfo = $authority.Substring(0, $at)
             $hostPart = $authority.Substring($at + 1)
-            if ($userinfo -notmatch "^[A-Za-z0-9\-._:~!$&'()*+,;=%@]*$") { return $false }
+            if ($userinfo -cnotmatch "\A[A-Za-z0-9\-._:~!$&'()*+,;=%@]*\z") { return $false }
             if (-not (Test-LbfUrlUnescapable $userinfo)) { return $false }
         }
         $port = ''
@@ -181,9 +179,9 @@ function Test-LbfGoUrlHasScheme {
         } else {
             $pc = $hostPart.LastIndexOf([char]':')
             if ($pc -ge 0) { $port = $hostPart.Substring($pc) }
-            if ($hostPart -notmatch "^[A-Za-z0-9\-._~!$&'()*+,;=:\[\]<>`"%]*$") { return $false }
+            if ($hostPart -cnotmatch "\A(?:[A-Za-z0-9\-._~!$&'()*+,;=:\[\]<>`"%]|[^\x00-\x7F])*\z") { return $false }
         }
-        if ($port -ne '' -and $port -notmatch '^:[0-9]*$') { return $false }
+        if ($port.Length -gt 0 -and $port -cnotmatch '\A:[0-9]*\z') { return $false }
         if (-not (Test-LbfUrlUnescapable $hostPart)) { return $false }
     }
     return Test-LbfUrlUnescapable $rest
@@ -241,7 +239,7 @@ function ConvertFrom-LbfBrowseCrate {
             if ($e.Data['jsonKind'] -eq 'escape') {
                 $off = [int]$e.Data['jsonOffset']
                 $len = 2
-                if ($detail -ceq '\u') { $len = 6 }
+                if ([string]::Equals($detail, '\u', [StringComparison]::Ordinal)) { $len = 6 }
                 $detail = "invalid escape sequence ``$($Text.Substring($off, [Math]::Min($len, $Text.Length - $off)))`` in string"
             }
         }
@@ -289,8 +287,8 @@ function ConvertFrom-LbfBrowseCrate {
     foreach ($k in @($root.Keys)) {
         $v = $root[$k]
         switch -CaseSensitive ($k) {
-            { $_ -ceq '@id' -or $_ -ceq '@type' -or $_ -ceq 'hasPart' -or $_ -ceq 'mentions' } { break }
-            'additionalProperty' {
+            { Test-LbfIn $_ @('@id', '@type', 'hasPart', 'mentions') } { break }
+            { Test-LbfSame $_ 'additionalProperty' } {
                 foreach ($ref in (Get-LbfAsList $v)) {
                     $pv = $null
                     if ($ref -is [System.Collections.IDictionary]) { $pv = $ref }
@@ -305,12 +303,12 @@ function ConvertFrom-LbfBrowseCrate {
         }
     }
     foreach ($e in @($graph.Values)) {
-        if ((Get-LbfTypesOf $e) -cnotcontains 'CreateAction') { continue }
+        if (-not (Test-LbfIn 'CreateAction' (Get-LbfTypesOf $e))) { continue }
         $made = $false
-        foreach ($r in (Get-LbfAsList (Get-LbfMapValue $e 'result'))) { if ((Get-LbfRefId $r) -ceq $rootId) { $made = $true; break } }
+        foreach ($r in (Get-LbfAsList (Get-LbfMapValue $e 'result'))) { if (Test-LbfSame (Get-LbfRefId $r) $rootId) { $made = $true; break } }
         if (-not $made) { continue }
         foreach ($k in @($e.Keys)) {
-            if ($k -cne '@id' -and $k -cne '@type' -and $k -cne 'result') { $row["run_$k"] = Get-LbfBrowseLabels $ctx $e[$k] }
+            if (-not (Test-LbfIn $k @('@id', '@type', 'result'))) { $row["run_$k"] = Get-LbfBrowseLabels $ctx $e[$k] }
         }
     }
 
@@ -320,13 +318,13 @@ function ConvertFrom-LbfBrowseCrate {
         $id = Get-LbfRefId $ref
         if (-not $graph.Contains($id)) { continue }
         $e = $graph[$id]
-        if ((Get-LbfTypesOf $e) -cnotcontains 'File') { continue }
+        if (-not (Test-LbfIn 'File' (Get-LbfTypesOf $e))) { continue }
         $size = ConvertFrom-LbfGoScanInt (Format-LbfGoSprint (Get-LbfMapValue $e 'contentSize'))
         $f = New-LbfOrdered
         $f['path'] = $id
         $f['size'] = [long]$size
         $sha = Get-LbfMapValue $e 'sha256'
-        if ($sha -is [string] -and $sha -ne '') { $f['sha256'] = $sha }
+        if ($sha -is [string] -and $sha.Length -gt 0) { $f['sha256'] = $sha }
         $files.Add($f)
         $total += $size
     }
@@ -350,7 +348,7 @@ function Get-LbfBrowseLabel {
     if ($hasName -and $versioned) { $name = $name + ' ' + (Format-LbfGoSprint $e['version']) }
     # One IRI for every version, such as a repository, would show every crate the first version seen.
     if ((Test-LbfGoUrlHasScheme $id) -and (-not $versioned -or ($id.IndexOf((Format-LbfGoSprint $e['version']), [StringComparison]::Ordinal) -ge 0))) {
-        if ($hasName -and (Format-LbfGoSprint $e['name']) -cne $id) { $Ctx.Names[$id] = $name }
+        if ($hasName -and -not (Test-LbfSame (Format-LbfGoSprint $e['name']) $id)) { $Ctx.Names[$id] = $name }
         return $id
     }
     if ($hasName) { return $name }
@@ -372,8 +370,8 @@ function Get-LbfBrowseLabels {
 function Get-LbfFetchCommand {
     param([string]$Id, [string]$Container, [string]$Tag, [string]$Account)
     $cmd = "lbf fetch $Id"
-    if ($Container -cne 'bronze') { $cmd += " --container $Container" }
-    if ($Tag -cne 'tag=storage') { $cmd += " --tag $Tag" }
+    if (-not (Test-LbfSame $Container 'bronze')) { $cmd += " --container $Container" }
+    if (-not (Test-LbfSame $Tag 'tag=storage')) { $cmd += " --tag $Tag" }
     return "$cmd --account $Account"
 }
 
@@ -418,7 +416,7 @@ function New-LbfBlobResponseError {
     $u = New-Object System.Uri -ArgumentList $Url
     $code = Get-LbfResponseHeader $Response 'x-ms-error-code'
     $text = $script:Utf8NoBom.GetString($Body)
-    if ($code -eq '') {
+    if ($code.Length -eq 0) {
         $m = [regex]::Match($text, '<Code>([^<]*)</Code>')
         if ($m.Success) { $code = $m.Groups[1].Value }
     }
@@ -426,7 +424,7 @@ function New-LbfBlobResponseError {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append("GET $($u.Scheme)://$($u.Authority)$($u.AbsolutePath)`n$sep`n")
     [void]$sb.Append("RESPONSE ${status}: $status $($Response.ReasonPhrase)`n")
-    if ($code -ne '') { [void]$sb.Append("ERROR CODE: $code`n") } else { [void]$sb.Append("ERROR CODE UNAVAILABLE`n") }
+    if ($code.Length -gt 0) { [void]$sb.Append("ERROR CODE: $code`n") } else { [void]$sb.Append("ERROR CODE UNAVAILABLE`n") }
     [void]$sb.Append("$sep`n")
     if ($Body.Length -gt 0) { [void]$sb.Append("$text`n") } else { [void]$sb.Append("Response contained no body`n") }
     [void]$sb.Append("$sep`n")
@@ -471,7 +469,7 @@ function Invoke-LbfBlobGet {
 function Test-LbfBlobCode {
     param($ErrorOrException, [string[]]$Codes)
     $e = Get-LbfException $ErrorOrException
-    return $e.Data.Contains('lbfBlobCode') -and ($Codes -ccontains [string]$e.Data['lbfBlobCode'])
+    return $e.Data.Contains('lbfBlobCode') -and (Test-LbfIn ([string]$e.Data['lbfBlobCode']) $Codes)
 }
 
 function Get-LbfBlobListing {
@@ -480,13 +478,13 @@ function Get-LbfBlobListing {
     $marker = ''
     while ($true) {
         $u = $Url
-        if ($marker -ne '') { $u += '&marker=' + [Uri]::EscapeDataString($marker) }
+        if ($marker.Length -gt 0) { $u += '&marker=' + [Uri]::EscapeDataString($marker) }
         $xml = New-Object System.Xml.XmlDocument
         $xml.XmlResolver = $null
         $xml.LoadXml($script:Utf8NoBom.GetString((Invoke-LbfBlobGet $Client $u $Token $null)).TrimStart([char]0xFEFF))
         foreach ($n in $xml.SelectNodes($Path)) { $names.Add($n.InnerText) }
         $next = $xml.SelectSingleNode('/EnumerationResults/NextMarker')
-        if ($null -eq $next -or $next.InnerText -eq '') { break }
+        if ($null -eq $next -or $next.InnerText.Length -eq 0) { break }
         $marker = $next.InnerText
     }
     return , $names.ToArray()
@@ -575,7 +573,7 @@ function Invoke-LbfBrowse {
     $token = $null
     $client = New-LbfHttpClient
     try {
-        $containers = @($Options.container -split ',' | Where-Object { $_ -ne '' })
+        $containers = @($Options.container.Split([char]',') | Where-Object { $_.Length -gt 0 })
         if ($containers.Count -eq 0) {
             try {
                 $token = Get-LbfBrowseToken $cred
@@ -642,7 +640,7 @@ function Add-LbfCatalogueEntry {
     $Cat.Files["$Container/$Id"] = $Flat.Files
     $Cat.Crates["$Container/$Id"] = $Path
     foreach ($iri in @($Flat.Names.Keys)) {
-        if (-not $Cat.Labels.ContainsKey($iri) -or [string]$Cat.Labels[$iri] -eq '') { $Cat.Labels[$iri] = $Flat.Names[$iri] }
+        if (-not $Cat.Labels.ContainsKey($iri) -or ([string]$Cat.Labels[$iri]).Length -eq 0) { $Cat.Labels[$iri] = $Flat.Names[$iri] }
     }
 }
 
@@ -661,7 +659,7 @@ function ConvertTo-LbfCatalogueJson {
 # Go's net.Listen error for "127.0.0.1:<port>", or the port number.
 function ConvertTo-LbfListenPort {
     param([string]$Port)
-    $m = [regex]::Match($Port, '^([+-]?)([0-9]+)$')
+    $m = [regex]::Match($Port, '\A([+-]?)([0-9]+)\z')
     if (-not $m.Success) { throw (New-LbfError "listen tcp: lookup tcp/${Port}: unknown port") }
     $n = [decimal]::Parse($m.Groups[2].Value.Substring(0, [Math]::Min(20, $m.Groups[2].Value.Length)), $script:Invariant)
     if ($m.Groups[1].Value -eq '-' -or $n -gt 65535) { throw (New-LbfError "listen tcp: address ${Port}: invalid port") }
@@ -808,7 +806,7 @@ function Invoke-LbfServeBuffered {
         $lines = $text.Substring(0, $end) -split "`r`n"
         $req = @{ Headers = @{} }
         $first = $lines[0] -split ' '
-        if ($first.Count -ne 3 -or $first[2] -notmatch '^HTTP/1\.[01]$') {
+        if ($first.Count -ne 3 -or $first[2] -cnotmatch '\AHTTP/1\.[01]\z') {
             Send-LbfHttpResponse $Conn.Stream (New-LbfHttpResponse 400 'text/plain; charset=utf-8' ([Text.Encoding]::ASCII.GetBytes('400 Bad Request'))) $false $true
             return $false
         }
@@ -817,15 +815,16 @@ function Invoke-LbfServeBuffered {
             $colon = $lines[$i].IndexOf([char]':')
             if ($colon -gt 0) { $req.Headers[$lines[$i].Substring(0, $colon).Trim().ToLowerInvariant()] = $lines[$i].Substring($colon + 1).Trim() }
         }
-        $close = $req.Proto -eq 'HTTP/1.0'
+        $close = Test-LbfSame $req.Proto 'HTTP/1.0'
         if ($req.Headers.ContainsKey('connection')) {
-            $connHeader = $req.Headers['connection'].ToLowerInvariant()
-            if ($connHeader -eq 'close') { $close = $true } elseif ($connHeader -eq 'keep-alive') { $close = $false }
+            $connHeader = $req.Headers['connection']
+            if ([string]::Equals($connHeader, 'close', [StringComparison]::OrdinalIgnoreCase)) { $close = $true }
+            elseif ([string]::Equals($connHeader, 'keep-alive', [StringComparison]::OrdinalIgnoreCase)) { $close = $false }
         }
-        $hasBody = $req.Headers.ContainsKey('transfer-encoding') -or ($req.Headers.ContainsKey('content-length') -and $req.Headers['content-length'] -ne '0')
+        $hasBody = $req.Headers.ContainsKey('transfer-encoding') -or ($req.Headers.ContainsKey('content-length') -and -not (Test-LbfSame $req.Headers['content-length'] '0'))
         if ($hasBody) { $close = $true }
         $resp = Get-LbfCatalogueResponse $req $Site
-        Send-LbfHttpResponse $Conn.Stream $resp ($req.Method -ceq 'HEAD') $close
+        Send-LbfHttpResponse $Conn.Stream $resp (Test-LbfSame $req.Method 'HEAD') $close
         if ($close) { return $false }
     }
 }
@@ -869,27 +868,26 @@ function Send-LbfHttpResponse {
 # Go's cleanPath: path.Clean, keeping a trailing slash.
 function Get-LbfCleanUrlPath {
     param([string]$Path)
-    if ($Path -eq '') { return '/' }
+    if ($Path.Length -eq 0) { return '/' }
     if (-not $Path.StartsWith('/', [StringComparison]::Ordinal)) { $Path = '/' + $Path }
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($seg in ($Path -split '/')) {
-        if ($seg -eq '' -or $seg -eq '.') { continue }
-        if ($seg -eq '..') { if ($out.Count -gt 0) { $out.RemoveAt($out.Count - 1) }; continue }
+        if ($seg.Length -eq 0 -or (Test-LbfSame $seg '.')) { continue }
+        if (Test-LbfSame $seg '..') { if ($out.Count -gt 0) { $out.RemoveAt($out.Count - 1) }; continue }
         $out.Add($seg)
     }
     $clean = '/' + ($out -join '/')
-    if ($Path.EndsWith('/', [StringComparison]::Ordinal) -and $clean -ne '/') { $clean += '/' }
+    if ($Path.EndsWith('/', [StringComparison]::Ordinal) -and -not (Test-LbfSame $clean '/')) { $clean += '/' }
     return $clean
 }
 
 function ConvertFrom-LbfUrlEscapes {
     param([string]$Text)
-    if ($Text.IndexOf([char]'%') -lt 0) { return $Text }
     if (-not (Test-LbfUrlUnescapable $Text)) { return $null }
     $bytes = New-Object System.Collections.Generic.List[byte]
     for ($i = 0; $i -lt $Text.Length; $i++) {
-        if ($Text[$i] -eq '%') { $bytes.Add([Convert]::ToByte($Text.Substring($i + 1, 2), 16)); $i += 2 }
-        else { foreach ($b in $script:Utf8NoBom.GetBytes([string]$Text[$i])) { $bytes.Add($b) } }
+        if ($Text[$i] -eq [char]'%') { $bytes.Add([Convert]::ToByte($Text.Substring($i + 1, 2), 16)); $i += 2 }
+        else { $bytes.Add([byte][int]$Text[$i]) }
     }
     return $script:Utf8NoBom.GetString($bytes.ToArray())
 }
@@ -903,7 +901,7 @@ function ConvertTo-LbfHtmlEscaped {
 function Get-LbfCatalogueResponse {
     param([hashtable]$Req, [hashtable]$Site)
     $target = $Req.Target
-    if ($Req.Method -ceq 'OPTIONS' -and $target -eq '*') { return New-LbfHttpResponse 200 '' $null }
+    if ((Test-LbfSame $Req.Method 'OPTIONS') -and (Test-LbfSame $target '*')) { return New-LbfHttpResponse 200 '' $null }
     $m = [regex]::Match($target, '^[A-Za-z][A-Za-z0-9+.-]*://[^/]*')
     if ($m.Success) { $target = $target.Substring($m.Length) }
     $query = ''
@@ -911,23 +909,23 @@ function Get-LbfCatalogueResponse {
     if ($q -ge 0) { $query = $target.Substring($q + 1); $target = $target.Substring(0, $q) }
     if ($null -eq (ConvertFrom-LbfUrlEscapes $target) -or -not $target.StartsWith('/', [StringComparison]::Ordinal)) { return New-LbfHttpTextResponse 400 '400 Bad Request' }
     $clean = Get-LbfCleanUrlPath $target
-    if ($clean -cne $target) {
+    if (-not (Test-LbfSame $clean $target)) {
         $loc = $clean
-        if ($query -ne '') { $loc += '?' + $query }
+        if ($query.Length -gt 0) { $loc += '?' + $query }
         $body = $null
         $type = ''
-        if ($Req.Method -ceq 'GET' -or $Req.Method -ceq 'HEAD') { $type = 'text/html; charset=utf-8' }
-        if ($Req.Method -ceq 'GET') { $body = $script:Utf8NoBom.GetBytes("<a href=`"$(ConvertTo-LbfHtmlEscaped $loc)`">Temporary Redirect</a>.`n`n") }
+        if (Test-LbfIn $Req.Method @('GET', 'HEAD')) { $type = 'text/html; charset=utf-8' }
+        if (Test-LbfSame $Req.Method 'GET') { $body = $script:Utf8NoBom.GetBytes("<a href=`"$(ConvertTo-LbfHtmlEscaped $loc)`">Temporary Redirect</a>.`n`n") }
         return New-LbfHttpResponse 307 $type $body @{ Location = $loc }
     }
     $segs = @($target.Substring(1) -split '/')
     $route = ''
-    if ($target -eq '/') { $route = 'page' }
-    elseif ($segs.Count -eq 1 -and $segs[0] -ceq 'catalogue.json') { $route = 'data' }
-    elseif ($segs.Count -eq 3 -and $segs[0] -ceq 'crate' -and $segs[1] -ne '' -and $segs[2] -ne '') { $route = 'crate' }
-    if ($route -eq '') { return New-LbfHttpTextResponse 404 '404 page not found' }
-    if ($Req.Method -cne 'GET' -and $Req.Method -cne 'HEAD') { return New-LbfHttpTextResponse 405 'Method Not Allowed' @{ Allow = 'GET, HEAD' } }
-    switch ($route) {
+    if (Test-LbfSame $target '/') { $route = 'page' }
+    elseif ($segs.Count -eq 1 -and (Test-LbfSame (ConvertFrom-LbfUrlEscapes $segs[0]) 'catalogue.json')) { $route = 'data' }
+    elseif ($segs.Count -eq 3 -and (Test-LbfSame (ConvertFrom-LbfUrlEscapes $segs[0]) 'crate') -and $segs[1].Length -gt 0 -and $segs[2].Length -gt 0) { $route = 'crate' }
+    if ($route.Length -eq 0) { return New-LbfHttpTextResponse 404 '404 page not found' }
+    if (-not (Test-LbfIn $Req.Method @('GET', 'HEAD'))) { return New-LbfHttpTextResponse 405 'Method Not Allowed' @{ Allow = 'GET, HEAD' } }
+    switch -CaseSensitive ($route) {
         'page' { return New-LbfHttpResponse 200 'text/html; charset=utf-8' $Site.Page }
         'data' { return New-LbfHttpResponse 200 'application/json' $Site.Data }
     }

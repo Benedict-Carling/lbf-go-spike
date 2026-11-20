@@ -22,11 +22,10 @@ function ConvertTo-LbfInstrument {
         $eq = $part.IndexOf([char]'=')
         if ($eq -ge 0) {
             $field = $null
-            switch -CaseSensitive ($part.Substring(0, $eq)) {
-                'name' { $field = 'Name' }
-                'version' { $field = 'Version' }
-                'url' { $field = 'URL' }
-            }
+            $key = $part.Substring(0, $eq)
+            if (Test-LbfSame $key 'name') { $field = 'Name' }
+            elseif (Test-LbfSame $key 'version') { $field = 'Version' }
+            elseif (Test-LbfSame $key 'url') { $field = 'URL' }
             if ($null -ne $field) {
                 $in[$field] = $part.Substring($eq + 1)
                 $last = $field
@@ -43,9 +42,9 @@ function ConvertTo-LbfInstrument {
 function ConvertTo-LbfProvenanceValue {
     param([Parameter(Mandatory)][hashtable]$Provenance)
     $o = New-LbfOrdered
-    if ($Provenance.Name -ne '') { $o['name'] = $Provenance.Name }
-    if ($Provenance.Description -ne '') { $o['description'] = $Provenance.Description }
-    if ($Provenance.DerivedFrom -ne '') { $o['derived_from'] = $Provenance.DerivedFrom }
+    if (-not [string]::IsNullOrEmpty($Provenance.Name)) { $o['name'] = $Provenance.Name }
+    if (-not [string]::IsNullOrEmpty($Provenance.Description)) { $o['description'] = $Provenance.Description }
+    if (-not [string]::IsNullOrEmpty($Provenance.DerivedFrom)) { $o['derived_from'] = $Provenance.DerivedFrom }
     if ($null -ne $Provenance.Instruments -and $Provenance.Instruments.Count -gt 0) {
         $list = New-Object System.Collections.Generic.List[object]
         foreach ($in in $Provenance.Instruments) {
@@ -69,11 +68,11 @@ function ConvertTo-LbfProvenanceValue {
 # Go's provenance.sameAs: instruments compared as a set.
 function Test-LbfSameProvenance {
     param([hashtable]$A, [hashtable]$B)
-    if ($A.Name -cne $B.Name -or $A.Description -cne $B.Description -or $A.DerivedFrom -cne $B.DerivedFrom) { return $false }
+    if (-not (Test-LbfSame $A.Name $B.Name) -or -not (Test-LbfSame $A.Description $B.Description) -or -not (Test-LbfSame $A.DerivedFrom $B.DerivedFrom)) { return $false }
     $sa = Get-LbfInstrumentSet $A.Instruments
     $sb = Get-LbfInstrumentSet $B.Instruments
     if ($sa.Count -ne $sb.Count) { return $false }
-    for ($i = 0; $i -lt $sa.Count; $i++) { if ($sa[$i] -cne $sb[$i]) { return $false } }
+    for ($i = 0; $i -lt $sa.Count; $i++) { if (-not (Test-LbfSame $sa[$i] $sb[$i])) { return $false } }
     $pa = $A.Properties; $pb = $B.Properties
     $na = 0; $nb = 0
     if ($null -ne $pa) { $na = $pa.Count }
@@ -81,7 +80,7 @@ function Test-LbfSameProvenance {
     if ($na -ne $nb) { return $false }
     if ($na -eq 0) { return $true }
     foreach ($k in $pa.Keys) {
-        if (-not $pb.ContainsKey($k) -or $pb[$k] -cne $pa[$k]) { return $false }
+        if (-not $pb.ContainsKey($k) -or -not (Test-LbfSame $pb[$k] $pa[$k])) { return $false }
     }
     return $true
 }
@@ -95,7 +94,7 @@ function Get-LbfInstrumentSet {
     $arr = $keys.ToArray()
     [Array]::Sort($arr, [StringComparer]::Ordinal)
     $out = New-Object System.Collections.Generic.List[string]
-    foreach ($k in $arr) { if ($out.Count -eq 0 -or $out[$out.Count - 1] -cne $k) { $out.Add($k) } }
+    foreach ($k in $arr) { if ($out.Count -eq 0 -or -not (Test-LbfSame $out[$out.Count - 1] $k)) { $out.Add($k) } }
     return , $out
 }
 
@@ -105,13 +104,13 @@ function Get-LbfProvenance {
     $p = New-LbfProvenanceValue
     $p.DerivedFrom = [string]$Flags.derivedFrom
     foreach ($in in $Flags.instruments) { $p.Instruments.Add($in) }
-    if ($Flags.file -ne '') {
-        if ($Flags.derivedFrom -ne '' -or $Flags.instruments.Count -gt 0 -or $Flags.properties -ne '') {
+    if ($Flags.file.Length -ne 0) {
+        if ($Flags.derivedFrom.Length -ne 0 -or $Flags.instruments.Count -gt 0 -or $Flags.properties.Length -ne 0) {
             throw (New-LbfError '--provenance cannot be combined with --derived-from, --instrument or --properties')
         }
         $p = Read-LbfProvenanceFile $Flags.file
     }
-    if ($Flags.properties -ne '') {
+    if ($Flags.properties.Length -ne 0) {
         try {
             $props = Read-LbfStrictJson $Flags.properties 'properties'
             if ($null -eq $props) { throw (New-LbfError 'want a JSON object of property names and values') }
@@ -129,8 +128,9 @@ function Get-LbfProvenance {
     }
     foreach ($field in @(@('name', 'Name', $Flags.name), @('description', 'Description', $Flags.description))) {
         $value = [string]$field[2]
-        if ($value -ne '' -and $p[$field[1]] -ne '') { throw (New-LbfError "--$($field[0]) is also given in $($Flags.file)") }
-        if ($p[$field[1]] -eq '') { $p[$field[1]] = $value }
+        $have = [string]$p[$field[1]]
+        if ($value.Length -ne 0 -and $have.Length -ne 0) { throw (New-LbfError "--$($field[0]) is also given in $($Flags.file)") }
+        if ($have.Length -eq 0) { $p[$field[1]] = $value }
     }
     Assert-LbfProvenance $p
     return $p
@@ -154,19 +154,20 @@ function Assert-LbfProvenance {
     param([Parameter(Mandatory)][hashtable]$P)
     $n = 0
     if ($null -ne $P.Instruments) { $n = $P.Instruments.Count }
-    if (($P.DerivedFrom -eq '') -ne ($n -eq 0)) { throw (New-LbfError 'derived_from and instruments are given together or not at all') }
-    if ($P.DerivedFrom -ne '' -and -not (Test-LbfMintedId $P.DerivedFrom)) {
+    $derived = [string]$P.DerivedFrom
+    if (($derived.Length -eq 0) -ne ($n -eq 0)) { throw (New-LbfError 'derived_from and instruments are given together or not at all') }
+    if ($derived.Length -ne 0 -and -not (Test-LbfMintedId $P.DerivedFrom)) {
         throw (New-LbfError "derived_from $(Format-LbfQuote $P.DerivedFrom) is not a dataset ID such as 20261001-fancy-dassie-eadb")
     }
     $byUrl = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
     for ($i = 0; $i -lt $n; $i++) {
         $in = $P.Instruments[$i]
-        if ($in.Name -eq '' -or $in.Version -eq '' -or $in.URL -eq '') { throw (New-LbfError "instruments[$i] needs a name, version and url") }
+        if ([string]::IsNullOrEmpty($in.Name) -or [string]::IsNullOrEmpty($in.Version) -or [string]::IsNullOrEmpty($in.URL)) { throw (New-LbfError "instruments[$i] needs a name, version and url") }
         if (-not (Test-LbfAbsoluteUrl $in.URL)) { throw (New-LbfError "instruments[$i] url $(Format-LbfQuote $in.URL) is not an absolute URL") }
         $j = 0
         if ($byUrl.TryGetValue($in.URL, [ref]$j)) {
             $o = $P.Instruments[$j]
-            if ($o.Name -cne $in.Name -or $o.Version -cne $in.Version) {
+            if (-not (Test-LbfSame $o.Name $in.Name) -or -not (Test-LbfSame $o.Version $in.Version)) {
                 throw (New-LbfError ("instruments[$j] ($($o.Name) $($o.Version)) and instruments[$i] ($($in.Name) $($in.Version)) share the url $($in.URL), " +
                     'which the crate uses to tell tools apart; give each its own url'))
             }
@@ -182,7 +183,7 @@ function Assert-LbfProvenance {
     $props.Keys.CopyTo($names, 0)
     [Array]::Sort($names, [StringComparer]::Ordinal)
     foreach ($k in $names) {
-        if ($k -ceq 'uploader' -or $k -ceq 'blob-location' -or $k -ceq 'run' -or $k.StartsWith('source-', [StringComparison]::Ordinal) -or $k.StartsWith('@', [StringComparison]::Ordinal)) {
+        if ((Test-LbfIn $k 'uploader', 'blob-location', 'run') -or $k.StartsWith('source-', [StringComparison]::Ordinal) -or $k.StartsWith('@', [StringComparison]::Ordinal)) {
             throw (New-LbfError "property $(Format-LbfQuote $k) would clash with an entity or keyword in the crate; choose another name")
         }
     }
@@ -210,7 +211,7 @@ function Test-LbfAbsoluteUrl {
         $at = $auth.LastIndexOf([char]'@')
         if ($at -ge 0) {
             $user = $auth.Substring(0, $at)
-            if ($user -match '[^A-Za-z0-9\-._:~!$&''()*+,;=%@]' -or -not (Test-LbfUrlEscapes $user)) { return $false }
+            if ($user -cmatch '[^A-Za-z0-9\-._:~!$&''()*+,;=%@]' -or -not (Test-LbfUrlEscapes $user)) { return $false }
             $auth = $auth.Substring($at + 1)
         }
         if (-not (Test-LbfUrlHost $auth)) { return $false }
@@ -221,7 +222,7 @@ function Test-LbfAbsoluteUrl {
 
 function Test-LbfUrlEscapes {
     param([string]$Text)
-    return -not ($Text -match '%(?![0-9A-Fa-f]{2})')
+    return -not ($Text -cmatch '%(?![0-9A-Fa-f]{2})')
 }
 
 function Test-LbfUrlHost {
@@ -233,12 +234,12 @@ function Test-LbfUrlHost {
         if ($close -lt 0) { return $false }
         $port = $HostPort.Substring($close + 1)
         $hostPart = $HostPort.Substring(1, $close - 1)
-        if ($port -ne '' -and -not $port.StartsWith(':', [StringComparison]::Ordinal)) { return $false }
+        if ($port.Length -ne 0 -and -not $port.StartsWith(':', [StringComparison]::Ordinal)) { return $false }
     } else {
         $colon = $HostPort.LastIndexOf([char]':')
         if ($colon -ge 0) { $port = $HostPort.Substring($colon); $hostPart = $HostPort.Substring(0, $colon) }
     }
-    if ($port -ne '' -and $port -notmatch '\A:[0-9]*\z') { return $false }
+    if ($port.Length -ne 0 -and $port -cnotmatch '\A:[0-9]*\z') { return $false }
     if (-not (Test-LbfUrlEscapes $hostPart)) { return $false }
     foreach ($ch in $hostPart.ToCharArray()) {
         $c = [int]$ch
@@ -315,7 +316,7 @@ function Format-LbfQuoteRune {
     if ($r[0] -lt 0) { return "'\x" + ([int]$B[$Pos]).ToString('x') + "'" }
     $q = Format-LbfQuote ([char]::ConvertFromUtf32($r[0]))
     $inner = $q.Substring(1, $q.Length - 2).Replace('\"', '"')
-    if ($inner -eq "'") { $inner = "\'" }
+    if (Test-LbfSame $inner "'") { $inner = "\'" }
     return "'" + $inner + "'"
 }
 

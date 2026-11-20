@@ -28,7 +28,7 @@ function Assert-LbfLegacyJson {
     if ($r.ContainsKey('Err')) {
         $text = $r.Err.Text
         if ($r.Err.Kind -eq 'mismatch') { $text = (New-LbfInvalidChar $d $r.At 'at start of value').Text }
-        if ($text -eq 'unexpected EOF') { $text = 'unexpected end of JSON input' }
+        if (Test-LbfSame $text 'unexpected EOF') { $text = 'unexpected end of JSON input' }
         throw (New-LbfError (ConvertTo-LbfLegacyJsonText $text))
     }
     $pos = Skip-LbfJsonSpace $d $r.End
@@ -125,14 +125,14 @@ function Get-LbfSchemaHead {
                 continue
             }
             if ($null -eq $err) {
-                $err = "json: cannot unmarshal $(Get-LbfLegacyKind $v) into Go struct field .$field of type string"
+                $err = "json: cannot unmarshal $(Get-LbfLegacyKind $v) into Go struct field .$k of type string"
             }
         }
     } elseif ($null -ne $doc) {
         $err = "json: cannot unmarshal $(Get-LbfLegacyKind $doc) into Go value of type struct { ID string " + '"json:\"$id\""; Ref string "json:\"$ref\"" }'
     }
     if ($null -ne $err) { throw (New-LbfError $err) }
-    if ($id -eq '') { throw (New-LbfError "no `$id; it is recorded as the crate's conformsTo") }
+    if ($id.Length -eq 0) { throw (New-LbfError "no `$id; it is recorded as the crate's conformsTo") }
     if (-not (Test-LbfProfileUrl $id)) {
         throw (New-LbfError "`$id $(Format-LbfQuote $id) is not an absolute URL such as https://example.org/profiles/name/0.1.0; it is recorded as the crate's conformsTo")
     }
@@ -157,7 +157,7 @@ function Test-LbfProfileUrl {
     $auth = $m.Groups[1].Value
     $at = $auth.LastIndexOf([char]'@')
     if ($at -ge 0) { $auth = $auth.Substring($at + 1) }
-    return $auth -ne ''
+    return $auth.Length -ne 0
 }
 
 # ---------- loading profiles ----------
@@ -174,7 +174,7 @@ function Get-LbfProfile {
     $docs[$bronzeId] = $bronze.Doc
     $paths[$bronzeId] = $bronzeId
     $targetId = $bronzeId
-    if ($Dir -ne '') {
+    if ($Dir.Length -ne 0) {
         $Dir = Get-LbfAbsPath $Dir
         $target = Join-LbfPath $Dir 'profile.json'
         if ([IO.File]::Exists((Get-LbfIoPath $Dir))) { $target = $Dir }
@@ -200,18 +200,18 @@ function Get-LbfProfile {
                 try { $raw = [IO.File]::ReadAllBytes((Get-LbfIoPath $path)) } catch { throw (New-LbfError (Format-LbfOsError 'open' $path $_)) }
                 $head = Get-LbfSchemaHead $raw
             } catch { $err = $_ }
-            if ($null -ne $err -and $path -cne $target) { continue }
+            if ($null -ne $err -and -not (Test-LbfSame $path $target)) { continue }
             if ($null -ne $err) { throw (New-LbfError "${path}: $(Get-LbfErrorText $err)") }
-            if ($head.ID -ceq $bronzeId) { throw (New-LbfError "${path}: `$id $($head.ID) is lbf's bronze profile, which only lbf defines") }
+            if (Test-LbfSame $head.ID $bronzeId) { throw (New-LbfError "${path}: `$id $($head.ID) is lbf's bronze profile, which only lbf defines") }
             $docs[$head.ID] = $head.Doc
             $parents[$head.ID] = $head.Ref
             $paths[$head.ID] = $path
-            if ($path -ceq $target) { $targetId = $head.ID }
+            if (Test-LbfSame $path $target) { $targetId = $head.ID }
         }
     }
     $chain = New-Object System.Collections.Generic.List[string]
     $id = $targetId
-    while ($id -ne '' -and $id -cne $bronzeId -and -not $chain.Contains($id)) {
+    while ($id.Length -ne 0 -and -not (Test-LbfSame $id $bronzeId) -and -not $chain.Contains($id)) {
         $chain.Insert(0, $id)
         $next = ''
         if (-not $parents.TryGetValue($id, [ref]$next)) { $next = '' }
@@ -227,16 +227,26 @@ function Get-LbfProfile {
         $p = ''
         if (-not $paths.TryGetValue($rid, [ref]$p)) { $p = '' }
         try {
-            $sch = Get-LbfCompiledSchema $compiler $rid ($rid -cne $bronzeId)
+            $sch = Get-LbfCompiledSchema $compiler $rid (-not (Test-LbfSame $rid $bronzeId))
         } catch {
             throw (New-LbfError "profile $rid (${p}): $(Get-LbfErrorText $_)")
         }
         $title = ''
         $doc = $null
-        if ($docs.TryGetValue($rid, [ref]$doc) -and $doc -is [System.Collections.IDictionary] -and $doc.Contains('title') -and $doc['title'] -is [string]) { $title = $doc['title'] }
+        if ($docs.TryGetValue($rid, [ref]$doc) -and $doc -is [System.Collections.IDictionary]) { $title = Get-LbfStructField $doc 'title' }
         $rules.Add(@{ ID = $rid; Title = $title; Schema = $sch })
     }
     return @{ ID = $targetId; Rules = $rules }
+}
+
+# json.Unmarshal into a string field: the last string under a name equal to Name as strings.EqualFold has it.
+function Get-LbfStructField {
+    param([System.Collections.IDictionary]$Doc, [string]$Name)
+    $v = ''
+    foreach ($k in $Doc.Keys) {
+        if ([string]::Equals($k, $Name, [StringComparison]::OrdinalIgnoreCase) -and $Doc[$k] -is [string]) { $v = $Doc[$k] }
+    }
+    return $v
 }
 
 function Get-LbfSortedDirs {
@@ -268,7 +278,7 @@ function Get-LbfProfileTitles {
     param([hashtable]$Profile)
     $t = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $t[$script:ProcessRunCrate] = 'Process Run Crate'
-    foreach ($r in $Profile.Rules) { if ($r.Title -ne '') { $t[$r.ID] = $r.Title } }
+    foreach ($r in $Profile.Rules) { if ($r.Title.Length -ne 0) { $t[$r.ID] = $r.Title } }
     return , $t
 }
 
@@ -331,7 +341,7 @@ function Add-LbfSchemaResources {
         $item = $todo.Pop()
         $node = $item[0]; $ptr = $item[1]; $base = $item[2]
         if (-not ($node -is [System.Collections.IDictionary])) { continue }
-        if ($ptr -ne '' -and $node.Contains('$id') -and $node['$id'] -is [string]) {
+        if ($ptr.Length -ne 0 -and $node.Contains('$id') -and $node['$id'] -is [string]) {
             $base = Join-LbfUrl $base (Get-LbfUrlNoFragment $node['$id'])
             if (-not $C.Resources.ContainsKey($base)) { $C.Resources[$base] = @{ Doc = $DocUrl; Ptr = $ptr } }
         }
@@ -367,9 +377,9 @@ function Get-LbfUrlNoFragment {
 # RFC 3986 reference resolution, enough for schema $id and $ref.
 function Join-LbfUrl {
     param([string]$Base, [string]$Ref)
-    if ($Ref -match '\A[A-Za-z][A-Za-z0-9+.\-]*:') { return $Ref }
+    if ($Ref -cmatch '\A[A-Za-z][A-Za-z0-9+.\-]*:') { return $Ref }
     $baseNoFrag = Get-LbfUrlNoFragment $Base
-    if ($Ref -eq '') { return $baseNoFrag }
+    if ($Ref.Length -eq 0) { return $baseNoFrag }
     if ($Ref.StartsWith('#', [StringComparison]::Ordinal)) { return $baseNoFrag + $Ref }
     $m = [regex]::Match($baseNoFrag, '\A([A-Za-z][A-Za-z0-9+.\-]*:)(//[^/?#]*)?([^?#]*)(\?[^#]*)?')
     $scheme = $m.Groups[1].Value
@@ -382,20 +392,20 @@ function Join-LbfUrl {
     $query = ''
     $q = $Ref.IndexOf([char]'?')
     if ($q -ge 0) { $query = $Ref.Substring($q); $Ref = $Ref.Substring(0, $q) }
-    if ($Ref -eq '') { $newPath = $path; if ($query -eq '') { $query = $m.Groups[4].Value } }
+    if ($Ref.Length -eq 0) { $newPath = $path; if ($query.Length -eq 0) { $query = $m.Groups[4].Value } }
     elseif ($Ref.StartsWith('/', [StringComparison]::Ordinal)) { $newPath = $Ref }
     else {
         $dir = ''
         $slash = $path.LastIndexOf([char]'/')
-        if ($slash -ge 0) { $dir = $path.Substring(0, $slash + 1) } elseif ($auth -ne '') { $dir = '/' }
+        if ($slash -ge 0) { $dir = $path.Substring(0, $slash + 1) } elseif ($auth.Length -ne 0) { $dir = '/' }
         $newPath = $dir + $Ref
     }
     $segs = New-Object System.Collections.Generic.List[string]
     $parts = $newPath.Split([char]'/')
     for ($i = 0; $i -lt $parts.Length; $i++) {
         $s = $parts[$i]
-        if ($s -eq '.') { if ($i -eq $parts.Length - 1) { $segs.Add('') }; continue }
-        if ($s -eq '..') {
+        if (Test-LbfSame $s '.') { if ($i -eq $parts.Length - 1) { $segs.Add('') }; continue }
+        if (Test-LbfSame $s '..') {
             if ($segs.Count -gt 1) { $segs.RemoveAt($segs.Count - 1) }
             if ($i -eq $parts.Length - 1) { $segs.Add('') }
             continue
@@ -416,13 +426,13 @@ function Resolve-LbfSchemaUrl {
     $res = $null
     if (-not $C.Resources.TryGetValue($base, [ref]$res)) {
         $path = $null
-        if (-not ($base -match '\A[A-Za-z][A-Za-z0-9+.\-]*:') -or ($script:OnWindows -and $base -match '\A[A-Za-z]:')) {
-            if ($base -eq '') { $path = Get-LbfAbsPath '.' } else { $path = Get-LbfAbsPath $base }
+        if (-not ($base -cmatch '\A[A-Za-z][A-Za-z0-9+.\-]*:') -or ($script:OnWindows -and $base -cmatch '\A[A-Za-z]:')) {
+            if ($base.Length -eq 0) { $path = Get-LbfAbsPath '.' } else { $path = Get-LbfAbsPath $base }
             $fileUrl = 'file://' + $path.Replace('\', '/')
             if ($script:OnWindows) { $fileUrl = 'file:///' + $path.Replace('\', '/') }
             $base = $fileUrl
             if ($hash -ge 0) { $Url = $fileUrl + '#' + $Url.Substring($hash + 1) } else { $Url = $fileUrl }
-        } elseif ($base -match '\Afile://') {
+        } elseif ($base -cmatch '\A[fF][iI][lL][eE]://') {
             $path = [Uri]::UnescapeDataString($base.Substring(7))
             if ($script:OnWindows) { $path = $path.TrimStart('/').Replace('/', '\') }
         }
@@ -441,7 +451,7 @@ function Resolve-LbfSchemaUrl {
         }
         if ($null -eq $res) { throw (New-LbfError "failing loading $(Format-LbfQuote $base): invalid file url: $base") }
     }
-    if ($frag -eq '' -or $frag.StartsWith('/', [StringComparison]::Ordinal)) {
+    if ($frag.Length -eq 0 -or $frag.StartsWith('/', [StringComparison]::Ordinal)) {
         return @{ Doc = $res.Doc; Ptr = $res.Ptr + $frag; Url = $Url }
     }
     $a = $null
@@ -452,7 +462,7 @@ function Resolve-LbfSchemaUrl {
 function Get-LbfJsonAtPointer {
     param($Doc, [string]$Ptr, [string]$Url)
     $v = $Doc
-    if ($Ptr -eq '') { return , $v }
+    if ($Ptr.Length -eq 0) { return , $v }
     foreach ($tok in $Ptr.Substring(1).Split([char]'/')) {
         $t = $tok.Replace('~1', '/').Replace('~0', '~')
         if ($v -is [System.Collections.IDictionary] -and $v.Contains($t)) { $v = $v[$t]; continue }
@@ -522,8 +532,8 @@ function Get-LbfNodeBase {
     $doc = $C.Docs[$DocUrl]
     $cur = $doc
     $toks = @()
-    if ($Ptr -ne '') { $toks = $Ptr.Substring(1).Split([char]'/') }
-    if ($Ptr -eq '') { return $base }
+    if ($Ptr.Length -eq 0) { return $base }
+    $toks = $Ptr.Substring(1).Split([char]'/')
     for ($i = 0; $i -lt $toks.Length; $i++) {
         $t = $toks[$i].Replace('~1', '/').Replace('~0', '~')
         if ($cur -is [System.Collections.IDictionary]) { $cur = $cur[$t] }
@@ -560,7 +570,7 @@ function Set-LbfSchemaNode {
         if ($C.IsMeta) { break }
         if ($Raw.Contains($k)) { throw (New-LbfError "the keyword $k at $(Format-LbfQuote ($DocUrl + '#' + $Ptr)) is not supported by the PowerShell lbf; use lbf.exe or rewrite the profile without it") }
     }
-    if (-not $C.IsMeta -and $Raw.Contains('$schema') -and $Raw['$schema'] -is [string] -and (Get-LbfUrlNoFragment $Raw['$schema']) -cne $script:Draft202012) {
+    if (-not $C.IsMeta -and $Raw.Contains('$schema') -and $Raw['$schema'] -is [string] -and -not (Test-LbfSame (Get-LbfUrlNoFragment $Raw['$schema']) $script:Draft202012)) {
         throw (New-LbfError "`$schema $(Format-LbfQuote $Raw['$schema']) is not supported by the PowerShell lbf, which reads only $($script:Draft202012)")
     }
     $sub = {
@@ -571,7 +581,7 @@ function Set-LbfSchemaNode {
         $t = $Raw['type']
         $set = @($t)
         $order = @('null', 'boolean', 'number', 'integer', 'string', 'array', 'object')
-        $N.Types = [string[]]@($order | Where-Object { $set -ccontains $_ })
+        $N.Types = [string[]]@($order | Where-Object { Test-LbfIn $_ $set })
     }
     if ($Raw.Contains('const')) { $N.HasConst = $true; $N.Const = $Raw['const'] }
     if ($Raw.Contains('enum')) {
@@ -583,9 +593,9 @@ function Set-LbfSchemaNode {
     if ($Raw.Contains('format') -and $Raw['format'] -is [string]) {
         $f = $Raw['format']
         if ($C.IsMeta) {
-            if (@('regex', 'uri', 'uri-reference') -ccontains $f) { $N.Format = $f }
-        } elseif ($script:FormatNames -ccontains $f) {
-            if (@('duration', 'period', 'semver', 'uri-template', 'relative-json-pointer') -ccontains $f) {
+            if (Test-LbfIn $f @('regex', 'uri', 'uri-reference')) { $N.Format = $f }
+        } elseif (Test-LbfIn $f $script:FormatNames) {
+            if (Test-LbfIn $f @('duration', 'period', 'semver', 'uri-template', 'relative-json-pointer')) {
                 throw (New-LbfError "format $(Format-LbfQuote $f) at $(Format-LbfQuote ($DocUrl + '#' + $Ptr)) is not supported by the PowerShell lbf; use lbf.exe or rewrite the profile without it")
             }
             $N.Format = $f
@@ -594,7 +604,7 @@ function Set-LbfSchemaNode {
     if ($Raw.Contains('$ref')) {
         $url = Join-LbfUrl $Base $Raw['$ref']
         $loc = Resolve-LbfSchemaUrl $C $url
-        if ($loc.Doc -cne $DocUrl -and $C.Checked.Add($loc.Doc) -and $null -ne $C.Meta) { Assert-LbfMetaSchema $C $loc.Doc }
+        if (-not (Test-LbfSame $loc.Doc $DocUrl) -and $C.Checked.Add($loc.Doc) -and $null -ne $C.Meta) { Assert-LbfMetaSchema $C $loc.Doc }
         $N.Ref = Get-LbfSchemaNode $C $loc.Doc $loc.Ptr
         $N.RefUrl = $url
     }
@@ -648,7 +658,7 @@ function Set-LbfSchemaNode {
     }
     if ($Raw.Contains('minItems')) { $N.MinItems = Get-LbfSchemaInt $Raw['minItems'] }
     if ($Raw.Contains('maxItems')) { $N.MaxItems = Get-LbfSchemaInt $Raw['maxItems'] }
-    if ($Raw.Contains('uniqueItems') -and $Raw['uniqueItems'] -eq $true) { $N.Unique = $true }
+    if ($Raw.Contains('uniqueItems') -and $Raw['uniqueItems'] -is [bool] -and $Raw['uniqueItems']) { $N.Unique = $true }
     if ($Raw.Contains('minLength')) { $N.MinLen = Get-LbfSchemaInt $Raw['minLength'] }
     if ($Raw.Contains('maxLength')) { $N.MaxLen = Get-LbfSchemaInt $Raw['maxLength'] }
     if ($Raw.Contains('pattern')) { $N.Pattern = ConvertTo-LbfNetRegex $Raw['pattern']; $N.PatternText = $Raw['pattern'] }
@@ -704,7 +714,7 @@ function ConvertTo-LbfNetRegex {
     if ($null -ne $err) { throw (New-LbfError "error parsing regexp: $err") }
     $sb = New-Object System.Text.StringBuilder
     $inClass = $false
-    $multiline = $Pattern -match '\(\?[a-zA-Z]*m'
+    $multiline = $Pattern -cmatch '\(\?[a-zA-Z]*m'
     for ($i = 0; $i -lt $Pattern.Length; $i++) {
         $c = $Pattern[$i]
         if ($c -eq '\' -and $i + 1 -lt $Pattern.Length) {
@@ -730,8 +740,8 @@ function ConvertTo-LbfNetRegex {
                 $end = $Pattern.IndexOf(':]', $i + 2, [StringComparison]::Ordinal)
                 if ($end -gt 0) {
                     $name = $Pattern.Substring($i + 2, $end - $i - 2)
-                    $posix = @{ alpha = 'A-Za-z'; digit = '0-9'; alnum = '0-9A-Za-z'; upper = 'A-Z'; lower = 'a-z'; space = '\t\n\v\f\r '; word = '0-9A-Za-z_'; xdigit = '0-9A-Fa-f'; punct = '!-/:-@\[-`{-~'; blank = '\t '; cntrl = '\x00-\x1F\x7F'; print = ' -~'; graph = '!-~'; ascii = '\x00-\x7F' }
-                    if ($posix.ContainsKey($name)) { [void]$sb.Append($posix[$name]); $i = $end + 1; continue }
+                    $posix = Get-LbfPosixClass $name
+                    if ($null -ne $posix) { [void]$sb.Append($posix); $i = $end + 1; continue }
                 }
             }
             [void]$sb.Append($c)
@@ -751,6 +761,36 @@ function ConvertTo-LbfNetRegex {
     $re = New-Object System.Text.RegularExpressions.Regex ($sb.ToString(), [System.Text.RegularExpressions.RegexOptions]::CultureInvariant)
     $script:RegexCache[$Pattern] = $re
     return $re
+}
+
+$script:PosixRanges = @{}
+foreach ($pair in ('alnum=30-39,41-5A,61-7A;alpha=41-5A,61-7A;ascii=0-7F;blank=9-9,20-20;cntrl=0-1F,7F-7F;digit=30-39;graph=21-7E;lower=61-7A;' +
+        'print=20-7E;punct=21-2F,3A-40,5B-60,7B-7E;space=9-D,20-20;upper=41-5A;word=30-39,41-5A,5F-5F,61-7A;xdigit=30-39,41-46,61-66').Split([char]';')) {
+    $kv = $pair.Split([char]'=')
+    $script:PosixRanges[$kv[0]] = @($kv[1].Split([char]',') | ForEach-Object { , @($_.Split([char]'-') | ForEach-Object { [Convert]::ToInt32($_, 16) }) })
+}
+
+# RE2's [:name:] or [:^name:] as the inside of a .NET class, or $null for a name RE2 does not know.
+function Get-LbfPosixClass {
+    param([string]$Name)
+    $negate = $Name.StartsWith('^', [StringComparison]::Ordinal)
+    $key = $Name
+    if ($negate) { $key = $Name.Substring(1) }
+    if (-not (Test-LbfIn $key @($script:PosixRanges.Keys))) { return $null }
+    $ranges = $script:PosixRanges[$key]
+    if ($negate) {
+        $out = New-Object System.Collections.Generic.List[object]
+        $next = 0
+        foreach ($r in $ranges) {
+            if ($r[0] -gt $next) { $out.Add(@($next, ($r[0] - 1))) }
+            $next = $r[1] + 1
+        }
+        $out.Add(@($next, 0xFFFF))
+        $ranges = $out.ToArray()
+    }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($r in $ranges) { [void]$sb.Append(('\u{0:X4}-\u{1:X4}' -f $r[0], $r[1])) }
+    return $sb.ToString()
 }
 
 # Go's regexp/syntax errors for the mistakes people make, or $null.
@@ -791,7 +831,10 @@ function Get-LbfRe2Error {
                     if ($Pattern[$i] -eq '\') { $i += 2; continue }
                     if ($Pattern[$i] -eq '[' -and $i + 1 -lt $Pattern.Length -and $Pattern[$i + 1] -eq ':') {
                         $end = $Pattern.IndexOf(':]', $i + 2, [StringComparison]::Ordinal)
-                        if ($end -gt 0) { $i = $end + 2; continue }
+                        if ($end -gt 0) {
+                            if ($null -eq (Get-LbfPosixClass $Pattern.Substring($i + 2, $end - $i - 2))) { return "invalid character class range: ``$($Pattern.Substring($i, $end + 2 - $i))``" }
+                            $i = $end + 2; continue
+                        }
                     }
                     if ($Pattern[$i] -eq ']') { $closed = $true; break }
                     $i++
@@ -802,10 +845,10 @@ function Get-LbfRe2Error {
             '(' {
                 if ($i + 1 -lt $Pattern.Length -and $Pattern[$i + 1] -eq '?') {
                     $rest = $Pattern.Substring($i)
-                    if ($rest -match '\A\(\?(=|!|<=|<!|>|\()') { return "invalid or unsupported Perl syntax: ``$($Matches[0])``" }
-                    if ($rest -match '\A\(\?P?<[A-Za-z0-9_]+>') { $i += $Matches[0].Length - 1 }
-                    elseif ($rest -match '\A\(\?[imsU-]*:') { $i += $Matches[0].Length - 1 }
-                    elseif ($rest -match '\A\(\?[imsU-]*\)') { $i += $Matches[0].Length - 1; $canRepeat = $false; continue }
+                    if ($rest -cmatch '\A\(\?(=|!|<=|<!|>|\()') { return "invalid or unsupported Perl syntax: ``$($Matches[0])``" }
+                    if ($rest -cmatch '\A\(\?P?<[A-Za-z0-9_]+>') { $i += $Matches[0].Length - 1 }
+                    elseif ($rest -cmatch '\A\(\?[imsU-]*:') { $i += $Matches[0].Length - 1 }
+                    elseif ($rest -cmatch '\A\(\?[imsU-]*\)') { $i += $Matches[0].Length - 1; $canRepeat = $false; continue }
                     else { return "invalid or unsupported Perl syntax: ``$($rest.Substring(0, [Math]::Min(3, $rest.Length)))``" }
                 }
                 $opens.Push($i)
@@ -1105,7 +1148,7 @@ function Test-LbfSchemaUneval {
     if ($null -ne $S.UnevalProps -and $null -ne $U.Props) {
         $names = New-Object string[] $U.Props.Count
         $U.Props.CopyTo($names)
-        [Array]::Sort($names, [StringComparer]::Ordinal)
+        $names = Get-LbfSortedUtf8 $names
         foreach ($name in $names) {
             $e = Test-LbfSchemaChild $S.UnevalProps $V[$name] $name $Loc $Bool
             if ($null -ne $e) { $Errors = Add-LbfSchemaCause $Errors $e }
@@ -1205,8 +1248,7 @@ function Test-LbfSchemaObject {
         }
     }
     if ($null -ne $additional) {
-        $arr = $additional.ToArray()
-        [Array]::Sort($arr, [StringComparer]::Ordinal)
+        $arr = Get-LbfSortedUtf8 $additional.ToArray()
         $Errors = Add-LbfSchemaErr $Errors $Bool 'additionalProperties' $Loc @{ Properties = $arr }
     }
     if ($null -ne $S.PropNames) {
@@ -1389,6 +1431,15 @@ function Get-LbfFastCheck {
     return $sb
 }
 
+$script:FastStrings = New-Object System.Collections.Generic.List[string]
+
+# A property name as generated code reads it, since PowerShell also ends a quoted literal at curly quotes.
+function Get-LbfFastString {
+    param([string]$Text)
+    $script:FastStrings.Add($Text)
+    return "`$script:FastStrings[$($script:FastStrings.Count - 1)]"
+}
+
 function Get-LbfFastId {
     param([hashtable]$N)
     if ($null -eq $N['FastId']) { $N['FastId'] = $script:FastNodes.Count; $script:FastNodes.Add($N) }
@@ -1426,16 +1477,16 @@ function Get-LbfFastBody {
         if ($null -ne $N.MaxProps) { [void]$c.Append("if ($X.Count -gt $($N.MaxProps)) { return `$false }`n") }
         if ($null -ne $N.Required) {
             foreach ($r in $N.Required) {
-                $q = "'" + $r.Replace("'", "''") + "'"
+                $q = Get-LbfFastString $r
                 [void]$c.Append("if (`$o$k) { `$h$k = $X.Contains($q) } else { `$h$k = $X.ContainsKey($q) }; if (-not `$h$k) { return `$false }`n")
             }
         }
         if ($null -ne $N.Props) {
             foreach ($name in $N.Props.Keys) {
-                $q = "'" + $name.Replace("'", "''") + "'"
+                $q = Get-LbfFastString $name
                 $j = $Ctx.Next++
                 $sub = Get-LbfFastBody $N.Props[$name] "`$v$j" $Ctx ($Depth + 1)
-                if ($sub -eq '') { continue }
+                if ($sub.Length -eq 0) { continue }
                 [void]$c.Append("if (`$o$k) { `$h$k = $X.Contains($q) } else { `$h$k = $X.ContainsKey($q) }`nif (`$h$k) {`n`$v$j = $X[$q]`n$sub}`n")
             }
         }
@@ -1461,7 +1512,7 @@ function Get-LbfFastBody {
         if ($null -ne $N.Items) {
             $j = $Ctx.Next++
             $sub = Get-LbfFastBody $N.Items "`$v$j" $Ctx ($Depth + 1)
-            if ($sub -ne '') { [void]$c.Append("foreach (`$v$j in $X) {`n$sub}`n") }
+            if ($sub.Length -ne 0) { [void]$c.Append("foreach (`$v$j in $X) {`n$sub}`n") }
         }
         if ($null -ne $N.Contains) {
             $j = $Ctx.Next++
@@ -1684,16 +1735,17 @@ function Test-LbfFormat {
             $sizes = @(8, 4, 4, 4, 12)
             if ($groups.Length -ne 5) { return 'must have 5 elements' }
             for ($i = 0; $i -lt 5; $i++) {
-                if ($groups[$i].Length -ne $sizes[$i]) { return "element $($i + 1) must be $($sizes[$i]) characters long" }
-                foreach ($ch in $groups[$i].ToCharArray()) {
-                    if (-not ($ch -match '[0-9a-fA-F]')) { return "non-hex character $(Format-LbfQuoteRune ($script:Utf8NoBom.GetBytes([string]$ch)) 0)" }
+                if ($script:Utf8NoBom.GetByteCount($groups[$i]) -ne $sizes[$i]) { return "element $($i + 1) must be $($sizes[$i]) characters long" }
+                foreach ($r in (Get-LbfRunes $groups[$i])) {
+                    $ok = ($r -ge 0x30 -and $r -le 0x39) -or ($r -ge 0x61 -and $r -le 0x66) -or ($r -ge 0x41 -and $r -le 0x46)
+                    if (-not $ok) { return "non-hex character $(Format-LbfQuoteRune ($script:Utf8NoBom.GetBytes((ConvertFrom-LbfRune $r))) 0)" }
                 }
             }
             return $null
         }
         { $_ -eq 'uri' -or $_ -eq 'iri' } {
             if (-not (Test-LbfUrlParses $S)) { return "parse $(Format-LbfQuote $S): invalid URI" }
-            if (-not ($S -match '\A[A-Za-z][A-Za-z0-9+.\-]*:')) { return 'relative url' }
+            if (-not ($S -cmatch '\A[A-Za-z][A-Za-z0-9+.\-]*:')) { return 'relative url' }
             return $null
         }
         { $_ -eq 'uri-reference' -or $_ -eq 'iri-reference' } {
@@ -1714,7 +1766,7 @@ function Test-LbfFormat {
             return $null
         }
         'json-pointer' {
-            if ($S -eq '') { return $null }
+            if ($S.Length -eq 0) { return $null }
             if (-not $S.StartsWith('/', [StringComparison]::Ordinal)) { return 'not starting with /' }
             if ($S -match '~(?![01])') { return '~ must be followed by 0 or 1' }
             return $null
@@ -1725,8 +1777,8 @@ function Test-LbfFormat {
 
 function Test-LbfUrlParses {
     param([string]$S)
-    if ($S -match '[\x00-\x1F\x7F ]') { return $false }
-    if ($S -match '%(?![0-9A-Fa-f]{2})') { return $false }
+    if ($S -cmatch '[\x00-\x1F\x7F ]') { return $false }
+    if ($S -cmatch '%(?![0-9A-Fa-f]{2})') { return $false }
     return $true
 }
 
@@ -1789,7 +1841,7 @@ function Test-LbfGoTime {
         if ($nd -eq 0) { return 'no digits in second fraction' }
         $rest = $r2.Substring($nd)
     }
-    if ($rest -cne 'z' -and $rest -cne 'Z') {
+    if (-not (Test-LbfIn $rest @('z', 'Z'))) {
         if ($rest.Length -ne 6) { return 'offset must be 6 characters long' }
         $sign = 0
         if ($rest[0] -eq '+') { $sign = -1 } elseif ($rest[0] -eq '-') { $sign = 1 } else { return 'offset must begin with plus/minus' }
@@ -1824,16 +1876,15 @@ function Test-LbfHostname {
     param([string]$S)
     $s = $S
     if ($s.EndsWith('.', [StringComparison]::Ordinal)) { $s = $s.Substring(0, $s.Length - 1) }
-    if ($s.Length -gt 253) { return 'more than 253 characters long' }
-    $labels = $s.Split([char]'.')
-    for ($i = 0; $i -lt $labels.Length; $i++) {
-        $l = $labels[$i]
-        if ($l.Length -lt 1) { return "label $($i + 1) is empty" }
-        if ($l.Length -gt 63) { return "label $($i + 1) is more than 63 characters long" }
-        if ($l.StartsWith('-', [StringComparison]::Ordinal)) { return "label $($i + 1) starts with hyphen" }
-        if ($l.EndsWith('-', [StringComparison]::Ordinal)) { return "label $($i + 1) ends with hyphen" }
-        foreach ($ch in $l.ToCharArray()) {
-            if (-not ($ch -match '[A-Za-z0-9-]')) { return "label $($i + 1) has invalid character $(Format-LbfQuoteRune ($script:Utf8NoBom.GetBytes([string]$ch)) 0)" }
+    if ($script:Utf8NoBom.GetByteCount($s) -gt 253) { return 'more than 253 characters long' }
+    foreach ($l in $s.Split([char]'.')) {
+        $n = $script:Utf8NoBom.GetByteCount($l)
+        if ($n -lt 1 -or $n -gt 63) { return 'label must be 1 to 63 characters long' }
+        if ($l.StartsWith('-', [StringComparison]::Ordinal)) { return 'label starts with hyphen' }
+        if ($l.EndsWith('-', [StringComparison]::Ordinal)) { return 'label ends with hyphen' }
+        foreach ($r in (Get-LbfRunes $l)) {
+            $ok = ($r -ge 0x61 -and $r -le 0x7A) -or ($r -ge 0x41 -and $r -le 0x5A) -or ($r -ge 0x30 -and $r -le 0x39) -or $r -eq 0x2D
+            if (-not $ok) { return "invalid character $(Format-LbfQuoteRune ($script:Utf8NoBom.GetBytes((ConvertFrom-LbfRune $r))) 0)" }
         }
     }
     return $null
