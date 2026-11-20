@@ -34,6 +34,8 @@ $script:SasLifetime = [TimeSpan]::FromHours(144)
 function Write-LbfOut {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     if ($Text.EndsWith("`n")) { $Text = $Text.Substring(0, $Text.Length - 1) }
+    # A crate can be tens of megabytes; one string prints the same bytes far faster than a line each.
+    if ($Text.Length -gt 65536) { Write-Output $Text; return }
     foreach ($l in ($Text -split "`n", 0, 'SimpleMatch')) { Write-Output $l }
 }
 

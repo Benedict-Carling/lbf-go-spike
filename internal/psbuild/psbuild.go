@@ -3,7 +3,7 @@ package psbuild
 
 import (
 	"bytes"
-	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const petnameModule = "github.com/dustinkirkland/golang-petname"
@@ -46,8 +47,16 @@ func Build(root, version string) ([]byte, error) {
 	fmt.Fprintf(&b, "# lbf %s for PowerShell, built from ps/src in github.com/Benedict-Carling/lbf-go-spike.\n", version)
 	b.WriteString("#Requires -Version 5.1\n")
 	fmt.Fprintf(&b, "$script:LbfVersion = '%s'\n", version)
-	fmt.Fprintf(&b, "$script:EmbeddedBronzeProfile = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s'))\n", base64.StdEncoding.EncodeToString(bronze))
-	fmt.Fprintf(&b, "$script:EmbeddedBrowseHtml = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s'))\n", base64.StdEncoding.EncodeToString(browse))
+	for _, e := range []struct {
+		name string
+		raw  []byte
+	}{{"EmbeddedBronzeProfile", bronze}, {"EmbeddedBrowseHtml", browse}} {
+		text, err := hereString(e.raw)
+		if err != nil {
+			return nil, fmt.Errorf("embedding %s: %w", e.name, err)
+		}
+		fmt.Fprintf(&b, "$script:%s = %s\n", e.name, text)
+	}
 	fmt.Fprintf(&b, "$script:PetnameAdjectives = [string[]]@(%s)\n", psList(adjectives))
 	fmt.Fprintf(&b, "$script:PetnameNames = [string[]]@(%s)\n", psList(names))
 	for _, src := range srcs {
@@ -67,6 +76,35 @@ func Build(root, version string) ([]byte, error) {
 		}
 	}
 	return bytes.ReplaceAll(b.Bytes(), []byte("\n"), []byte("\r\n")), nil
+}
+
+var marker = regexp.MustCompile(`\{\{U\+[0-9A-F]+\}\}`)
+
+// A readable single-quoted here-string, since Defender's obfuscated-script rule distrusts long base64 strings.
+// Non-ASCII characters become {{U+XXXX}}, because Windows PowerShell 5.1 reads a script without a BOM as ANSI.
+func hereString(raw []byte) (string, error) {
+	s := string(raw)
+	if !utf8.ValidString(s) {
+		return "", errors.New("not UTF-8")
+	}
+	if strings.Contains(s, "\r") || marker.MatchString(s) {
+		return "", errors.New("contains a carriage return or {{U+...}}, which the embedding cannot carry")
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r > 0x7e || (r < 0x20 && r != '\n' && r != '\t') {
+			fmt.Fprintf(&b, "{{U+%04X}}", r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	text := b.String()
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "'@") {
+			return "", errors.New("a line starts with '@, which would end the here-string")
+		}
+	}
+	return "[regex]::Replace((@'\n" + text + "\n'@ -replace \"`r`n\", \"`n\"), '\\{\\{U\\+([0-9A-F]+)\\}\\}', { param($m) [char]::ConvertFromUtf32([Convert]::ToInt32($m.Groups[1].Value, 16)) })", nil
 }
 
 func psList(words []string) string {

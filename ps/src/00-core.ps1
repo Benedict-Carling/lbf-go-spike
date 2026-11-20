@@ -161,7 +161,7 @@ function Test-LbfPrintRune {
     if ($Rune -eq 0x20) { return $true }
     if ($Rune -ge 0xD800 -and $Rune -le 0xDFFF) { return $false }
     switch ([int](Get-LbfRuneCategory $Rune)) {
-        { $_ -le 8 } { return $true }    # letters, marks, numbers
+        { $_ -le 10 } { return $true }    # letters, marks, numbers
         { $_ -ge 18 -and $_ -le 28 } { return $true }  # punctuation, symbols
         default { return $false }
     }
@@ -217,18 +217,18 @@ function Format-LbfQuote {
     if ($MaxRunes -ge 0 -and $runes.Length -gt $MaxRunes) { $runes = $runes[0..($MaxRunes - 1)]; if ($MaxRunes -eq 0) { $runes = @() } }
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.Append('"')
-    foreach ($r in $runes) {
+    :runes foreach ($r in $runes) {
         if ($r -eq 0x22) { [void]$sb.Append('\"'); continue }
         if ($r -eq 0x5C) { [void]$sb.Append('\\'); continue }
         if (Test-LbfPrintRune $r) { [void]$sb.Append([char]::ConvertFromUtf32($r)); continue }
         switch ($r) {
-            7 { [void]$sb.Append('\a'); continue }
-            8 { [void]$sb.Append('\b'); continue }
-            12 { [void]$sb.Append('\f'); continue }
-            10 { [void]$sb.Append('\n'); continue }
-            13 { [void]$sb.Append('\r'); continue }
-            9 { [void]$sb.Append('\t'); continue }
-            11 { [void]$sb.Append('\v'); continue }
+            7 { [void]$sb.Append('\a'); continue runes }
+            8 { [void]$sb.Append('\b'); continue runes }
+            12 { [void]$sb.Append('\f'); continue runes }
+            10 { [void]$sb.Append('\n'); continue runes }
+            13 { [void]$sb.Append('\r'); continue runes }
+            9 { [void]$sb.Append('\t'); continue runes }
+            11 { [void]$sb.Append('\v'); continue runes }
         }
         if ($r -lt 0x20 -or $r -eq 0x7F) { [void]$sb.Append('\x' + $r.ToString('x2')) }
         elseif ($r -lt 0x10000) { [void]$sb.Append('\u' + $r.ToString('x4')) }
@@ -293,7 +293,7 @@ function ConvertTo-LbfJsonString {
     $sb = New-Object System.Text.StringBuilder ($Text.Length + 2)
     [void]$sb.Append('"')
     $n = $Text.Length
-    for ($i = 0; $i -lt $n; $i++) {
+    :chars for ($i = 0; $i -lt $n; $i++) {
         $c = $Text[$i]
         $code = [int]$c
         if ($code -ge 0x20 -and $code -ne 0x22 -and $code -ne 0x5C -and $code -ne 0x3C -and $code -ne 0x3E -and $code -ne 0x26 -and $code -ne 0x2028 -and $code -ne 0x2029 -and -not [char]::IsSurrogate($c)) {
@@ -301,13 +301,13 @@ function ConvertTo-LbfJsonString {
             continue
         }
         switch ($code) {
-            0x22 { [void]$sb.Append('\"'); continue }
-            0x5C { [void]$sb.Append('\\'); continue }
-            8 { [void]$sb.Append('\b'); continue }
-            12 { [void]$sb.Append('\f'); continue }
-            10 { [void]$sb.Append('\n'); continue }
-            13 { [void]$sb.Append('\r'); continue }
-            9 { [void]$sb.Append('\t'); continue }
+            0x22 { [void]$sb.Append('\"'); continue chars }
+            0x5C { [void]$sb.Append('\\'); continue chars }
+            8 { [void]$sb.Append('\b'); continue chars }
+            12 { [void]$sb.Append('\f'); continue chars }
+            10 { [void]$sb.Append('\n'); continue chars }
+            13 { [void]$sb.Append('\r'); continue chars }
+            9 { [void]$sb.Append('\t'); continue chars }
         }
         if ([char]::IsHighSurrogate($c) -and $i + 1 -lt $n -and [char]::IsLowSurrogate($Text[$i + 1])) {
             [void]$sb.Append($c).Append($Text[$i + 1])
@@ -392,7 +392,8 @@ function Write-LbfJsonValue {
         return
     }
     if ($Value -is [System.Collections.IEnumerable]) {
-        $items = @($Value)
+        $items = New-Object System.Collections.Generic.List[object]
+        foreach ($it in $Value) { $items.Add($it) }
         if ($items.Count -eq 0) { [void]$Sb.Append('[]'); return }
         [void]$Sb.Append('[')
         $inner = $Prefix + $Indent
@@ -428,7 +429,7 @@ function New-LbfMap {
 # ---------- JSON reading ----------
 
 $script:JsonToken = New-Object System.Text.RegularExpressions.Regex (
-    '[ \t\r\n]*(?:(?<s>"(?:[^"\\\x00-\x1f]|\\.)*")|(?<n>-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)|(?<p>[{}\[\]:,])|(?<l>true|false|null)|(?<x>.))',
+    '[ \t\r\n]*(?:(?<s>"(?:[^"\\\x00-\x1f]|\\.)*")|(?<n>-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)|(?<p>[{}\[\]:,])|(?<l>true|false|null)|(?<x>[^ \t\r\n]))',
     [System.Text.RegularExpressions.RegexOptions]::Singleline)
 $script:JsonEscape = New-Object System.Text.RegularExpressions.Regex ('\\(u[0-9a-fA-F]{4}|["\\/bfnrt])')
 

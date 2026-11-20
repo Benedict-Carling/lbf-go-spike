@@ -205,7 +205,7 @@ func (w *world) normalize(s string, extra []*regexp.Regexp) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	dirs := []string{w.dir}
 	if real, err := filepath.EvalSymlinks(w.dir); err == nil && real != w.dir {
-		dirs = append(dirs, real)
+		dirs = append([]string{real}, dirs...)
 	}
 	for _, d := range dirs {
 		s = strings.ReplaceAll(s, d, "{dir}")
@@ -221,7 +221,7 @@ func (w *world) normalize(s string, extra []*regexp.Regexp) string {
 }
 
 // The files under w.dir, by slash path, as size and sha256.
-func (w *world) files(t *testing.T, ignore []string) map[string]string {
+func (w *world) files(t *testing.T, ignore []string, extra ...*regexp.Regexp) map[string]string {
 	t.Helper()
 	got := map[string]string{}
 	must(t, filepath.WalkDir(w.dir, func(path string, d fs.DirEntry, err error) error {
@@ -248,8 +248,9 @@ func (w *world) files(t *testing.T, ignore []string) map[string]string {
 		if err != nil {
 			return err
 		}
-		sum := sha256.Sum256([]byte(w.normalize(string(raw), nil)))
-		got[rel] = fmt.Sprintf("%d %s", len(raw), hex.EncodeToString(sum[:8]))
+		norm := w.normalize(string(raw), extra)
+		sum := sha256.Sum256([]byte(norm))
+		got[rel] = fmt.Sprintf("%d %s", len(norm), hex.EncodeToString(sum[:8]))
 		return nil
 	}))
 	return got
@@ -282,7 +283,8 @@ func (w *world) blobs(t *testing.T, extra []*regexp.Regexp) map[string]string {
 				_, err = b.ReadFrom(resp.Body)
 				resp.Body.Close()
 				must(t, err)
-				desc = fmt.Sprintf("%s type=%s\n%s", desc, deref(resp.ContentType), w.normalize(b.String(), extra))
+				body := w.normalize(b.String(), extra)
+				desc = fmt.Sprintf("size=%d %s type=%s\n%s", len(body), strings.Join(meta, " "), deref(resp.ContentType), body)
 			}
 			got[w.normalize(*item.Name, extra)] = desc
 		}
@@ -333,7 +335,7 @@ func conform(t *testing.T, c conformCase) {
 	if g.stderr != p.stderr {
 		t.Errorf("stderr differs:\n%s", lineDiff(g.stderr, p.stderr))
 	}
-	gf, pf := worlds["go"].files(t, c.ignoreFiles), worlds["ps"].files(t, c.ignoreFiles)
+	gf, pf := worlds["go"].files(t, c.ignoreFiles, normalize...), worlds["ps"].files(t, c.ignoreFiles, normalize...)
 	if d := mapDiff(gf, pf); d != "" {
 		t.Errorf("files differ:\n%s", d)
 	}
