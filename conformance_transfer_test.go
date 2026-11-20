@@ -726,7 +726,7 @@ func TestConformanceTransferConcurrentFetches(t *testing.T) {
 	}
 	for range 3 {
 		r := <-done
-		if r.code != 0 || strings.TrimSpace(w.normalize(r.stdout, nil)) != "{dir}/out/"+fixedID {
+		if r.code != 0 || strings.TrimSpace(w.normalize(r.stdout, nil)) != filepath.Join("{dir}", "out", fixedID) {
 			t.Errorf("exit %d, stdout %q, stderr:\n%s", r.code, r.stdout, r.stderr)
 		}
 	}

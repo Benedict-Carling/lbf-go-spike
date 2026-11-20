@@ -202,7 +202,17 @@ var psSingleQuotes = strings.NewReplacer("'", "''", "\u2018", "\u2018\u2018", "\
 
 // PowerShell running command; Windows PowerShell would otherwise write module-loading progress to a redirected stderr as CLIXML.
 func psCommand(ps, command string) *exec.Cmd {
-	return exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand("$ProgressPreference = 'SilentlyContinue'; "+command))
+	command = "$ProgressPreference = 'SilentlyContinue'; " + command
+	// Windows caps a command line at 32767 characters, so a long command runs from a file, with a BOM so Windows PowerShell reads it as UTF-8.
+	if len(command) > 8000 {
+		if f, err := os.CreateTemp("", "lbf-test-*.ps1"); err == nil {
+			_, err = f.WriteString("\ufeff" + command)
+			if cerr := f.Close(); err == nil && cerr == nil {
+				return exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", f.Name())
+			}
+		}
+	}
+	return exec.Command(ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
 }
 
 func encodeCommand(s string) string {
