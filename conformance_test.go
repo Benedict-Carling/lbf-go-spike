@@ -103,7 +103,10 @@ func newWorld(t *testing.T, name, perms string, files map[string]string) *world 
 	root := t.TempDir()
 	w := &world{name: name, dir: filepath.Join(root, "work"), home: filepath.Join(root, "home")}
 	must(t, os.MkdirAll(w.dir, 0o755))
-	must(t, os.MkdirAll(w.home, 0o755))
+	// Windows' known-folder lookup follows USERPROFILE and fails where these do not exist, as they always do on a real profile.
+	for _, d := range []string{filepath.Join("AppData", "Local"), filepath.Join("AppData", "Roaming")} {
+		must(t, os.MkdirAll(filepath.Join(w.home, d), 0o755))
+	}
 	for rel, body := range files {
 		writeFile(t, filepath.Join(w.dir, filepath.FromSlash(rel)), body)
 	}
@@ -177,13 +180,14 @@ func (w *world) lbfPS(t *testing.T, env map[string]string, raw string, args ...s
 	if line == "" {
 		quoted := make([]string, len(args))
 		for i, a := range args {
-			quoted[i] = "'" + strings.ReplaceAll(w.expand(a), "'", "''") + "'"
+			quoted[i] = "'" + psSingleQuotes.Replace(w.expand(a)) + "'"
 		}
 		line = strings.Join(quoted, " ")
 	} else {
 		line = w.expand(line)
 	}
-	command := fmt.Sprintf("Set-Location -LiteralPath '%s'; & '%s' %s; exit $LASTEXITCODE", strings.ReplaceAll(w.dir, "'", "''"), script, line)
+	// Without this, Windows PowerShell writes "Preparing modules for first use" to a redirected stderr as CLIXML when Set-Location loads its module.
+	command := fmt.Sprintf("$ProgressPreference = 'SilentlyContinue'; Set-Location -LiteralPath '%s'; & '%s' %s; exit $LASTEXITCODE", strings.ReplaceAll(w.dir, "'", "''"), script, line)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
@@ -191,6 +195,9 @@ func (w *world) lbfPS(t *testing.T, env map[string]string, raw string, args ...s
 	cmd.Env = w.environ(env)
 	return runCmd(t, cmd)
 }
+
+// PowerShell ends a single-quoted string at any of the single quotation marks, so each is doubled.
+var psSingleQuotes = strings.NewReplacer("'", "''", "\u2018", "\u2018\u2018", "\u2019", "\u2019\u2019", "\u201a", "\u201a\u201a", "\u201b", "\u201b\u201b")
 
 func encodeCommand(s string) string {
 	u := utf16.Encode([]rune(s))
@@ -203,14 +210,12 @@ func encodeCommand(s string) string {
 
 func (w *world) normalize(s string, extra []*regexp.Regexp) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
-	dirs := []string{w.dir}
-	if real, err := filepath.EvalSymlinks(w.dir); err == nil && real != w.dir {
-		dirs = append([]string{real}, dirs...)
-	}
-	for _, d := range dirs {
+	for _, d := range pathSpellings(w.dir) {
 		s = strings.ReplaceAll(s, d, "{dir}")
 	}
-	s = strings.ReplaceAll(s, w.home, "{home}")
+	for _, h := range pathSpellings(w.home) {
+		s = strings.ReplaceAll(s, h, "{home}")
+	}
 	if w.container != "" {
 		s = strings.ReplaceAll(s, w.container, "{container}")
 	}
@@ -218,6 +223,26 @@ func (w *world) normalize(s string, extra []*regexp.Regexp) string {
 		s = re.ReplaceAllString(s, "{"+re.String()+"}")
 	}
 	return s
+}
+
+// Every way an lbf may spell p, longest first: links resolved, Windows' long and short names, either slash, JSON-escaped.
+func pathSpellings(p string) []string {
+	bases := []string{p, longPath(p)}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		bases = append(bases, real, longPath(real))
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, b := range bases {
+		for _, v := range []string{b, filepath.ToSlash(b), strings.ReplaceAll(b, `\`, `\\`)} {
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	return out
 }
 
 // The files under w.dir, by slash path, as size and sha256.
