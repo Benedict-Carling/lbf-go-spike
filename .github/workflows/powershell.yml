@@ -37,35 +37,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - if: runner.os != 'Windows'
-        run: npx -y -p azurite@3.37.0 azurite-blob --inMemoryPersistence --skipApiVersionCheck --silent &
-      # Installed first, so the wait below never includes a download; a process started this way outlives the step.
-      - if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $prefix = Join-Path $env:RUNNER_TEMP 'azurite'
-          npm install --no-fund --no-audit --prefix $prefix azurite@3.37.0
-          if ($LASTEXITCODE) { exit 1 }
-          $main = Join-Path $prefix 'node_modules\azurite\dist\src\blob\main.js'
-          Start-Process -FilePath node -ArgumentList "`"$main`" --inMemoryPersistence --skipApiVersionCheck --silent" -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'azurite.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'azurite.err')
-      - if: runner.os != 'Windows'
-        run: npx -y wait-on@9.5.1 -t 180000 tcp:127.0.0.1:10000
-      # wait-on never sees Azurite listening on Windows runners, so connect directly.
-      - if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          for ($i = 0; $i -lt 180; $i++) {
-            $c = New-Object System.Net.Sockets.TcpClient
-            try { $c.Connect('127.0.0.1', 10000); 'Azurite is listening'; exit 0 } catch { Start-Sleep 1 } finally { $c.Dispose() }
-          }
-          exit 1
-      - if: failure() && runner.os == 'Windows'
-        shell: pwsh
-        run: Get-Content (Join-Path $env:RUNNER_TEMP 'azurite.out'), (Join-Path $env:RUNNER_TEMP 'azurite.err') -ErrorAction SilentlyContinue
+      # Installed first, so the wait below never includes a download.
+      - run: npm install --no-fund --no-audit --prefix "$RUNNER_TEMP/azurite" azurite@3.37.0
+        shell: bash
+      # Azurite starts in the step that uses it: on Windows runners a process left running by an earlier step stops answering.
       - name: Conformance with ${{ matrix.ps }}
         shell: bash
         run: |
+          node "$RUNNER_TEMP/azurite/node_modules/azurite/dist/src/blob/main.js" --inMemoryPersistence --skipApiVersionCheck --silent > azurite.log 2>&1 &
+          for i in $(seq 180); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
+          curl -s -o /dev/null http://127.0.0.1:10000/ || { echo "Azurite did not start"; cat azurite.log; exit 1; }
           "$LBF_PS" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
           go test -run 'TestConformance' -count=1 -timeout 60m -v . 2>&1 | tee conformance.log | grep -E '^(=== RUN|--- |ok|FAIL|PASS)'
           exit "${PIPESTATUS[0]}"
