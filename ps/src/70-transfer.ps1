@@ -480,6 +480,7 @@ function Stop-LbfJob {
         foreach ($r in @($Job.Ranges)) { Stop-LbfRange $r }
         $Job.Ranges.Clear()
     }
+    if ($Job.ContainsKey('Pool')) { $Job.Pool.Clear() }
     if ($null -ne $Job.Cts) { try { $Job.Cts.Dispose() } catch { }; $Job.Cts = $null }
 }
 
