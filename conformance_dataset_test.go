@@ -452,11 +452,6 @@ func TestConformanceDatasetProfiles(t *testing.T) {
 			args: datasetDryRun(append([]string{"run1", "--profile", "work/myprof"}, good...)...)},
 		"profile without id": {files: with(cellRun, map[string]string{"work/bad/profile.json": `{"theme": "dark"}`}), args: datasetDryRun("run1", "--profile", "work/bad")},
 	}
-	// docs/research is not in the repository, so this case runs only where someone keeps it.
-	if raw, err := os.ReadFile("docs/research/profile-properties.schema.json"); err == nil {
-		cases["properties schema from the docs"] = conformCase{files: with(cellRun, map[string]string{"p/docs/profile.json": strings.Replace(string(raw), `"$id": "https://w3id.org/lbf/schemas/profile-properties/0.1.0"`, `"$id": "https://example.org/docs"`, 1)}),
-			args: datasetDryRun("run1", "--profile", "p/docs")}
-	}
 	for _, id := range []string{"./", "run1/a.txt", crateName, "#uploader", "profiles/x", "https://example.org/p#part", "urn:example:p", "file:///p"} {
 		cases["profile id "+id] = conformCase{files: with(cellRun, map[string]string{"p/x/profile.json": `{"$id": "` + id + `"}`}), args: datasetDryRun("run1", "--profile", "p/x")}
 	}

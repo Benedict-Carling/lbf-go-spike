@@ -79,7 +79,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # Product name and version in the exe's Windows resources, which code signing requires.
+      # Product name and version in the exe's Windows resources.
       - run: |
           v=${GITHUB_REF_NAME#v}
           go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64,arm64 \
@@ -165,5 +165,4 @@ jobs:
           # A pre-release never becomes latest, which is what the installers and lbf upgrade fetch.
           prerelease=""
           case $GITHUB_REF_NAME in *-*) prerelease=--prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes $prerelease \
-            --notes "[Code signing policy](https://github.com/${GITHUB_REPOSITORY}#code-signing-policy)"
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes $prerelease
