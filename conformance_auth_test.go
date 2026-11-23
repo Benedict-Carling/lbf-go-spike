@@ -682,9 +682,11 @@ func TestConformanceAuthSignInFailures(t *testing.T) {
 		want   func(f *fakeAzure, state string) string
 	}{
 		{
-			name:  "consent refused",
-			args:  []string{"login"},
-			reply: func(string) url.Values { return url.Values{"error": {"consent_required"}, "error_description": {"AADSTS65001: The user or administrator has not consented to use the application with ID '04b07795-8ddb-461a-bbee-02f9e1bf7b46' named 'Microsoft Azure CLI' <for> \"you\" & others."}} },
+			name: "consent refused",
+			args: []string{"login"},
+			reply: func(string) url.Values {
+				return url.Values{"error": {"consent_required"}, "error_description": {"AADSTS65001: The user or administrator has not consented to use the application with ID '04b07795-8ddb-461a-bbee-02f9e1bf7b46' named 'Microsoft Azure CLI' <for> \"you\" & others."}}
+			},
 			want: func(*fakeAzure, string) string {
 				return "error: browser sign-in failed: InteractiveBrowserCredential: AADSTS65001: The user or administrator has not consented to use the application with ID &#39;04b07795-8ddb-461a-bbee-02f9e1bf7b46&#39; named &#39;Microsoft Azure CLI&#39; &lt;for&gt; &#34;you&#34; &amp; others.\n"
 			},
@@ -698,8 +700,8 @@ func TestConformanceAuthSignInFailures(t *testing.T) {
 			},
 		},
 		{
-			name: "redirect without a code",
-			args: []string{"login"},
+			name:  "redirect without a code",
+			args:  []string{"login"},
 			reply: func(state string) url.Values { return url.Values{"state": {state}} },
 			want: func(*fakeAzure, string) string {
 				return "error: browser sign-in failed: InteractiveBrowserCredential: authorization code missing in response\n"
@@ -714,9 +716,11 @@ func TestConformanceAuthSignInFailures(t *testing.T) {
 			},
 		},
 		{
-			name:   "conditional access at the token endpoint",
-			args:   []string{"mint-sas", "--mode", "upload"},
-			before: func(f *fakeAzure) { f.tokenFailure = &fakeFailure{status: 400, header: map[string]string{"Content-Type": "application/json"}, body: tokenFailure} },
+			name: "conditional access at the token endpoint",
+			args: []string{"mint-sas", "--mode", "upload"},
+			before: func(f *fakeAzure) {
+				f.tokenFailure = &fakeFailure{status: 400, header: map[string]string{"Content-Type": "application/json"}, body: tokenFailure}
+			},
 			want: func(f *fakeAzure, _ string) string {
 				return "[auth] not signed in; opening your browser to sign in\nerror: browser sign-in failed: InteractiveBrowserCredential authentication failed. \nPOST " + f.srv.URL + "/entra/" + imperialTenant + "/oauth2/v2.0/token\n" +
 					sep + "\nRESPONSE 400: 400 Bad Request\n" + sep + "\n" + indent(tokenFailure) + "\n" + sep + "\n"
