@@ -926,3 +926,39 @@ try { Invoke-LbfTransferAll (New-LbfProgress 100 0 -Discard) $jobs; 'no error' }
 		t.Fatalf("%v: %q", err, out)
 	}
 }
+
+// Every job stays listed until the last file is sent, so a finished one must not keep the buffers its blocks were read into.
+func TestConformanceTransferFinishedUploadsHoldNoBlocks(t *testing.T) {
+	ps := powershell(t)
+	script, err := builtScript()
+	must(t, err)
+	w := newWorld(t, "ps", "rlw", map[string]string{
+		"data/run1/a.bin": bigFile(150_000), "data/run1/b.bin": bigFile(150_000), "data/run1/c.bin": bigFile(150_000),
+	})
+	cmd := psCommand(ps, fmt.Sprintf(`$env:LBF_TEST_NO_MAIN = '1'; . '%s'
+$script:BlockSize = 64KB
+function Measure-Held {
+    param($Value, [int]$Depth)
+    if ($Value -is [byte[]]) { return $Value.Length }
+    if ($Depth -eq 0 -or $null -eq $Value -or $Value -is [string]) { return 0 }
+    $n = 0
+    if ($Value -is [System.Collections.IDictionary]) { $Value = @($Value.Values) }
+    if ($Value -is [System.Collections.IEnumerable]) { foreach ($v in @($Value)) { $n += Measure-Held $v ($Depth - 1) } }
+    return $n
+}
+$inner = ${function:Invoke-LbfTransferAll}
+function Invoke-LbfTransferAll {
+    param($Progress, $Jobs)
+    & $inner $Progress $Jobs
+    $blocks = 0
+    foreach ($j in $Jobs) { $blocks += $j.Ids.Count }
+    $script:seen = "$($Jobs.Count) files, $blocks blocks, $(Measure-Held $Jobs 5) bytes held"
+}
+Invoke-Lbf @('publish', 'data/run1', '--sas-env', '%s', '--container', '%s') | Out-Null
+$script:seen`, script, w.sasEnv, w.container))
+	cmd.Dir, cmd.Env = w.dir, w.environ(nil)
+	r := runCmd(t, cmd)
+	if r.code != 0 || strings.TrimSpace(r.stdout) != "3 files, 9 blocks, 0 bytes held" {
+		t.Fatalf("exit %d: %q\n%s", r.code, r.stdout, r.stderr)
+	}
+}
