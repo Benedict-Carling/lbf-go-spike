@@ -1,116 +1,62 @@
-# lbf (Go spike)
+# lbf
 
-A single-binary replacement for the Nextflow upload, download and mint-sas
-pipelines. No Nextflow, Java, Python, bash or azcopy; runs natively on macOS
-and Linux, and on Windows as one PowerShell script, `lbf.ps1`, that behaves
-exactly as the binary does.
+A command-line tool that publishes datasets to the lab's Azure storage with an
+[RO-Crate](https://www.researchobject.org/ro-crate/) beside them, checks each
+against profiles, and fetches them back.
 
-MIT licensed; see [LICENSE](LICENSE).
+One binary on macOS and Linux, one PowerShell script on Windows. Nothing else
+needs installing.
+
+```
+lbf login
+lbf publish plate1/                      # prints the new dataset ID
+lbf fetch 20261001-fancy-dassie-eadb
+```
 
 ## Install
 
-Windows: open PowerShell (Start menu, type "PowerShell") and paste:
+Windows, in PowerShell:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm https://github.com/Benedict-Carling/lbf-cli/releases/latest/download/install.ps1 | iex
 ```
 
-Nothing needs installing first: `irm` and `iex` are built into PowerShell
-(short for `Invoke-RestMethod` and `Invoke-Expression`), and both Windows
-PowerShell 5.1 and PowerShell 7 work. The first part turns on TLS 1.2, which
-GitHub requires and older Windows PowerShell does not use by default. No admin
-rights are needed. The script puts `lbf.ps1`, and `lbf.cmd` for Command Prompt,
-in `%LOCALAPPDATA%\lbf` and adds that folder to your PATH, so `lbf` works
-straight away in that window and in new ones, in PowerShell and in Command
-Prompt alike. It replaces an `lbf.exe` an earlier install left there. Run it
-again to reinstall, even while lbf is running. Then run `lbf login`.
-
-On Windows lbf is a PowerShell script rather than an exe because Imperial's
-Defender blocks unsigned programs, and a script run by Windows' own PowerShell
-needs no signature. Typed in PowerShell, `lbf` runs `lbf.ps1` itself, so
-`$id = lbf new-id` and PowerShell's quoting work as for any command;
-Command Prompt runs `lbf.cmd`, which starts Windows PowerShell on `lbf.ps1`.
-
-PowerShell runs scripts only if its execution policy allows them, and Windows
-ships refusing them. If nothing else has set it, the installer sets the policy
-for your account to `RemoteSigned` (local scripts run, downloaded ones must be
-signed) and says so. If your organisation's Group Policy allows only signed
-scripts (`AllSigned` or `Restricted`), the installer stops without installing
-anything and says to ask IT to allow `RemoteSigned` for your account; lbf
-never tries to get round Group Policy.
-
-macOS / Linux:
+macOS and Linux:
 
 ```sh
-curl -fsSL https://github.com/Benedict-Carling/lbf-go-spike/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Benedict-Carling/lbf-cli/releases/latest/download/install.sh | sh
 ```
 
-This puts `lbf` in `~/.local/bin` (override with `LBF_INSTALL_DIR`) and, if
-that folder is not already on your PATH, adds it via `~/.profile` and your
-bash, zsh and fish startup files, the same way uv and rustup do, sharing their
-`env` script when they use the same folder. If the folder already holds an
-`env` or `env.fish` that is not such a script, the startup files are left
-alone. Open a new terminal afterwards. Set `LBF_NO_MODIFY_PATH=1` to leave
-startup files alone.
+Neither needs admin rights. Both check the download against the release's
+`SHA256SUMS`, put `lbf` on your PATH, and can be run again to reinstall. Then
+run `lbf login`.
 
-Both installers check the download against the release's `SHA256SUMS` before
-installing it, as `lbf upgrade` does. On macOS and Linux they and `lbf upgrade`
-fetch the build for the machine's own processor, even from a terminal emulated
-on Arm; `lbf.ps1` runs on any Windows processor.
+`lbf upgrade` updates lbf, which warns after a command when a newer release is
+out. What the installers change, and how to uninstall, is in
+[docs/install.md](docs/install.md).
 
-Binaries, `lbf.ps1`, and the Windows exes earlier installs used are also
-attached to each [release](https://github.com/Benedict-Carling/lbf-go-spike/releases).
+## Commands
 
-## Update
+| Command | What it does |
+| --- | --- |
+| `lbf login` | Sign in to Imperial with the browser, and remember it (macOS and Windows) |
+| `lbf publish <path>` | Validate a folder and publish it as a new dataset; prints its ID |
+| `lbf fetch <id> [--out DIR]` | Fetch a dataset and verify every file |
+| `lbf new-id` | Print an ID to publish under later, with `publish --id` |
+| `lbf browse` | Search every dataset's crate in your browser |
+| `lbf check --mode upload` | Prove the credential works before a long job |
+| `lbf mint-sas --mode upload` | Write `azure_sas.env` for a machine without `az`, such as HPC |
+| `lbf logout` | Sign out and delete saved tokens |
+| `lbf upgrade` | Update lbf to the latest release |
 
-```
-lbf upgrade
-```
+`lbf <command> --help` lists a command's options. Progress goes to stderr and
+the result to stdout, as one line of JSON with `--json`.
 
-On Windows this replaces `lbf.ps1` with the release's, checked against
-`SHA256SUMS`; an install that still has `lbf.exe` gets the newer exe, and the
-install command above moves it to `lbf.ps1`.
+## Publishing with provenance
 
-lbf checks for a newer release at most once an hour and prints a warning after
-any command when it is out of date. Set `LBF_NO_UPDATE_CHECK=1` to turn the
-check off. Pre-releases (tags such as `v0.2.0-rc1`) are never offered; anyone
-running one is offered the release that follows it.
-
-## Uninstall
-
-Run `lbf logout` first to delete saved sign-ins.
-
-Windows: delete the `%LOCALAPPDATA%\lbf` folder (it holds `lbf.ps1` and
-`lbf.cmd`) and remove that folder from your user PATH (Start menu, "Edit
-environment variables for your account"). The installer may have let your
-account run local scripts; `Set-ExecutionPolicy -Scope CurrentUser Undefined`
-in Windows PowerShell undoes that, if nothing else of yours needs it.
-
-macOS / Linux: delete `~/.local/bin/lbf` (or the file in `LBF_INSTALL_DIR`).
-The PATH line the installer added to your startup files can stay or be removed.
-
-## Use
-
-```
-lbf login                          # optional: browser sign-in to Imperial, remembered (macOS/Windows)
-lbf publish <path>                 # land in bronze; prints the new dataset ID (alias: upload)
-lbf fetch <id> [--out DIR]         # alias: download
-lbf new-id                         # an ID to publish under later, with publish --id
-lbf browse                         # search every dataset's crate in your browser
-lbf check --mode upload            # proves the credential works, before a long job
-lbf mint-sas --mode upload         # writes azure_sas.env for a machine without az (HPC)
-lbf logout                         # signs out of lbf and deletes its tokens; says if az login still signs you in
-```
-
-Sign-in order: a login saved by `lbf login`, an existing `az login`, then the
-browser. Always against Imperial's tenant (`--tenant` overrides). Remembered
-logins need the OS credential store, so the static Linux build uses `az` or
-`--sas-env` instead. Before uploading, lbf checks it can write to the target and
-stops with nothing uploaded if not.
-
-Every publish is validated before anything is uploaded. Every dataset must meet
-the bronze profile (`profiles/bronze/profile.json`, compiled into the binary),
-plus the one given with `--profile`. Derived datasets record what they came from:
+Every dataset must meet the bronze profile before anything is uploaded. A
+derived dataset also records its parent, the instruments that made it, and any
+properties, and can be held to a profile of its own:
 
 ```
 lbf publish results/ --container silver \
@@ -120,193 +66,19 @@ lbf publish results/ --container silver \
     --profile profiles/minimal-silver/0.1.0
 ```
 
-`--property NAME=VALUE` repeats for several properties, and `--properties metadata.json`
-gives them as a JSON object of strings, e.g. `{"sample_id": "SAM-0001"}`.
-`--name` and `--description` say what the dataset is; without them lbf uses the
-folder's name and writes a description. `--derived-from` and `--instrument`
-come together, and `--instrument` repeats for several. The same can instead be
-given as one file with `--provenance provenance.json`, which `--property`,
-`--name` and `--description` add to; anything given twice is refused:
+`--dry-run` validates and prints the crate without signing in. A publish that
+fails partway is finished by running it again with `--id`.
 
-```json
-{"name": "Plate 1 features",
- "derived_from": "20261001-fancy-dassie-eadb",
- "instruments": [{"name": "my-pipeline", "version": "0.1.0", "url": "https://..."}],
- "properties": {"sample_id": "SAM-0001"}}
-```
+## Documentation
 
-Every field is optional, but `derived_from` and `instruments` come together.
-`derived_from` must be an ID lbf minted, and instruments that share a `url`
-must be the same instrument. Field names are exact: unknown or differently
-cased fields are rejected, as is anything after the closing brace.
+- [Publishing and fetching](docs/publishing.md): sign-in, provenance, profiles, JSON output, browsing, and resuming a publish.
+- [Integrity](docs/integrity.md): what publish refuses and what fetch verifies.
+- [Design decisions](docs/design-decisions.md): why the crate and the Windows script are as they are.
+- [Installing, updating and uninstalling](docs/install.md)
+- [Building and testing](docs/development.md)
+- [Privacy](docs/privacy.md)
+- [CONTEXT.md](CONTEXT.md): the words lbf uses.
 
-The crate is RO-Crate 1.3, in schema.org terms or those RO-Crate adopts:
-properties are `PropertyValue`s, the parent is `isBasedOn`, and a derived
-dataset also has a `CreateAction` run, which the root `mentions`, conforming to
-Process Run Crate 0.6.
+## Licence
 
-A profile is a directory holding a JSON Schema `profile.json`, describing both
-the data given as `<path>` and the crate lbf writes for it. Its `$id` is
-recorded in the crate's `conformsTo`, along with every profile it builds on
-through `$ref`; sibling profiles (`profiles/<name>/profile.json` or, versioned,
-`profiles/<name>/<version>/profile.json`) and lbf's bronze profile resolve locally. It
-validates this view of the dataset, once the uploader is known:
-
-```json
-{"data": {"name": "results", "files": [{"path": "features/plate1.parquet", "size": 12}]},
- "crate": {"identifier": "...", "creator": "...", "datePublished": "...",
-           "conformsTo": ["..."], "additionalProperty": {"sample_id": "..."},
-           "wasDerivedFrom": "...", "instrument": [{"name": "...", "version": "...", "url": "..."}]}}
-```
-
-File paths are relative to `<path>`. `crate` uses lbf's own names for what the
-crate records, whichever RO-Crate terms it uses.
-
-`--dry-run` validates and prints the crate without signing in, as uploader `dry-run`;
-with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
-stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
-publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path", "provenance"}` as one line, where
-`path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it; fetch's
-`provenance` is what the crate states (`name`, `description`, `derived_from`, `instruments`, `properties`), as in a `--provenance` file, leaving out a name and description lbf filled in. `--tag KEY=VALUE` picks
-the storage account (default `tag=storage`, production; the test account is
-`tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and
-otherwise lists them for `--account NAME` to choose. `--container` defaults to `bronze`, and `--sas-env FILE`
-uses a pre-minted credential instead of `az login`.
-
-## Design decisions
-
-Why lbf describes datasets as it does. Change these deliberately,
-and record a new decision here.
-
-- **The crate is RO-Crate 1.3, in the RO-Crate specification's terms first and
-  schema.org's next; lbf invents none.** Where schema.org has no word, the
-  specification's own choice is used (`conformsTo` from Dublin Core, the
-  Profiles vocabulary for profiles). Lab-specific values are
-  `additionalProperty` `PropertyValue`s, schema.org's mechanism for properties
-  it does not name.
-- **A parent is `isBasedOn`, and how it was made is a `CreateAction` the root
-  `mentions`, conforming to Process Run Crate 0.6.** The specification records
-  provenance with schema.org actions, never PROV's `wasDerivedFrom`, which
-  earlier lbf versions wrote and lbf still reads. lbf records only what it saw
-  or was told: the uploader is the `creator`, and the run has no `endTime`,
-  since lbf never sees the run.
-- **What a publisher states is one record: a name, description, parent,
-  instruments and properties.** The flags, the `--provenance` file and
-  `lbf fetch --json` all use it. Flags give values (`--property`) and links
-  (`--derived-from`, `--instrument`, since those point at other entities);
-  lbf fills a missing name and description. Richer metadata travels as a crate
-  of its own inside the published folder, which lbf publishes as a file and
-  never merges.
-- **lbf states only what it knows.** The licence is an entity with a name,
-  as RO-Crate asks. A file's `encodingFormat` comes from a fixed table of
-  extensions, not the operating system's, so a crate is the same wherever it is
-  written; a file whose type is not in the table has none. Without a known
-  uploader the crate has no `creator`, rather than an invented one, so bronze
-  refuses it. `lbf fetch --json` leaves out a name or description lbf filled
-  in, so carrying it forward never passes off lbf's words as the publisher's.
-- **On Windows, lbf is `lbf.ps1`, a PowerShell port that must behave
-  byte for byte as the Go lbf does.** Imperial's Defender for Endpoint blocks
-  unsigned executables (its ransomware rule stopped `lbf.exe`), but not scripts
-  run by Microsoft's signed `powershell.exe`, so the same commands, flags,
-  messages, exit codes, crates and blobs come from a script that needs no
-  signature. The Go code stays the specification, and `conformance_*_test.go`
-  runs both on the same input on Windows PowerShell 5.1, PowerShell 7 and Linux.
-  The installer sets only the execution policy of the user's own account, and
-  stops where Group Policy forbids unsigned scripts rather than work round it.
-  `lbf.cmd` is there for Command Prompt; PowerShell picks `lbf.ps1` over it in
-  the same folder, so output can be captured. `lbf upgrade` replaces the
-  script, and `lbf browse` serves on a socket listener, which, unlike
-  Windows' HTTP listener, needs no URL reservation for a user without admin
-  rights.
-
-## Browsing datasets
-
-`lbf browse` lists every container in the storage account (or only `--container a,b`), reads each
-dataset's `ro-crate-metadata.json`, and opens a page on this computer to search, filter and look
-through them, with each dataset's provenance, files and fetch command. It reads crates only, never
-data, using your own sign-in, so you see what you can read. Crates never change once published, so
-each is downloaded once and cached under the user cache directory (`lbf/crates`); a dataset without
-a crate is not shown. Listing containers needs read access to the whole account. Ctrl-C stops it.
-
-## Resuming a publish
-
-A dataset is published once its crate lands, so a publish that fails partway
-can be finished: run it again with `--id <the ID it printed>`. Files the earlier
-attempt stored are checked by sha256 and not sent again; the rest are sent. lbf
-never changes or removes a stored file, so if any stored file differs from the
-local one, or the earlier attempt stored a file that is no longer there, the
-rerun stops before uploading anything; publish without `--id` for a new dataset.
-If the dataset was in fact published, the rerun succeeds without uploading
-anything when the files and provenance are the same, and refuses if they differ.
-Every refusal because the ID holds other files exits with code 3, so a pipeline
-can tell it from a failure worth retrying.
-
-A pipeline can take its ID before computing, name its outputs by it, and retry
-its publish step:
-
-```
-id=$(lbf new-id)                   # offline; no sign-in
-lbf check --mode upload --container silver
-...compute into results/, logging $id...
-lbf publish results --container silver --id $id
-```
-
-In Nextflow, mint the ID in its own process so `-resume` reuses it, and give
-the publish process `errorStrategy { task.exitStatus == 3 ? 'terminate' : 'retry' }`.
-Give that process everything publish records as inputs: the data, its
-properties, the parent and the instruments' versions. Then any change mints a new
-ID, and exit code 3 only means an ID was reused by hand. `--id` accepts only an ID from
-`lbf new-id`. Two publishes of one ID at once cannot overwrite each other's
-files, and the stored files are checked against the crate once more after it
-lands.
-
-## Integrity
-
-Publish follows symlinks, and refuses, before uploading anything, a dataset with
-a broken symlink, an unreadable file, or a name that could not be fetched
-everywhere: one Windows cannot store (`\ : * ? " < > |`, a trailing dot or
-space, `CON`, `NUL`, `CONIN$` and the like), one longer than Linux allows, two
-that macOS or Windows would store as one (differing only in case or Unicode
-form, or a file named like a folder), or one named like the crate. Each file's
-sha256 is computed as it is sent, recorded in the crate, and stored with the
-file as blob metadata, which is how a resumed publish knows what is already
-there. A file that changes while it is being sent stops the publish.
-
-Fetch downloads exactly the files the crate lists, refusing a dataset whose
-stored files differ from it, and checks each file's size and sha256 (size only
-for datasets published before lbf recorded checksums). It works in a folder
-of its own, `<id>.partial-<random>`, and renames it to `<id>` only once
-everything has checked out, so `<id>` is always complete. Fetching into a folder
-that already holds the dataset verifies it instead of downloading again, and
-several fetches of one dataset into one folder can run at once. A fetch removes
-its own `.partial-` folder if it fails; one that is killed can leave it behind,
-and it is safe to delete once no fetch is running.
-
-Blob layout, RO-Crate sidecar and `azure_sas.env` format match the Nextflow
-pipelines, so either tool can read the other's output; crates written by the
-Nextflow pipelines carry no checksums.
-
-## Build
-
-Pushing a `v*` tag builds every platform and publishes a release.
-
-```
-npx -p azurite azurite-blob --inMemoryPersistence &   # optional: the publish tests skip without it
-go test ./...
-LBF_AZURITE=1 LBF_PS=pwsh go test -run TestConformance .   # lbf.ps1 against the Go lbf
-go run ./tools/buildps -version v0.2.0 -o dist/lbf.ps1      # what Windows installs
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dist/lbf-windows-amd64.exe .
-```
-
-## Privacy
-
-lbf sends no telemetry. It only contacts other systems to do what you asked:
-
-- Microsoft Entra ID, to sign you in (`lbf login`, or when a command needs Azure access).
-- Azure Resource Manager and the Azure Storage accounts you choose, to list, publish and fetch datasets.
-- GitHub, to check for a newer release at most once an hour (turn off with
-  `LBF_NO_UPDATE_CHECK=1`) and to download one when you run `lbf upgrade`.
-
-Sign-ins saved by `lbf login` stay on your machine, in the macOS Keychain or
-an encrypted file in `%LOCALAPPDATA%\.IdentityService` on Windows, until
-`lbf logout`.
+MIT; see [LICENSE](LICENSE).
