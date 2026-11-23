@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo=Benedict-Carling/lbf-go-spike
+repo=Benedict-Carling/lbf-cli
 
 detect_platform() {
     os=$(uname -s | tr '[:upper:]' '[:lower:]')
