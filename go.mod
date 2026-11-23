@@ -1,4 +1,4 @@
-module github.com/ImperialCollegeLondon/lbf-data-tools/lbf
+module github.com/Benedict-Carling/lbf-cli
 
 go 1.27.1
 

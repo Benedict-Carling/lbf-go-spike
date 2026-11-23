@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	releasesURL      = "https://github.com/Benedict-Carling/lbf-go-spike/releases"
+	releasesURL      = "https://github.com/Benedict-Carling/lbf-cli/releases"
 	updateCheckEvery = time.Hour
 	updateCheckLimit = 2 * time.Second
 )
