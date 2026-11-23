@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
-	"github.com/ImperialCollegeLondon/lbf-data-tools/lbf/internal/psbuild"
+	"github.com/Benedict-Carling/lbf-cli/internal/psbuild"
 )
 
 // The test binary runs as the Go lbf when re-executed with this set.
@@ -108,8 +109,9 @@ func newWorld(t *testing.T, name, perms string, files map[string]string) *world 
 	for _, d := range []string{filepath.Join("AppData", "Local"), filepath.Join("AppData", "Roaming")} {
 		must(t, os.MkdirAll(filepath.Join(w.home, d), 0o755))
 	}
-	for rel, body := range files {
-		writeFile(t, filepath.Join(w.dir, filepath.FromSlash(rel)), body)
+	// In sorted order, so names a filesystem folds into one leave the same file in every world.
+	for _, rel := range slices.Sorted(maps.Keys(files)) {
+		writeFile(t, filepath.Join(w.dir, filepath.FromSlash(rel)), files[rel])
 	}
 	w.env = []string{
 		"HOME=" + w.home, "USERPROFILE=" + w.home, "XDG_CONFIG_HOME=" + filepath.Join(w.home, ".config"),
