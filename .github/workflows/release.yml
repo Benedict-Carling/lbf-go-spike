@@ -85,7 +85,7 @@ jobs:
           go run github.com/tc-hib/go-winres@v0.3.3 simply --arch amd64,arm64 \
             --product-name lbf --product-version "$v" --file-version "$v" \
             --file-description "lbf: publish and fetch research datasets on Azure" \
-            --copyright "Copyright (c) 2026 Benedict Carling" --original-filename lbf.exe
+            --copyright "Copyright (c) 2026 Imperial College London" --original-filename lbf.exe
       - run: |
           for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
             os=${target%/*}; arch=${target#*/}; ext=""
