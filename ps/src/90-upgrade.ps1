@@ -2,7 +2,7 @@ Add-Type -AssemblyName System.Net.Http
 # .NET Framework's defaults predate TLS 1.2, which GitHub and Azure require.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$script:ReleasesUrl = 'https://github.com/Benedict-Carling/lbf-cli/releases'
+$script:ReleasesUrl = 'https://github.com/ImperialCollegeLondon/lbf-cli/releases'
 $script:UpdateCheckEvery = [TimeSpan]::FromHours(1)
 $script:UpdateCheckLimit = [TimeSpan]::FromSeconds(2)
 $script:UpgradeAsset = 'lbf.ps1'

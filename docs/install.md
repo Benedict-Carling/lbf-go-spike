@@ -45,7 +45,7 @@ fetch the build for the machine's own processor, even from a terminal emulated
 on Arm; `lbf.ps1` runs on any Windows processor.
 
 Binaries, `lbf.ps1`, and the Windows exes earlier installs used are also
-attached to each [release](https://github.com/Benedict-Carling/lbf-cli/releases).
+attached to each [release](https://github.com/ImperialCollegeLondon/lbf-cli/releases).
 
 ## Update
 

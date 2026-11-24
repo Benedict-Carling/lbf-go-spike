@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/Benedict-Carling/lbf-cli/internal/psbuild"
+	"github.com/ImperialCollegeLondon/lbf-cli/internal/psbuild"
 )
 
 func main() {

@@ -24,7 +24,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
-	"github.com/Benedict-Carling/lbf-cli/internal/psbuild"
+	"github.com/ImperialCollegeLondon/lbf-cli/internal/psbuild"
 )
 
 // The test binary runs as the Go lbf when re-executed with this set.

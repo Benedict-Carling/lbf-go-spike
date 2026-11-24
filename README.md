@@ -18,13 +18,13 @@ lbf fetch 20261001-fancy-dassie-eadb
 Windows, in PowerShell:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm https://github.com/Benedict-Carling/lbf-cli/releases/latest/download/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm https://github.com/ImperialCollegeLondon/lbf-cli/releases/latest/download/install.ps1 | iex
 ```
 
 macOS and Linux:
 
 ```sh
-curl -fsSL https://github.com/Benedict-Carling/lbf-cli/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ImperialCollegeLondon/lbf-cli/releases/latest/download/install.sh | sh
 ```
 
 Neither needs admin rights. Both check the download against the release's

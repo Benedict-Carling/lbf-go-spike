@@ -18,7 +18,7 @@ jobs:
     steps:
       - run: |
           $PSVersionTable.PSVersion.ToString()
-          irm https://github.com/Benedict-Carling/lbf-cli/releases/latest/download/install.ps1 | iex
+          irm https://github.com/ImperialCollegeLondon/lbf-cli/releases/latest/download/install.ps1 | iex
           lbf version
           lbf help
 
@@ -29,5 +29,5 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - run: |
-          curl -fsSL https://github.com/Benedict-Carling/lbf-cli/releases/latest/download/install.sh | sh
+          curl -fsSL https://github.com/ImperialCollegeLondon/lbf-cli/releases/latest/download/install.sh | sh
           ~/.local/bin/lbf version

@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	releasesURL      = "https://github.com/Benedict-Carling/lbf-cli/releases"
+	releasesURL      = "https://github.com/ImperialCollegeLondon/lbf-cli/releases"
 	updateCheckEvery = time.Hour
 	updateCheckLimit = 2 * time.Second
 )

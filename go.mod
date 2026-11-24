@@ -1,4 +1,4 @@
-module github.com/Benedict-Carling/lbf-cli
+module github.com/ImperialCollegeLondon/lbf-cli
 
 go 1.27.1
 

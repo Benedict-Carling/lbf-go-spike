@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$repo = 'Benedict-Carling/lbf-cli'
+$repo = 'ImperialCollegeLondon/lbf-cli'
 $base = "https://github.com/$repo/releases/latest/download"
 if ($env:LBF_TEST_INSTALL_FROM) { $base = $env:LBF_TEST_INSTALL_FROM }
 $dir = Join-Path $env:LOCALAPPDATA 'lbf'

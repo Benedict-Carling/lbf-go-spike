@@ -45,7 +45,7 @@ func Build(root, version string) ([]byte, error) {
 	}
 
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "# lbf %s for PowerShell, built from ps/src in github.com/Benedict-Carling/lbf-cli.\n", version)
+	fmt.Fprintf(&b, "# lbf %s for PowerShell, built from ps/src in github.com/ImperialCollegeLondon/lbf-cli.\n", version)
 	b.WriteString("#Requires -Version 5.1\n")
 	fmt.Fprintf(&b, "$script:LbfVersion = '%s'\n", version)
 	for _, e := range []struct {
