@@ -42,7 +42,8 @@ func emulator(t *testing.T, perms sas.ContainerPermissions) target {
 	cred, err := container.NewSharedKeyCredential(emulatorAccount, emulatorKey)
 	must(t, err)
 	name := strings.ToLower(strings.NewReplacer("/", "-", "_", "-").Replace(t.Name()))
-	name = fmt.Sprintf("%.50s-%d", name, time.Now().UnixNano()%1e9)
+	// Azure refuses a container name with two hyphens in a row, which cutting the test's name can leave.
+	name = fmt.Sprintf("%s-%d", strings.TrimRight(fmt.Sprintf("%.50s", name), "-"), time.Now().UnixNano()%1e9)
 	cc, err := container.NewClientWithSharedKeyCredential(emulatorURL+"/"+name, cred, nil)
 	must(t, err)
 	_, err = cc.Create(context.Background(), nil)
