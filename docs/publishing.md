@@ -7,8 +7,8 @@ logins need the OS credential store, so the static Linux build uses `az` or
 stops with nothing uploaded if not.
 
 Every publish is validated before anything is uploaded. Every dataset must meet
-the bronze profile (`profiles/bronze/profile.json`, compiled into the binary),
-plus the one given with `--profile`. Derived datasets record what they came from:
+the bronze profile (`profiles/bronze/0.7.0/profile.json`, compiled into the binary),
+plus each one given with `--profile`. Derived datasets record what they came from:
 
 ```
 lbf publish results/ --container silver \
@@ -19,7 +19,8 @@ lbf publish results/ --container silver \
 ```
 
 `--property NAME=VALUE` repeats for several properties, and `--properties metadata.json`
-gives them as a JSON object of strings, e.g. `{"sample_id": "SAM-0001"}`.
+gives them as a JSON object, e.g. `{"sample_id": "SAM-0001", "wavelength_nm": 450}`, whose
+values are text, numbers or true/false, as a form writes them.
 `--name` and `--description` say what the dataset is; without them lbf uses the
 folder's name and writes a description. `--derived-from` and `--instrument`
 come together, and `--instrument` repeats for several. The same can instead be
@@ -43,28 +44,78 @@ properties are `PropertyValue`s, the parent is `isBasedOn`, and a derived
 dataset also has a `CreateAction` run, which the root `mentions`, conforming to
 Process Run Crate 0.6.
 
-A profile is a directory holding a JSON Schema `profile.json`, describing both
-the data given as `<path>` and the crate lbf writes for it. Its `$id` is
-recorded in the crate's `conformsTo`, along with every profile it builds on
-through `$ref`; sibling profiles (`profiles/<name>/profile.json` or, versioned,
-`profiles/<name>/<version>/profile.json`) and lbf's bronze profile resolve locally. It
-validates this view of the dataset, once the uploader is known:
+A profile is a folder holding a JSON Schema 2020-12 `profile.json`, whose `$id`
+ends in `/<name>/<version>`, e.g. `https://example.org/profiles/plate-read/0.1.0`.
+It builds on bronze, or on another profile, with `$ref`; sibling profiles
+(`profiles/<name>/profile.json` or, versioned, `profiles/<name>/<version>/profile.json`)
+and bronze resolve locally. `--profile` repeats for a dataset that meets several.
+A profile checks two things:
+
+- **The crate itself**, in RO-Crate's terms: its root as bronze's
+  `profiles/bronze/0.7.0/frame.json` lays it out, with what the root refers to
+  embedded and `additionalProperty` keyed by name. So `hasPart` lists the
+  published files (each with `@id`, `contentSize`, `encodingFormat`),
+  `isBasedOn` is the parent, `mentions` the run with its `instrument`s, and
+  `license`, `creator` and `conformsTo` are entities.
+- **The properties given**, as one flat record, against the profile's
+  `$defs/properties`. Each property's `type` (`string`, `integer`, `number` or
+  `boolean`) is how lbf stores it, so `--property wavelength_nm=450` is the
+  number 450 in the crate; `x-unitCode` (the unit's URL, e.g. QUDT's
+  `http://qudt.org/vocab/unit/NanoM`) and `x-unitText` (`nm`) become the
+  PropertyValue's `unitCode` and `unitText`.
 
 ```json
-{"data": {"name": "results", "files": [{"path": "features/plate1.parquet", "size": 12}]},
- "crate": {"identifier": "...", "creator": "...", "datePublished": "...",
-           "conformsTo": ["..."], "additionalProperty": {"sample_id": "..."},
-           "wasDerivedFrom": "...", "instrument": [{"name": "...", "version": "...", "url": "..."}]}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/profiles/plate-read/0.1.0",
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "title": "Plate read",
+  "properties": {
+    "hasPart": {"description": "The reader's export, saved as readings.csv",
+                "contains": {"properties": {"@id": {"pattern": "(^|/)readings\\.csv$"}}}}
+  },
+  "$defs": {"properties": {
+    "required": ["plate_id"],
+    "properties": {
+      "plate_id": {"type": "string", "title": "Plate barcode", "description": "On the side of the plate",
+                   "examples": ["P-0001"], "pattern": "^P-[0-9]{4}$"},
+      "wavelength_nm": {"type": "integer", "title": "Wavelength", "description": "In nanometres",
+                        "examples": [450], "minimum": 200, "maximum": 1000,
+                        "x-unitCode": "http://qudt.org/vocab/unit/NanoM", "x-unitText": "nm"}
+    }
+  }}
+}
 ```
 
-File paths are relative to `<path>`. `crate` uses lbf's own names for what the
-crate records, whichever RO-Crate terms it uses.
+A profile's `title`, `description` and `examples` are what lbf says when a
+dataset falls short, in terms of the flag that fixes it:
+
+```
+dataset does not meet profile Plate read (https://example.org/profiles/plate-read/0.1.0):
+  --property wavelength_nm: is 9000, but must be at most 1000
+      Wavelength; In nanometres; e.g. 450
+  missing --property plate_id=...
+      Plate barcode; On the side of the plate; e.g. P-0001
+```
+
+`lbf profiles check <dir>` finds what nothing would check or no publisher could
+give well: keywords that are not JSON Schema's, properties without a type,
+title, description or examples, examples that break their own rules, and a
+unit without its URL. Run it before anyone publishes against a profile.
+
+Each dataset keeps the exact schemas it met, bronze's included, as files beside
+the published folder: `ro-crate-profiles/<name>/<version>/profile.json`. The
+crate lists each in `conformsTo` with its `version`, the profile it builds on
+(`isProfileOf`) and a `ResourceDescriptor` whose `hasArtifact` is that file, with
+its `sha256`. Publishing again under the same ID with a schema that has changed
+is refused, since the dataset was checked against another. A published folder
+cannot itself be named `ro-crate-profiles`.
 
 `--dry-run` validates and prints the crate without signing in, as uploader `dry-run`;
 with `--json` it prints `{"id", "url"}` instead, the url on a placeholder `dryrun` account. Progress goes to
 stderr; stdout carries only the result (the dataset ID and URL, or the fetched path). With `--json`,
 publish prints `{"id", "url"}` and fetch prints `{"id", "url", "path", "data_path", "provenance"}` as one line, where
-`path` is `<out>/<id>`, holding the crate, and `data_path` is the published folder inside it; fetch's
+`path` is `<out>/<id>`, holding the crate and `ro-crate-profiles/`, and `data_path` is the published folder inside it; fetch's
 `provenance` is what the crate states (`name`, `description`, `derived_from`, `instruments`, `properties`), as in a `--provenance` file, leaving out a name and description lbf filled in. `--tag KEY=VALUE` picks
 the storage account (default `tag=storage`, production; the test account is
 `tag=storage-test`). If several accounts carry the tag, lbf asks which one in a terminal, and

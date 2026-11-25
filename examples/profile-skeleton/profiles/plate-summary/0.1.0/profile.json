@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/examples/profile-skeleton/profiles/plate-summary/0.1.0",
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "title": "Plate summary",
+  "description": "Per-row statistics of one plate read, made from the plate read by the plate-summary script.",
+  "required": ["isBasedOn", "mentions"],
+  "properties": {
+    "hasPart": {
+      "description": "The statistics, saved as summary.csv",
+      "contains": {"properties": {"@id": {"pattern": "(^|/)summary\\.csv$"}}}
+    },
+    "mentions": {
+      "description": "Made by the plate-summary script",
+      "contains": {"properties": {"instrument": {"contains": {"properties": {"name": {"const": "plate-summary"}}}}}}
+    }
+  },
+  "$defs": {
+    "properties": {
+      "title": "Plate summary",
+      "type": "object",
+      "required": ["plate_id", "method"],
+      "properties": {
+        "plate_id": {
+          "type": "string", "title": "Plate barcode", "description": "The barcode of the plate read it summarises",
+          "examples": ["P-0001"], "pattern": "^P-[0-9]{4}$"
+        },
+        "method": {
+          "type": "string", "title": "How each row was summarised", "description": "The statistic taken across each row's wells",
+          "examples": ["mean"], "enum": ["mean", "median"]
+        }
+      }
+    }
+  }
+}

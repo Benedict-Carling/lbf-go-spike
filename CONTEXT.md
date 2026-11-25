@@ -36,12 +36,15 @@ A versioned piece of software that produced a derived dataset, e.g. CellProfiler
 _Avoid_: tool, workflow
 
 **Property**:
-A named text value describing a dataset, e.g. `sample_id`. Some names are reserved for lbf.
+A named value describing a dataset, e.g. `sample_id` or `wavelength_nm`: text, a number or true/false, as its profile types it. Some names are reserved for lbf.
 _Avoid_: tag, metadata field
 
 **Profile**:
-A named, versioned description of a dataset's files and its crate, which the dataset must meet before it is published. Identified by a URI that the crate records. Profiles build on one another, and every dataset meets the bronze profile as well as its own.
+A named, versioned JSON Schema a dataset must meet before it is published: over its crate, as the frame lays it out, and over the properties given. Identified by a URI ending in its name and version, which the crate records, and the dataset keeps the schema itself. Profiles build on one another, and every dataset meets the bronze profile as well as its own.
 _Avoid_: schema, shape, contract
+
+**Frame**:
+How lbf lays a crate's root out for profiles to check: what the root refers to embedded, its files as `hasPart`, its properties keyed by name. Part of the bronze profile's version.
 
 **Crate**:
 The RO-Crate record published beside a dataset's files: its ID, parent, instruments, properties, files and profiles.

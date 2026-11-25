@@ -44,6 +44,7 @@ out. What the installers change, and how to uninstall, is in
 | `lbf fetch <id> [--out DIR]` | Fetch a dataset and verify every file |
 | `lbf new-id` | Print an ID to publish under later, with `publish --id` |
 | `lbf browse` | Search every dataset's crate in your browser |
+| `lbf profiles check <dir>` | Check a profile before anyone publishes against it |
 | `lbf check --mode upload` | Prove the credential works before a long job |
 | `lbf mint-sas --mode upload` | Write `azure_sas.env` for a machine without `az`, such as HPC |
 | `lbf logout` | Sign out and delete saved tokens |
@@ -66,8 +67,10 @@ lbf publish results/ --container silver \
     --profile profiles/minimal-silver/0.1.0
 ```
 
-`--dry-run` validates and prints the crate without signing in. A publish that
-fails partway is finished by running it again with `--id`.
+A profile is JSON Schema over the RO-Crate itself and the properties given, and
+the dataset keeps each schema it met; `lbf profiles check <dir>` checks one before
+anyone publishes against it. `--dry-run` validates and prints the crate without
+signing in. A publish that fails partway is finished by running it again with `--id`.
 
 ## Documentation
 
