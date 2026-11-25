@@ -5,7 +5,7 @@ A Go CLI that publishes datasets to the lab's Azure storage with an RO-Crate bes
 - Domain words (dataset, parent, instrument, property, profile, crate): `CONTEXT.md`. Use them in code, messages and docs.
 - Changing the crate lbf writes, a profile, or what publish and fetch take and print: read `docs/design-decisions.md` first, and record any new decision there with its reason.
 - Bronze is compiled in from `profiles/bronze/profile.json`. Changing it is a new bronze version, and changes what every profile built on it means.
-- json-gold runs offline: the RO-Crate 1.3 context is `ro-crate-1.3-context.json`, which also serves the 1.2 URL for crates earlier lbf versions wrote.
+- json-gold runs offline: the RO-Crate 1.3 context is `cmd/lbf/ro-crate-1.3-context.json`, which also serves the 1.2 URL for crates earlier lbf versions wrote.
 
 ## Checking a change
 

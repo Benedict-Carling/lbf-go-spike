@@ -29,7 +29,7 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
-          go build -trimpath -ldflags='-s -w' -o lbf.exe .
+          go build -trimpath -ldflags='-s -w' -o lbf.exe ./cmd/lbf
           [System.Environment]::OSVersion.VersionString
           .\lbf.exe --help
 

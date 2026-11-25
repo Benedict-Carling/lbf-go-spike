@@ -35,7 +35,7 @@ func Build(root, version string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	browse, err := os.ReadFile(filepath.Join(root, "browse.html"))
+	browse, err := os.ReadFile(filepath.Join(root, "cmd", "lbf", "browse.html"))
 	if err != nil {
 		return nil, err
 	}
