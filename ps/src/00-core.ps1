@@ -378,7 +378,7 @@ function ConvertTo-LbfJsonString {
     return $sb.ToString()
 }
 
-# Go's strconv.FormatFloat(f, 'g'-like as encoding/json does.
+# encoding/json's float64: the shortest digits, in exponent form below 1e-6 or from 1e21.
 function ConvertTo-LbfJsonFloat {
     param([Parameter(Mandatory)][double]$Value)
     if ([double]::IsNaN($Value) -or [double]::IsInfinity($Value)) { throw (New-LbfError "json: unsupported value: $Value") }
@@ -390,12 +390,35 @@ function ConvertTo-LbfJsonFloat {
         $mant = $m.Groups[1].Value
         if ($mant.Contains('.')) { $mant = $mant.TrimEnd('0').TrimEnd('.') }
         $exp = $m.Groups[3].Value
-        if ($exp.Length -lt 2) { $exp = '0' + $exp }
+        if ($exp.Length -lt 2 -and $m.Groups[2].Value -eq '+') { $exp = '0' + $exp }
         return "${mant}e$($m.Groups[2].Value)$exp"
     }
-    $s = $Value.ToString('R', $script:Invariant)
-    if ($s -match 'E') { $s = ([decimal]$Value).ToString($script:Invariant) }
-    return $s
+    return Format-LbfFloatF $Value
+}
+
+# Go's strconv.FormatFloat(f, 'f', -1, 64): the shortest digits, never in exponent form.
+function Format-LbfFloatF {
+    param([double]$Value)
+    if ([double]::IsNaN($Value)) { return 'NaN' }
+    if ([double]::IsPositiveInfinity($Value)) { return '+Inf' }
+    if ([double]::IsNegativeInfinity($Value)) { return '-Inf' }
+    $r = $Value.ToString('R', $script:Invariant)
+    $sign = ''
+    if ($r.StartsWith('-', [StringComparison]::Ordinal)) { $sign = '-'; $r = $r.Substring(1) }
+    $exp10 = 0
+    $e = $r.IndexOfAny([char[]]'Ee')
+    if ($e -ge 0) { $exp10 = [int]::Parse($r.Substring($e + 1), $script:Invariant); $r = $r.Substring(0, $e) }
+    $dot = $r.IndexOf([char]'.')
+    $intPart = $r; $frac = ''
+    if ($dot -ge 0) { $intPart = $r.Substring(0, $dot); $frac = $r.Substring($dot + 1) }
+    $digits = ($intPart + $frac).TrimStart('0')
+    $lead = ($intPart + $frac).Length - $digits.Length
+    $dp = $intPart.Length - $lead + $exp10
+    $digits = $digits.TrimEnd('0')
+    if ($digits -eq '') { return $sign + '0' }
+    if ($dp -le 0) { return $sign + '0.' + ('0' * (-$dp)) + $digits }
+    if ($dp -ge $digits.Length) { return $sign + $digits + ('0' * ($dp - $digits.Length)) }
+    return $sign + $digits.Substring(0, $dp) + '.' + $digits.Substring($dp)
 }
 
 function Test-LbfJsonStruct {

@@ -666,31 +666,6 @@ function ConvertTo-LbfProfileJsonText {
     return ''
 }
 
-# Go's strconv.FormatFloat(f, 'f', -1, 64): the shortest digits, never in exponent form.
-function Format-LbfFloatF {
-    param([double]$Value)
-    if ([double]::IsNaN($Value)) { return 'NaN' }
-    if ([double]::IsPositiveInfinity($Value)) { return '+Inf' }
-    if ([double]::IsNegativeInfinity($Value)) { return '-Inf' }
-    $r = $Value.ToString('R', $script:Invariant)
-    $sign = ''
-    if ($r.StartsWith('-', [StringComparison]::Ordinal)) { $sign = '-'; $r = $r.Substring(1) }
-    $exp10 = 0
-    $e = $r.IndexOfAny([char[]]'Ee')
-    if ($e -ge 0) { $exp10 = [int]::Parse($r.Substring($e + 1), $script:Invariant); $r = $r.Substring(0, $e) }
-    $dot = $r.IndexOf([char]'.')
-    $intPart = $r; $frac = ''
-    if ($dot -ge 0) { $intPart = $r.Substring(0, $dot); $frac = $r.Substring($dot + 1) }
-    $digits = ($intPart + $frac).TrimStart('0')
-    $lead = ($intPart + $frac).Length - $digits.Length
-    $dp = $intPart.Length - $lead + $exp10
-    $digits = $digits.TrimEnd('0')
-    if ($digits -eq '') { return $sign + '0' }
-    if ($dp -le 0) { return $sign + '0.' + ('0' * (-$dp)) + $digits }
-    if ($dp -ge $digits.Length) { return $sign + $digits + ('0' * ($dp - $digits.Length)) }
-    return $sign + $digits.Substring(0, $dp) + '.' + $digits.Substring($dp)
-}
-
 # ---------- properties, typed by the profile ----------
 
 # Go's propertyKinds: each property's JSON Schema type and unit, from the profiles' $defs/properties.
