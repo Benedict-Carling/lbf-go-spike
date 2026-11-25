@@ -77,6 +77,8 @@ jobs:
         env:
           LBF_AZURITE: "1"
           LBF_PS: ${{ matrix.target.ps }}
+          # Pull requests share long-lived PowerShells for speed; main and releases start one per run, as a user does.
+          LBF_PS_SPAWN: ${{ github.event_name != 'pull_request' && '1' || '' }}
           GROUP: ${{ matrix.group.name }}
           RUN: ${{ matrix.group.run }}
           SKIP: ${{ matrix.group.skip }}
