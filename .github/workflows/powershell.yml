@@ -42,11 +42,12 @@ jobs:
           - {os: windows-latest, ps: powershell.exe}
           - {os: windows-latest, ps: pwsh}
           - {os: ubuntu-latest, ps: pwsh}
-        # Together the groups run every TestConformance test once.
+        # The first three run every TestConformance test once in long-lived PowerShells; launch reruns the tests of arguments, exit codes and encoding with a PowerShell per run, as a user starts it.
         group:
-          - {name: dataset, run: '^TestConformanceDataset', skip: ''}
-          - {name: transfer, run: '^TestConformanceTransfer', skip: ''}
-          - {name: rest, run: '^TestConformance', skip: '^TestConformance(Dataset|Transfer)'}
+          - {name: dataset, run: '^TestConformanceDataset', skip: '', spawn: ''}
+          - {name: transfer, run: '^TestConformanceTransfer', skip: '', spawn: ''}
+          - {name: rest, run: '^TestConformance', skip: '^TestConformance(Dataset|Transfer)', spawn: ''}
+          - {name: launch, run: '^TestConformance(CLI|StringsCLI|DatasetNames)$', skip: '', spawn: '1'}
     runs-on: ${{ matrix.target.os }}
     steps:
       - uses: actions/checkout@v4
@@ -77,8 +78,7 @@ jobs:
         env:
           LBF_AZURITE: "1"
           LBF_PS: ${{ matrix.target.ps }}
-          # Pull requests share long-lived PowerShells for speed; main and releases start one per run, as a user does.
-          LBF_PS_SPAWN: ${{ github.event_name != 'pull_request' && '1' || '' }}
+          LBF_PS_SPAWN: ${{ matrix.group.spawn }}
           GROUP: ${{ matrix.group.name }}
           RUN: ${{ matrix.group.run }}
           SKIP: ${{ matrix.group.skip }}
