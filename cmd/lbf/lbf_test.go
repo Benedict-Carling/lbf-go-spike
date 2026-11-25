@@ -392,31 +392,25 @@ func writeFile(t *testing.T, path, body string) {
 
 const minimalSilverProfile = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.org/profiles/minimal-silver",
-  "$ref": "https://github.com/ImperialCollegeLondon/lbf-data-tools/tree/main/profiles/bronze/0.4.0",
-  "properties": {
-    "crate": {
-      "required": ["wasDerivedFrom", "instrument"],
-      "properties": {"additionalProperty": {"required": ["sample_id"]}}
-    }
-  }
+  "$id": "https://example.org/profiles/minimal-silver/0.1.0",
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "required": ["isBasedOn", "mentions"],
+  "$defs": {"properties": {"required": ["sample_id"]}}
 }`
 
 const cellPaintingProfile = `{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.org/profiles/cell-painting",
-  "$ref": "https://example.org/profiles/minimal-silver",
+  "$id": "https://example.org/profiles/cell-painting/0.1.0",
+  "$ref": "https://example.org/profiles/minimal-silver/0.1.0",
   "properties": {
-    "data": {"properties": {"files": {"allOf": [
-      {"contains": {"properties": {"path": {"const": "plate_map.csv"}}}},
-      {"contains": {"properties": {"path": {"pattern": "^features/.+\\.parquet$"}}}},
-      {"items": {"properties": {"path": {"pattern": "^(plate_map\\.csv|features/.+|qc/.+)$"}}}}
-    ]}}},
-    "crate": {"properties": {
-      "instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}},
-      "additionalProperty": {"required": ["plate_id"]}
-    }}
-  }
+    "hasPart": {"allOf": [
+      {"contains": {"properties": {"@id": {"pattern": "(^|/)plate_map\\.csv$"}}}},
+      {"contains": {"properties": {"@id": {"pattern": "/features/.+\\.parquet$"}}}},
+      {"items": {"properties": {"@id": {"pattern": "^[^/]+/(plate_map\\.csv|features/.+|qc/.+)$"}}}}
+    ]},
+    "mentions": {"contains": {"properties": {"instrument": {"contains": {"properties": {"name": {"const": "CellProfiler"}}}}}}}
+  },
+  "$defs": {"properties": {"required": ["plate_id"]}}
 }`
 
 func cellPaintingRun() publication {
@@ -452,7 +446,7 @@ func TestProfileChecksDataAndCrate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"/profiles/bronze/0.4.0", "/profiles/minimal-silver", "/profiles/cell-painting", processRunCrate,
+		"/profiles/bronze/0.7.0", "/profiles/minimal-silver/0.1.0", "/profiles/cell-painting/0.1.0", processRunCrate,
 		`"isBasedOn": {`, `"mentions": {`, `"#source-20260101-x-y-0000"`, `"CreateAction"`, `"name": "plate_id"`, `"name": "u@example.org"`,
 	} {
 		if !strings.Contains(string(crate), want) {
@@ -485,7 +479,7 @@ func TestProfileChecksDataAndCrate(t *testing.T) {
 
 func TestBronzeAppliesUnderAnyProfile(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "loose", "profile.json"), `{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://example.org/loose"}`)
+	writeFile(t, filepath.Join(root, "loose", "profile.json"), `{"$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://example.org/profiles/loose/0.1.0"}`)
 	prof, err := loadProfile(filepath.Join(root, "loose"))
 	if err != nil {
 		t.Fatal(err)
@@ -512,14 +506,14 @@ func TestProvenanceRules(t *testing.T) {
 		"property uploader":      `{"properties": {"uploader": "x"}}`,
 		"property blob-location": `{"properties": {"blob-location": "x"}}`,
 		"property source-":       `{"properties": {"source-20260101-x-y-0000": "x"}}`,
-		"non-string property":    `{"properties": {"n": 1}}`,
+		"list property":          `{"properties": {"n": [1]}}`,
 		"trailing content":       `{"properties": {}} {"derived_from": "x"}`,
 		"url not a uri":          `{"derived_from": "20260101-x-y-0000", "instruments": [{"name": "a", "version": "1", "url": "not a url"}], "properties": {}}`,
 	}
 	for name, body := range cases {
 		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".json")
 		writeFile(t, path, body)
-		_, err := preparePublication(data, provenanceFlags{file: path}, "", "")
+		_, err := preparePublication(data, provenanceFlags{file: path}, nil, "")
 		if err == nil {
 			t.Errorf("%s: accepted", name)
 			continue
@@ -558,15 +552,22 @@ func TestProvenanceFlags(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 
+	typed := filepath.Join(dir, "typed.json")
+	writeFile(t, typed, `{"wavelength_nm": 450, "ratio": 0.5, "lidded": true, "note": "x"}`)
+	p, err = provenanceFlags{properties: typed}.load()
+	if err != nil || p.Properties["wavelength_nm"] != "450" || p.Properties["ratio"] != "0.5" || p.Properties["lidded"] != "true" || p.Properties["note"] != "x" {
+		t.Fatalf("a form's numbers and true/false: %+v %v", p.Properties, err)
+	}
+
 	nonString := filepath.Join(dir, "n.json")
-	writeFile(t, nonString, `{"n": 1}`)
+	writeFile(t, nonString, `{"n": {"a": 1}}`)
 	null := filepath.Join(dir, "null.json")
 	writeFile(t, null, `null`)
 	for name, f := range map[string]provenanceFlags{
 		"parent without tools":  {derivedFrom: "20260101-x-y-0000"},
 		"tools without parent":  {instruments: []instrument{want}},
 		"incomplete instrument": {derivedFrom: "20260101-x-y-0000", instruments: []instrument{{Name: "nf"}}},
-		"non-string property":   {properties: nonString},
+		"object property":       {properties: nonString},
 		"null properties":       {properties: null},
 		"with --provenance":     {file: props, derivedFrom: "20260101-x-y-0000"},
 	} {
@@ -1061,7 +1062,7 @@ func TestCrateNamesProfilesByTitleAndVersion(t *testing.T) {
 	}
 	for id, want := range map[string][2]any{
 		processRunCrate:    {"Process Run Crate", "0.6"},
-		bronzeProfileID(t): {"Bronze dataset", "0.4.0"},
+		bronzeProfileID(t): {"Bronze dataset", "0.7.0"},
 		"https://example.org/profiles/untitled/1.2": {"https://example.org/profiles/untitled/1.2", "1.2"},
 	} {
 		if got[id] != want {

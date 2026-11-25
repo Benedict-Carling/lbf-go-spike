@@ -3,8 +3,13 @@ package main
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
+
+	"github.com/ImperialCollegeLondon/lbf-cli/profiles"
 
 	"github.com/piprate/json-gold/ld"
 )
@@ -41,6 +46,45 @@ var jsonld = sync.OnceValues(func() (*ld.JsonLdOptions, error) {
 	opts.DocumentLoader = offlineLoader{context}
 	return opts, nil
 })
+
+// What profiles check: the crate's root as bronze's frame lays it out, with the published files, not the schemas, as hasPart.
+func framedRoot(crate []byte) (map[string]any, error) {
+	var frame, doc map[string]any
+	if err := json.Unmarshal(profiles.BronzeFrame, &frame); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(crate, &doc); err != nil {
+		return nil, err
+	}
+	graph, _ := doc["@graph"].([]any)
+	byID := map[string]map[string]any{}
+	for _, e := range graph {
+		if m, ok := e.(map[string]any); ok {
+			byID[refID(m)] = m
+		}
+	}
+	root := byID["./"]
+	var parts []any
+	aside := map[string]bool{}
+	for _, part := range asList(root["hasPart"]) {
+		id := refID(part)
+		if !isProfileFile(id) {
+			parts = append(parts, byID[id])
+			aside[id] = true
+		}
+	}
+	// Framing time grows with the square of the entities, so files, which refer to nothing, join the view after it.
+	delete(root, "hasPart")
+	doc["@graph"] = slices.DeleteFunc(graph, func(e any) bool { return aside[refID(e)] })
+	view, err := frameCrate(doc, frame)
+	if err != nil {
+		return nil, err
+	}
+	view["hasPart"] = parts
+	return view, nil
+}
+
+func isProfileFile(rel string) bool { return strings.HasPrefix(rel, profilesDir+"/") }
 
 func frameCrate(doc map[string]any, frame map[string]any) (map[string]any, error) {
 	opts, err := jsonld()

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -32,6 +34,14 @@ type localFile struct {
 	Size    int64
 	ModTime time.Time
 	SHA256  string // set once uploaded
+	Content []byte // a file lbf writes itself, such as a profile's schema, rather than one read from Path
+}
+
+func (f *localFile) open() (io.ReadCloser, error) {
+	if f.Content != nil {
+		return io.NopCloser(bytes.NewReader(f.Content)), nil
+	}
+	return os.Open(f.Path)
 }
 
 func excluded(name string) bool {

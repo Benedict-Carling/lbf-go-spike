@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"cmp"
+	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
@@ -23,11 +24,42 @@ type instrument struct {
 
 // The --provenance file: what the publisher states about a dataset.
 type provenance struct {
-	Name        string            `json:"name,omitempty"`
-	Description string            `json:"description,omitempty"`
-	DerivedFrom string            `json:"derived_from,omitempty"`
-	Instruments []instrument      `json:"instruments,omitempty"`
-	Properties  map[string]string `json:"properties"`
+	Name        string         `json:"name,omitempty"`
+	Description string         `json:"description,omitempty"`
+	DerivedFrom string         `json:"derived_from,omitempty"`
+	Instruments []instrument   `json:"instruments,omitempty"`
+	Properties  propertyValues `json:"properties"`
+}
+
+// Properties by name, each kept as text; a file may give a number or true/false, as a form writes them, and the profile types it.
+type propertyValues map[string]string
+
+func (p *propertyValues) UnmarshalJSON(b []byte) error {
+	var raw map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if raw == nil {
+		*p = nil
+		return nil
+	}
+	values := propertyValues{}
+	for _, name := range slices.Sorted(maps.Keys(raw)) {
+		switch v := raw[name]; v.Kind() {
+		case '"':
+			var s string
+			if err := jsonv2.Unmarshal(v, &s); err != nil {
+				return err
+			}
+			values[name] = s
+		case '0', 't', 'f':
+			values[name] = string(v)
+		default:
+			return fmt.Errorf("property %q is %s; give text, a number or true/false", name, v)
+		}
+	}
+	*p = values
+	return nil
 }
 
 // Where publish takes its provenance from: a --provenance file, the flags that spell it out, or both.
@@ -39,7 +71,7 @@ type provenanceFlags struct {
 }
 
 func (f provenanceFlags) load() (provenance, error) {
-	p := provenance{DerivedFrom: f.derivedFrom, Instruments: f.instruments, Properties: map[string]string{}}
+	p := provenance{DerivedFrom: f.derivedFrom, Instruments: f.instruments, Properties: propertyValues{}}
 	if f.file != "" {
 		if f.derivedFrom != "" || len(f.instruments) > 0 || f.properties != "" {
 			return provenance{}, errors.New("--provenance cannot be combined with --derived-from, --instrument or --properties")
@@ -108,7 +140,7 @@ func readProvenance(path string) (provenance, error) {
 		}
 	}
 	if p.Properties == nil {
-		p.Properties = map[string]string{}
+		p.Properties = propertyValues{}
 	}
 	return p, nil
 }

@@ -80,7 +80,7 @@ func propertiesFile(t *testing.T, body string) provenanceFlags {
 
 func prepared(t *testing.T, dir, id string, prov provenanceFlags) publication {
 	t.Helper()
-	pub, err := preparePublication(dir, prov, "", id)
+	pub, err := preparePublication(dir, prov, nil, id)
 	must(t, err)
 	return pub
 }
@@ -270,7 +270,7 @@ func TestCheckAccess(t *testing.T) {
 func TestPublishIDMustBeMinted(t *testing.T) {
 	dir := dataset(t, map[string]string{"a.txt": "a"})
 	for _, bad := range []string{"test", "20261001-fancy-dassie", "20261001-Fancy-dassie-eadb", "20261001-fancy-dassie-eadb/x"} {
-		if _, err := preparePublication(dir, provenanceFlags{}, "", bad); err == nil {
+		if _, err := preparePublication(dir, provenanceFlags{}, nil, bad); err == nil {
 			t.Errorf("--id %q accepted", bad)
 		}
 	}

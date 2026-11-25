@@ -2,13 +2,14 @@ package main
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"net/url"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,9 +41,10 @@ func refs(ids []entity) any {
 	return ids
 }
 
-const roCrateSpec = "https://w3id.org/ro/crate/1.3"
-
-var profileVersion = regexp.MustCompile(`/v?[0-9]+(\.[0-9]+)*$`)
+const (
+	roCrateSpec = "https://w3id.org/ro/crate/1.3"
+	roleSchema  = "http://www.w3.org/ns/dx/prof/role/schema"
+)
 
 // What lbf names a dataset and says of it when the publisher does not.
 func defaultName(source string) string { return filepath.Base(source) }
@@ -62,37 +64,30 @@ func defaultDescription(source string, files int, derivedFrom string) string {
 // Checked here rather than in preparePublication because the uploader is only known once signed in.
 func (p publication) validate(t target) (time.Time, error) {
 	published := time.Now()
-	if err := p.Profile.validate(p.view(t, published)); err != nil {
+	crate, err := p.buildCrate(t, published)
+	if err != nil {
+		return time.Time{}, err
+	}
+	view, err := framedRoot(crate)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err := p.Profile.validate(view, p.Profile.record(p.Provenance.Properties)); err != nil {
 		return time.Time{}, err
 	}
 	logf("[profile] meets %s\n", strings.Join(p.Profile.ids(), ", "))
 	return published, nil
 }
 
-// What profiles check: the dataset's files beside what its crate records.
-func (p publication) view(t target, published time.Time) map[string]any {
-	name := filepath.Base(p.Source)
-	files := make([]map[string]any, len(p.Files))
-	for i, f := range p.Files {
-		files[i] = map[string]any{"path": strings.TrimPrefix(f.Rel, name+"/"), "size": f.Size}
+// The files published from the folder, as opposed to the schemas the dataset carries beside them.
+func (p publication) dataFiles() int {
+	n := 0
+	for _, f := range p.Files {
+		if !isProfileFile(f.Rel) {
+			n++
+		}
 	}
-	crate := map[string]any{
-		"identifier":         p.ID,
-		"datePublished":      timestamp(published),
-		"conformsTo":         p.conformsTo(),
-		"additionalProperty": p.Provenance.Properties,
-	}
-	if user := strings.TrimSpace(t.User); user != "" {
-		crate["creator"] = user
-	}
-	if p.Provenance.DerivedFrom != "" {
-		crate["wasDerivedFrom"] = p.Provenance.DerivedFrom
-		crate["instrument"] = p.Provenance.Instruments
-	}
-	return map[string]any{
-		"data":  map[string]any{"name": name, "files": files},
-		"crate": crate,
-	}
+	return n
 }
 
 func (p publication) crate(t target) ([]byte, error) {
@@ -115,7 +110,7 @@ func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 		"@type":              "Dataset",
 		"identifier":         p.ID,
 		"name":               cmp.Or(p.Provenance.Name, defaultName(p.Source)),
-		"description":        cmp.Or(p.Provenance.Description, defaultDescription(p.Source, len(p.Files), p.Provenance.DerivedFrom)),
+		"description":        cmp.Or(p.Provenance.Description, defaultDescription(p.Source, p.dataFiles(), p.Provenance.DerivedFrom)),
 		"datePublished":      timestamp(published),
 		"license":            ref(licenseURL),
 		"distribution":       ref("#blob-location"),
@@ -145,9 +140,12 @@ func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 		profiles := make([]entity, len(conformsTo))
 		for i, uri := range conformsTo {
 			profiles[i] = ref(uri)
-			graph = append(graph, p.Profile.crateEntity(uri))
+			graph = append(graph, p.Profile.crateEntities(uri)...)
 		}
 		root["conformsTo"] = refs(profiles)
+		if len(p.Profile.rules) > 0 {
+			graph = append(graph, entity{"@id": roleSchema, "@type": "DefinedTerm", "name": "Schema", "description": "A schema the profile's data must meet"})
+		}
 	}
 	for _, f := range p.Files {
 		graph = append(graph, fileEntity(f))
@@ -160,7 +158,7 @@ func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 
 // lbf's own properties, then the publisher's by name.
 func (p publication) properties(t target) []entity {
-	pv := func(name, value string) entity {
+	pv := func(name string, value any) entity {
 		return entity{"@id": "#" + fileID(name), "@type": "PropertyValue", "name": name, "value": value}
 	}
 	props := []entity{
@@ -168,8 +166,17 @@ func (p publication) properties(t target) []entity {
 		pv("subscription_id", orUnknown(t.SubscriptionID)),
 		pv("source_path", filepath.ToSlash(p.Source)),
 	}
+	kinds := p.Profile.propertyKinds()
 	for _, k := range slices.Sorted(maps.Keys(p.Provenance.Properties)) {
-		props = append(props, pv(k, p.Provenance.Properties[k]))
+		kind := kinds[k]
+		e := pv(k, kind.value(p.Provenance.Properties[k]))
+		if kind.unitCode != "" {
+			e["unitCode"] = kind.unitCode
+		}
+		if kind.unitText != "" {
+			e["unitText"] = kind.unitText
+		}
+		props = append(props, e)
 	}
 	return props
 }
@@ -211,6 +218,10 @@ func fileEntity(f localFile) entity {
 	if format := mediaTypes[strings.ToLower(path.Ext(f.Rel))]; format != "" {
 		file["encodingFormat"] = format
 	}
+	if isProfileFile(f.Rel) {
+		file["encodingFormat"] = "application/schema+json"
+		file["conformsTo"] = ref(jsonSchemaDialect(f.Content))
+	}
 	if f.SHA256 != "" {
 		file["sha256"] = f.SHA256
 	}
@@ -238,13 +249,46 @@ func (p publication) conformsTo() []string {
 	return ids
 }
 
-// A profile's entity, named by its title and versioned by the end of its $id.
-func (p *profile) crateEntity(uri string) entity {
-	e := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": cmp.Or(p.titles()[uri], uri)}
-	if v := profileVersion.FindString(uri); v != "" {
-		e["version"] = strings.TrimPrefix(v, "/")
+// A profile's entity: what it builds on, and the schema file the dataset was checked against, as the Profiles Vocabulary describes it.
+func (p *profile) crateEntities(uri string) []entity {
+	e := entity{"@id": uri, "@type": []string{"CreativeWork", "Profile"}, "name": uri}
+	if uri == processRunCrate {
+		e["name"], e["version"] = "Process Run Crate", "0.6"
+		return []entity{e}
 	}
-	return e
+	r := p.rules[slices.IndexFunc(p.rules, func(r rule) bool { return r.id == uri })]
+	e["name"] = cmp.Or(r.title, uri)
+	if r.version != "" {
+		e["version"] = strings.TrimPrefix(r.version, "v")
+	}
+	if r.parent != "" {
+		e["isProfileOf"] = ref(r.parent)
+	}
+	if r.raw == nil {
+		return []entity{e}
+	}
+	descriptor := "#profile-" + fileID(r.name+"-"+r.version)
+	e["hasResource"] = ref(descriptor)
+	return []entity{e, {"@id": descriptor, "@type": "ResourceDescriptor", "name": "The schema of " + cmp.Or(r.title, uri),
+		"hasRole": ref(roleSchema), "hasArtifact": ref(fileID(r.file()))}}
+}
+
+// The schema files a dataset carries, one for each profile it was checked against.
+func (p *profile) files() []localFile {
+	var files []localFile
+	for _, r := range p.rules {
+		sum := sha256.Sum256(r.raw)
+		files = append(files, localFile{Rel: r.file(), Size: int64(len(r.raw)), Content: r.raw, SHA256: hex.EncodeToString(sum[:])})
+	}
+	return files
+}
+
+func jsonSchemaDialect(raw []byte) string {
+	var head struct {
+		Schema string `json:"$schema"`
+	}
+	_ = json.Unmarshal(raw, &head)
+	return cmp.Or(head.Schema, "https://json-schema.org/draft/2020-12/schema")
 }
 
 type crateFile struct {
@@ -305,6 +349,17 @@ func readCrate(raw []byte) (storedCrate, error) {
 	return c, nil
 }
 
+// The files published from the folder, leaving out the schemas the dataset carries.
+func (c storedCrate) dataFiles() int {
+	n := 0
+	for _, f := range c.Files {
+		if !isProfileFile(f.Rel) {
+			n++
+		}
+	}
+	return n
+}
+
 func (c storedCrate) byPath() map[string]crateFile {
 	files := make(map[string]crateFile, len(c.Files))
 	for _, f := range c.Files {
@@ -343,6 +398,11 @@ func (c storedCrate) differsFrom(p publication) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	given := p.Provenance
+	given.Properties = propertyValues{}
+	for name, v := range p.Profile.record(p.Provenance.Properties) {
+		given.Properties[name] = valueText(v)
+	}
 	if p.Provenance.Name == "" {
 		stated.Name = ""
 	}
@@ -350,7 +410,7 @@ func (c storedCrate) differsFrom(p publication) ([]string, error) {
 		stated.Description = ""
 	}
 	var problems []string
-	if !stated.sameAs(p.Provenance) {
+	if !stated.sameAs(given) {
 		problems = append(problems, "its name, description, parent, instruments or properties differ from these")
 	}
 	if !slices.Equal(slices.Sorted(slices.Values(conformsTo)), slices.Sorted(slices.Values(p.conformsTo()))) {
@@ -381,10 +441,10 @@ func (c storedCrate) statement() (provenance, []string, error) {
 	obj := func(v any) map[string]any { m, _ := v.(map[string]any); return m }
 	str := func(v any, key string) string { s, _ := obj(v)[key].(string); return s }
 
-	p := provenance{Name: str(view, "name"), Description: str(view, "description"), Properties: map[string]string{}}
+	p := provenance{Name: str(view, "name"), Description: str(view, "description"), Properties: propertyValues{}}
 	for name, pv := range obj(view["additionalProperty"]) {
 		if !slices.Contains(lbfProperties, name) {
-			p.Properties[name] = str(pv, "value")
+			p.Properties[name] = valueText(obj(pv)["value"])
 		}
 	}
 	for _, parent := range slices.Concat(asList(view["isBasedOn"]), asList(view["wasDerivedFrom"])) {
@@ -400,7 +460,7 @@ func (c storedCrate) statement() (provenance, []string, error) {
 	if p.Name == id || p.Name == defaultName(source) {
 		p.Name = ""
 	}
-	if slices.Contains([]string{"Dataset " + id, "Bronze-layer dataset " + id, defaultDescription(source, len(c.Files), p.DerivedFrom)}, p.Description) {
+	if slices.Contains([]string{"Dataset " + id, "Bronze-layer dataset " + id, defaultDescription(source, c.dataFiles(), p.DerivedFrom)}, p.Description) {
 		p.Description = ""
 	}
 	var conformsTo []string

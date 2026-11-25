@@ -281,7 +281,7 @@ func flattenCrate(raw []byte) (map[string]any, []catalogFile, map[string]string,
 	var total int64
 	for _, ref := range asList(root["hasPart"]) {
 		e, ok := graph[refID(ref)]
-		if !ok || !slices.Contains(typesOf(e), "File") {
+		if !ok || !slices.Contains(typesOf(e), "File") || isProfileFile(refID(ref)) {
 			continue
 		}
 		var size int64
