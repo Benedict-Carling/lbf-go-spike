@@ -151,7 +151,7 @@ func TestDatasetKeepsEachSchemaItMet(t *testing.T) {
 	}
 	prof := g["https://example.org/profiles/plate-read/0.1.0"]
 	desc := g[refID(prof["hasResource"])]
-	if refID(prof["isProfileOf"]) != bronzeProfileID(t) || desc["@type"] != "ResourceDescriptor" || refID(desc["hasArtifact"]) != "ro-crate-profiles/plate-read/0.1.0/profile.json" || refID(desc["hasRole"]) != roleSchema {
+	if refID(prof["isProfileOf"]) != bronzeProfileID(t) || !slices.Contains(typesOf(desc), "ResourceDescriptor") || refID(desc["hasArtifact"]) != "ro-crate-profiles/plate-read/0.1.0/profile.json" || refID(desc["hasRole"]) != roleSchema {
 		t.Errorf("profile %v, descriptor %v", prof, desc)
 	}
 	if !strings.Contains(g["./"]["description"].(string), "Dataset of 1 file from run1") {

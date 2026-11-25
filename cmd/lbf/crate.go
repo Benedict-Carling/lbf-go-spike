@@ -145,6 +145,13 @@ func (p publication) buildCrate(t target, published time.Time) ([]byte, error) {
 		root["conformsTo"] = refs(profiles)
 		if len(p.Profile.rules) > 0 {
 			graph = append(graph, entity{"@id": roleSchema, "@type": "DefinedTerm", "name": "Schema", "description": "A schema the profile's data must meet"})
+			var dialects []string
+			for _, r := range p.Profile.rules {
+				if d := jsonSchemaDialect(r.raw); r.raw != nil && !slices.Contains(dialects, d) {
+					dialects = append(dialects, d)
+					graph = append(graph, entity{"@id": d, "@type": "CreativeWork", "name": cmp.Or(dialectNames[d], d)})
+				}
+			}
 		}
 	}
 	for _, f := range p.Files {
@@ -221,6 +228,7 @@ func fileEntity(f localFile) entity {
 	if isProfileFile(f.Rel) {
 		file["encodingFormat"] = "application/schema+json"
 		file["conformsTo"] = ref(jsonSchemaDialect(f.Content))
+		file["description"] = "A profile's schema, exactly as this dataset was checked against it"
 	}
 	if f.SHA256 != "" {
 		file["sha256"] = f.SHA256
@@ -269,7 +277,7 @@ func (p *profile) crateEntities(uri string) []entity {
 	}
 	descriptor := "#profile-" + fileID(r.name+"-"+r.version)
 	e["hasResource"] = ref(descriptor)
-	return []entity{e, {"@id": descriptor, "@type": "ResourceDescriptor", "name": "The schema of " + cmp.Or(r.title, uri),
+	return []entity{e, {"@id": descriptor, "@type": []string{"CreativeWork", "ResourceDescriptor"}, "name": "The schema of " + cmp.Or(r.title, uri),
 		"hasRole": ref(roleSchema), "hasArtifact": ref(fileID(r.file()))}}
 }
 
@@ -281,6 +289,12 @@ func (p *profile) files() []localFile {
 		files = append(files, localFile{Rel: r.file(), Size: int64(len(r.raw)), Content: r.raw, SHA256: hex.EncodeToString(sum[:])})
 	}
 	return files
+}
+
+var dialectNames = map[string]string{
+	"https://json-schema.org/draft/2020-12/schema": "JSON Schema 2020-12",
+	"https://json-schema.org/draft/2019-09/schema": "JSON Schema 2019-09",
+	"http://json-schema.org/draft-07/schema#":      "JSON Schema draft-07",
 }
 
 func jsonSchemaDialect(raw []byte) string {
