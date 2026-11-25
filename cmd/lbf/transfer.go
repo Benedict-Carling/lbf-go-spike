@@ -39,7 +39,7 @@ type publication struct {
 }
 
 // Everything that can fail without Azure happens here, so a bad dataset never reaches sign-in or upload.
-func preparePublication(input string, provFlags provenanceFlags, profileDir, id string) (publication, error) {
+func preparePublication(input string, provFlags provenanceFlags, profileDirs []string, id string) (publication, error) {
 	if id == "" {
 		id = newID()
 	} else if !mintedID.MatchString(id) {
@@ -49,7 +49,7 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir, id 
 	if err != nil {
 		return publication{}, err
 	}
-	prof, err := loadProfile(profileDir)
+	prof, err := loadProfiles(profileDirs)
 	if err != nil {
 		return publication{}, err
 	}
@@ -60,6 +60,10 @@ func preparePublication(input string, provFlags provenanceFlags, profileDir, id 
 	if len(files) == 0 {
 		return publication{}, fmt.Errorf("%s contains no files to upload", input)
 	}
+	if top, _, _ := strings.Cut(files[0].Rel, "/"); nameKey(top) == nameKey(profilesDir) {
+		return publication{}, fmt.Errorf("%s is named %s, which lbf keeps for the schemas a dataset was checked against; publish it under another name", input, top)
+	}
+	files = append(files, prof.files()...)
 	if problems := blobNameProblems(id, files); len(problems) > 0 {
 		return publication{}, problemList(fmt.Sprintf("%s cannot be published as it is, so nothing was uploaded:", input), problems)
 	}
@@ -257,7 +261,7 @@ func compareRecorded(ctx context.Context, files []localFile, recorded map[string
 }
 
 func hashFile(f *localFile, progress func(int64)) (string, error) {
-	fh, err := os.Open(f.Path)
+	fh, err := f.open()
 	if err != nil {
 		return "", err
 	}
@@ -274,6 +278,9 @@ func hashFile(f *localFile, progress func(int64)) (string, error) {
 }
 
 func unchanged(f *localFile, read int64) error {
+	if f.Content != nil {
+		return nil
+	}
 	after, err := os.Stat(f.Path)
 	if err != nil || read != f.Size || after.Size() != f.Size || !after.ModTime().Equal(f.ModTime) {
 		return fmt.Errorf("%s changed while it was being uploaded; wait until whatever writes it has finished, then publish again", f.Rel)
@@ -482,6 +489,9 @@ func verifyExisting(root, id string, crate storedCrate) error {
 func dataDir(root string, files []crateFile) string {
 	top := ""
 	for _, f := range files {
+		if isProfileFile(f.Rel) {
+			continue
+		}
 		first, _, nested := strings.Cut(f.Rel, "/")
 		if !nested || (top != "" && first != top) {
 			return root

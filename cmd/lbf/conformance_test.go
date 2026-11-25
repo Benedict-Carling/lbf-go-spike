@@ -477,7 +477,7 @@ func TestConformanceCLI(t *testing.T) {
 		"comma list typed bare": {args: []string{"fetch", "a,b", "--nope"}, psRaw: "fetch a,b --nope"},
 		"double dash":           {args: []string{"fetch", "--", "-x"}, psRaw: "fetch -- -x"},
 	}
-	for _, cmd := range []string{"publish", "upload", "fetch", "download", "browse", "new-id", "check", "mint-sas", "login", "logout", "upgrade"} {
+	for _, cmd := range []string{"publish", "upload", "fetch", "download", "browse", "profiles", "new-id", "check", "mint-sas", "login", "logout", "upgrade"} {
 		cases["help for "+cmd] = conformCase{args: []string{cmd, "--help"}}
 	}
 	for name, c := range cases {

@@ -31,7 +31,7 @@ func Build(root, version string) ([]byte, error) {
 	}
 	sort.Strings(srcs)
 
-	bronze, err := os.ReadFile(filepath.Join(root, "profiles", "bronze", "profile.json"))
+	bronze, err := os.ReadFile(filepath.Join(root, "profiles", "bronze", "0.7.0", "profile.json"))
 	if err != nil {
 		return nil, err
 	}

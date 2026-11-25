@@ -42,6 +42,8 @@ var (
 	rePartial = regexp.MustCompile(`\.partial-[a-z2-7]{8}`)
 	// Azure's error bodies name each request.
 	reRequest = regexp.MustCompile(`RequestId:[0-9a-f-]+\nTime:[^<]+`)
+	// A schema's transfer may or may not finish before another file's fails.
+	reMaybeSchema = regexp.MustCompile(`(Downloading|Uploading) [^\n]*\n(  \[[0-9]+/[0-9]+\] ro-crate-profiles/[^\n]*\n)?`)
 )
 
 // The container of w through Azurite's account key, for setups that write what lbf never would.
@@ -184,6 +186,18 @@ func isCommit(r *http.Request) bool {
 
 func isCratePut(r *http.Request) bool {
 	return r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/"+crateName)
+}
+
+const runProfile = `{"$id": "https://example.org/profiles/run/0.1.0", "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "$defs": {"properties": {"properties": {"n": {"type": "integer", "x-unitCode": "http://qudt.org/vocab/unit/NanoM", "x-unitText": "nm"}}}}}`
+
+// A dataset published against runProfile, which it carries.
+func withRunProfile(files map[string]string) map[string]string {
+	out := map[string]string{"profiles/run/0.1.0/profile.json": runProfile}
+	for k, v := range files {
+		out[k] = v
+	}
+	return out
 }
 
 var roundTripFiles = map[string]string{
@@ -380,9 +394,13 @@ func transferFetchCases() map[string]conformCase {
 		"round trip json":       {perms: "rlw", files: roundTripFiles, setup: published, args: fetchJSON, normalize: ids, unorderedStderr: true},
 		"download alias":        {perms: "rlw", files: roundTripFiles, setup: published, args: []string{"download", fixedID, "--sas-env", "{sas}", "--container", "{container}"}, normalize: ids, unorderedStderr: true},
 		"into a new nested out": {perms: "rlw", files: roundTripFiles, setup: published, args: []string{"fetch", fixedID, "--sas-env", "{sas}", "--container", "{container}", "--out", "a/b/../c"}, normalize: ids, unorderedStderr: true},
+		"with schemas json":     {perms: "rlw", files: withRunProfile(roundTripFiles), setup: goPublish(fixedID, "--profile", "profiles/run/0.1.0", "--property", "n=3"), args: fetchJSON, normalize: ids, unorderedStderr: true},
+		"single file with schemas": {perms: "rlw", files: withRunProfile(map[string]string{"data/one.csv": "1"}), setup: func(t *testing.T, w *world) {
+			goOK(t, w, "publish", "data/one.csv", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID, "--profile", "profiles/run/0.1.0")
+		}, args: fetchJSON, normalize: ids, unorderedStderr: true},
 		"single file dataset": {perms: "rlw", files: map[string]string{"data/one.csv": "1"}, setup: func(t *testing.T, w *world) {
 			goOK(t, w, "publish", "data/one.csv", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID)
-		}, args: fetchJSON, normalize: ids},
+		}, args: fetchJSON, normalize: ids, unorderedStderr: true},
 		"already here": {perms: "rlw", files: roundTripFiles, setup: steps(published, func(t *testing.T, w *world) { goOK(t, w, fetch...) }), args: fetchJSON, normalize: ids},
 		"already here but changed": {perms: "rlw", files: roundTripFiles, setup: steps(published, func(t *testing.T, w *world) {
 			goOK(t, w, fetch...)
@@ -412,8 +430,8 @@ func transferFetchCases() map[string]conformCase {
 		"missing blob": {perms: "rlw", files: roundTripFiles, setup: steps(published, func(t *testing.T, w *world) {
 			adminContainer(t, w).NewBlobClient(fixedID+"/run1/a.txt").Delete(context.Background(), nil)
 		}), args: fetch},
-		"tampered blob": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "ALPHA\n")), args: fetch, normalize: ids},
-		"resized blob":  {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "alphabet\n")), args: fetch, normalize: ids},
+		"tampered blob": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "ALPHA\n")), args: fetch, normalize: append([]*regexp.Regexp{reMaybeSchema}, ids...), unorderedStderr: true},
+		"resized blob":  {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "alphabet\n")), args: fetch, normalize: append([]*regexp.Regexp{reMaybeSchema}, ids...), unorderedStderr: true},
 		"stale partial folders": {perms: "rlw", files: withFiles(roundTripFiles, map[string]string{"out/" + fixedID + ".partial-deadbeef/x": "", "out/" + fixedID + ".partial-0b5e55ed/y": ""}), setup: steps(published, func(t *testing.T, w *world) {
 			old := time.Now().Add(-48 * time.Hour)
 			must(t, os.Chtimes(filepath.Join(w.dir, "out", fixedID+".partial-deadbeef"), old, old))
@@ -424,7 +442,7 @@ func transferFetchCases() map[string]conformCase {
 			}))
 		}), args: fetch, normalize: []*regexp.Regexp{reDone, reCount, rePort}, unorderedStderr: true},
 		"busy listing": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, func(t *testing.T, w *world) { proxyBusy(t, w, firstN(1, isList)) }),
-			args: fetchJSON, normalize: []*regexp.Regexp{reDone, reCount, rePort}},
+			args: fetchJSON, normalize: []*regexp.Regexp{reDone, reCount, rePort}, unorderedStderr: true},
 		"without list permission": {perms: "r", args: fetch},
 		"missing container":       {ignoreBlobs: true, perms: "rlw", setup: func(t *testing.T, w *world) { adminContainer(t, w).Delete(context.Background(), nil) }, args: fetch},
 		"nothing listening":       {perms: "rlw", env: map[string]string{"LBF_BLOB_ENDPOINT": "http://127.0.0.1:1/devstoreaccount1"}, normalize: []*regexp.Regexp{reExpiry}, args: fetch},
@@ -483,11 +501,16 @@ func transferPublishCases() map[string]conformCase {
 		"round trip":       {perms: "rlw", files: roundTripFiles, args: []string{"publish", "data/run1", "--sas-env", "{sas}", "--container", "{container}"}, normalize: ids, unorderedStderr: true},
 		"json":             {perms: "rlw", files: roundTripFiles, args: []string{"publish", "data/run1", "--sas-env", "{sas}", "--container", "{container}", "--json"}, normalize: ids, unorderedStderr: true},
 		"upload alias":     {perms: "rlw", files: small, args: []string{"upload", "data/run1", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID}, normalize: fixed, unorderedStderr: true},
-		"one file":         {perms: "rlw", files: map[string]string{"data/one.csv": "1,2"}, args: []string{"publish", "data/one.csv", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID}, normalize: fixed},
+		"one file":         {perms: "rlw", files: map[string]string{"data/one.csv": "1,2"}, args: []string{"publish", "data/one.csv", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID}, normalize: fixed, unorderedStderr: true},
 		"only empty files": {perms: "rlw", files: map[string]string{"data/run1/e1": "", "data/run1/e2": ""}, args: publish, normalize: fixed, unorderedStderr: true},
 		"with provenance": {perms: "rlw", files: small, normalize: fixed, unorderedStderr: true, args: append(append([]string{}, publish...), "--derived-from", parentDatasetID,
 			"--instrument", "name=CellProfiler,version=4.2.6,url=https://cellprofiler.org", "--property", "sample_id=S1", "--name", "Run 1", "--description", "Cells")},
-		"again with identical":      {perms: "rlw", files: small, setup: goPublish(fixedID), args: publish, normalize: fixed, unorderedStderr: true},
+		"again with identical": {perms: "rlw", files: small, setup: goPublish(fixedID), args: publish, normalize: fixed, unorderedStderr: true},
+		"with a profile":       {perms: "rlw", files: withRunProfile(small), args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0", "--property", "n=3"), normalize: fixed, unorderedStderr: true},
+		"again with a profile": {perms: "rlw", files: withRunProfile(small), setup: goPublish(fixedID, "--profile", "profiles/run/0.1.0", "--property", "n=3"), args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0", "--property", "n=03"), normalize: fixed, unorderedStderr: true},
+		"again with another schema": {perms: "rlw", files: withRunProfile(small), setup: steps(goPublish(fixedID, "--profile", "profiles/run/0.1.0", "--property", "n=3"), changeFile("profiles/run/0.1.0/profile.json", strings.Replace(runProfile, `"integer"`, `"number"`, 1))),
+			args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0", "--property", "n=3"), normalize: fixed, unorderedStderr: true},
+		"resume with a profile":     {perms: "rlw", files: withRunProfile(small), setup: attempt(small, "run1/a.txt"), args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0"), normalize: fixed, unorderedStderr: true},
 		"again with json":           {perms: "rlw", files: small, setup: goPublish(fixedID), args: append(append([]string{}, publish...), "--json"), normalize: fixed, unorderedStderr: true},
 		"again with other property": {perms: "rlw", files: small, setup: goPublish(fixedID, "--property", "sample_id=S1"), args: append(append([]string{}, publish...), "--property", "sample_id=S2"), normalize: fixed, unorderedStderr: true},
 		"again with name given":     {perms: "rlw", files: small, setup: goPublish(fixedID), args: append(append([]string{}, publish...), "--name", "Run 1"), normalize: fixed, unorderedStderr: true},
@@ -526,7 +549,7 @@ func transferPublishCases() map[string]conformCase {
 				}
 				return false
 			}))
-		}, args: publish, normalize: []*regexp.Regexp{reDone, reCount, rePort}},
+		}, args: publish, normalize: []*regexp.Regexp{reMaybeSchema, reDone, reCount, rePort}, unorderedStderr: true},
 		"another publish stored its crate": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "a"}, setup: func(t *testing.T, w *world) {
 			proxyAzurite(t, w, onceWhen(func(r *http.Request) bool {
 				if isCommit(r) {
@@ -534,7 +557,7 @@ func transferPublishCases() map[string]conformCase {
 				}
 				return false
 			}))
-		}, args: publish, normalize: []*regexp.Regexp{reDone, reCount, rePort}},
+		}, args: publish, normalize: []*regexp.Regexp{reDone, reCount, rePort}, unorderedStderr: true},
 		"server error then success": {perms: "rlw", files: small, setup: func(t *testing.T, w *world) {
 			var n atomic.Int32
 			proxyAzurite(t, w, func(r *http.Request) bool {
@@ -951,14 +974,14 @@ function Invoke-LbfTransferAll {
     param($Progress, $Jobs)
     & $inner $Progress $Jobs
     $blocks = 0
-    foreach ($j in $Jobs) { $blocks += $j.Ids.Count }
+    foreach ($j in $Jobs) { $blocks += $j.Ids.Count; $j.Remove('File') }
     $script:seen = "$($Jobs.Count) files, $blocks blocks, $(Measure-Held $Jobs 5) bytes held"
 }
 Invoke-Lbf @('publish', 'data/run1', '--sas-env', '%s', '--container', '%s') | Out-Null
 $script:seen`, script, w.sasEnv, w.container))
 	cmd.Dir, cmd.Env = w.dir, w.environ(nil)
 	r := runCmd(t, cmd)
-	if r.code != 0 || strings.TrimSpace(r.stdout) != "3 files, 9 blocks, 0 bytes held" {
+	if r.code != 0 || strings.TrimSpace(r.stdout) != "4 files, 10 blocks, 0 bytes held" {
 		t.Fatalf("exit %d: %q\n%s", r.code, r.stdout, r.stderr)
 	}
 }

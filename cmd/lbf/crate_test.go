@@ -97,18 +97,18 @@ func TestRepublishingChecksOnlyTheNameAndDescriptionGiven(t *testing.T) {
 	ctx := context.Background()
 	first := dataset(t, map[string]string{"a.txt": "a"})
 	id := newID()
-	pub, err := preparePublication(first, provenanceFlags{}, "", id)
+	pub, err := preparePublication(first, provenanceFlags{}, nil, id)
 	must(t, err)
 	must(t, upload(ctx, tg, pub))
 
 	moved := filepath.Join(t.TempDir(), "renamed")
 	must(t, os.Rename(first, moved))
-	pub, err = preparePublication(moved, provenanceFlags{}, "", id)
+	pub, err = preparePublication(moved, provenanceFlags{}, nil, id)
 	must(t, err)
 	if err := upload(ctx, tg, pub); err == nil || !strings.Contains(err.Error(), "renamed/a.txt: not in it") {
 		t.Fatalf("a folder of another name holds other files, so it is another dataset: %v", err)
 	}
-	same, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{}, "", id)
+	same, err := preparePublication(dataset(t, map[string]string{"a.txt": "a"}), provenanceFlags{}, nil, id)
 	must(t, err)
 	must(t, upload(ctx, tg, same))
 }
@@ -184,7 +184,7 @@ func TestFetchReturnsWhatTheCrateStates(t *testing.T) {
 	tg := emulator(t, uploadPerms)
 	ctx := context.Background()
 	prov := provenanceFlags{derivedFrom: "20260101-x-y-0000", instruments: []instrument{{"pipe", "1", "https://example.org/pipe"}}, props: []string{"sample_id=S1"}, name: "Run 1"}
-	pub, err := preparePublication(dataset(t, map[string]string{"a.csv": "x"}), prov, "", "")
+	pub, err := preparePublication(dataset(t, map[string]string{"a.csv": "x"}), prov, nil, "")
 	must(t, err)
 	must(t, upload(ctx, tg, pub))
 	got, err := download(ctx, tg, pub.ID, t.TempDir())

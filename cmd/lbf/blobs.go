@@ -79,7 +79,7 @@ func (b blobs) has(ctx context.Context, rel string) (bool, error) {
 
 // Commits with its sha256 only if the file did not change while being sent, so stored metadata never lies.
 func (b blobs) putFile(ctx context.Context, f *localFile, progress func(int64)) error {
-	fh, err := os.Open(f.Path)
+	fh, err := f.open()
 	if err != nil {
 		return err
 	}

@@ -42,7 +42,8 @@ func emulator(t *testing.T, perms sas.ContainerPermissions) target {
 	cred, err := container.NewSharedKeyCredential(emulatorAccount, emulatorKey)
 	must(t, err)
 	name := strings.ToLower(strings.NewReplacer("/", "-", "_", "-").Replace(t.Name()))
-	name = fmt.Sprintf("%.50s-%d", name, time.Now().UnixNano()%1e9)
+	// Azure refuses a container name with two hyphens in a row, which cutting the test's name can leave.
+	name = fmt.Sprintf("%s-%d", strings.TrimRight(fmt.Sprintf("%.50s", name), "-"), time.Now().UnixNano()%1e9)
 	cc, err := container.NewClientWithSharedKeyCredential(emulatorURL+"/"+name, cred, nil)
 	must(t, err)
 	_, err = cc.Create(context.Background(), nil)
@@ -80,7 +81,7 @@ func propertiesFile(t *testing.T, body string) provenanceFlags {
 
 func prepared(t *testing.T, dir, id string, prov provenanceFlags) publication {
 	t.Helper()
-	pub, err := preparePublication(dir, prov, "", id)
+	pub, err := preparePublication(dir, prov, nil, id)
 	must(t, err)
 	return pub
 }
@@ -270,7 +271,7 @@ func TestCheckAccess(t *testing.T) {
 func TestPublishIDMustBeMinted(t *testing.T) {
 	dir := dataset(t, map[string]string{"a.txt": "a"})
 	for _, bad := range []string{"test", "20261001-fancy-dassie", "20261001-Fancy-dassie-eadb", "20261001-fancy-dassie-eadb/x"} {
-		if _, err := preparePublication(dir, provenanceFlags{}, "", bad); err == nil {
+		if _, err := preparePublication(dir, provenanceFlags{}, nil, bad); err == nil {
 			t.Errorf("--id %q accepted", bad)
 		}
 	}

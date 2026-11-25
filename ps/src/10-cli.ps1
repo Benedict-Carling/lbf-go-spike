@@ -6,6 +6,7 @@ Usage:
   lbf fetch <id>        download a dataset (alias: download)
   lbf new-id            print a dataset ID to publish under later
   lbf browse            search and look through every dataset in your browser
+  lbf profiles check    check a profile before anyone publishes against it
   lbf check             prove a credential can publish or fetch, without changing anything
   lbf mint-sas          write a pre-minted credential file
   lbf login             sign in with the browser and remember it
@@ -21,8 +22,9 @@ $script:ProvenanceHelp = @'
 --derived-from and --instrument are given together or not at all. --provenance is a JSON file:
 {"name", "description", "derived_from": "<id>", "instruments": [{"name", "version", "url"}], "properties": {"name": "value"}};
 --property, --name and --description add to it, and anything given twice is refused.
---profile is a directory holding a JSON Schema profile.json; publish validates against it, and lbf's
-bronze profile, before uploading anything.
+--profile is a folder holding a JSON Schema profile.json, and repeats for a dataset that meets several;
+publish checks the crate against each, and lbf's bronze profile, before uploading anything, and the
+dataset keeps each schema it met under ro-crate-profiles/.
 
 '@ -replace "`r`n", "`n"
 
@@ -42,8 +44,9 @@ function Write-LbfOut {
 function New-LbfOptions {
     return @{
         tag = ''; account = ''; tenant = ''; container = ''; sasEnv = ''
-        out = ''; mode = ''; port = ''; profile = ''; id = ''
+        out = ''; mode = ''; port = ''; id = ''
         dryRun = $false; json = $false
+        profiles = (New-Object System.Collections.Generic.List[string])
         prov = @{
             file = ''; derivedFrom = ''; properties = ''; name = ''; description = ''
             instruments = (New-Object System.Collections.Generic.List[object])
@@ -55,7 +58,7 @@ function New-LbfOptions {
 # A command's flags as Go's flag.FlagSet holds them, in the order its usage lists them.
 function New-LbfCommand {
     param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][hashtable]$Options)
-    $c = @{ name = $Name; synopsis = ''; notes = ''; arg = ''; argDesc = ''; flags = (New-Object System.Collections.Generic.List[hashtable]) }
+    $c = @{ name = $Name; synopsis = ''; notes = ''; sub = ''; arg = ''; argDesc = ''; flags = (New-Object System.Collections.Generic.List[hashtable]) }
     $o = $Options
     $str = {
         param($key, $name, $arg, $def, $desc, [hashtable]$into)
@@ -93,7 +96,7 @@ function New-LbfCommand {
             & $str 'name' 'name' 'TEXT' '' "what people call the dataset (default the folder's name)" $o.prov
             & $str 'description' 'description' 'TEXT' '' 'what the dataset holds (default one lbf writes)' $o.prov
             & $str 'file' 'provenance' 'FILE' '' "the dataset's name, description, parent, instruments and properties as one JSON file" $o.prov
-            & $str 'profile' 'profile' 'DIR' '' 'directory containing profile.json'
+            $c.flags.Add(@{ name = 'profile'; arg = 'DIR'; usage = 'a folder holding profile.json that the dataset must meet; repeat for several'; def = ''; kind = 'func'; into = $o; str = $false; required = $false })
             & $str 'id' 'id' 'ID' '' "publish under this ID from 'lbf new-id'; run again with the same ID to finish a failed publish"
             $c.notes += "Exits with 3 when the ID already holds different files or provenance, which retrying cannot fix; use a new ID.`n"
             & $bool 'dryRun' 'dry-run' 'validate and print the crate without signing in or uploading'
@@ -115,6 +118,11 @@ function New-LbfCommand {
             & $str 'container' 'container' 'NAMES' '' 'comma-separated containers to read (default every container you can list)'
             & $str 'port' 'port' 'PORT' '0' 'local port to serve on (0 picks a free one)'
             & $account
+        }
+        'profiles' {
+            $c.synopsis = 'profiles check <dir>'
+            $c.sub = 'check'; $c.arg = '<dir>'; $c.argDesc = 'folder holding the profile.json to check'
+            $c.notes = "Finds keywords JSON Schema would ignore, and properties a publisher or form could not give well: no type,`ntitle, description or examples, examples that break their own rules, or a unit without its URL.`n"
         }
         'new-id' {
             $c.synopsis = 'new-id'
@@ -155,7 +163,7 @@ function New-LbfCommand {
     return $c
 }
 
-$script:CommandNames = [string[]]@('publish', 'upload', 'fetch', 'download', 'browse', 'new-id', 'check', 'mint-sas', 'login', 'logout', 'upgrade')
+$script:CommandNames = [string[]]@('publish', 'upload', 'fetch', 'download', 'browse', 'profiles', 'new-id', 'check', 'mint-sas', 'login', 'logout', 'upgrade')
 
 # The command a name is, compared as Go does, so the switches below see only exact names.
 function Select-LbfCommandName {
@@ -239,8 +247,16 @@ function Invoke-LbfFlagParse {
             if ($flag.kind -eq 'func') {
                 try {
                     if ($flag.name -ceq 'instrument') { $flag.into.instruments.Add((ConvertTo-LbfInstrument $value)) }
+                    elseif ($flag.name -ceq 'profile') {
+                        if ($value.Trim().Length -eq 0) { $e = New-LbfError 'is empty'; $e.Data['lbfEmpty'] = $true; throw $e }
+                        $flag.into.profiles.Add($value)
+                    }
                     else { $flag.into.props.Add($value) }
-                } catch { throw (New-LbfError "invalid value $(Format-LbfQuote $value) for flag -${name}: $(Get-LbfErrorText $_)") }
+                } catch {
+                    $e = New-LbfError "invalid value $(Format-LbfQuote $value) for flag -${name}: $(Get-LbfErrorText $_)"
+                    if ((Get-LbfException $_).Data.Contains('lbfEmpty')) { $e.Data['lbfEmpty'] = $name }
+                    throw $e
+                }
             } else {
                 $flag.into[$flag.key] = $value
             }
@@ -274,6 +290,8 @@ function Invoke-LbfCommandParse {
         }
     } catch {
         if (Test-LbfHelpRequest $_) { throw }
+        $ex = Get-LbfException $_
+        if ($ex.Data.Contains('lbfEmpty')) { throw (New-LbfError "--$($ex.Data['lbfEmpty']) is empty; give it a value, or leave it out for the default") }
         $msg = [regex]::Replace((Get-LbfErrorText $_), $script:FlagErrorName, '$1--')
         throw (New-LbfUsageError $Command $msg)
     }
@@ -289,6 +307,10 @@ function Invoke-LbfCommandParse {
             }
         }
         if ($set.ContainsKey('tenant')) { throw (New-LbfError '--tenant cannot be used with --sas-env, which needs no sign-in') }
+    }
+    if ($Command.sub -ne '') {
+        if ($positional.Count -eq 0 -or -not (Test-LbfSame $positional[0] $Command.sub)) { throw (New-LbfUsageError $Command "missing $($Command.sub)") }
+        $positional.RemoveAt(0)
     }
     $want = 0
     if ($Command.arg -ne '') { $want = 1 }
@@ -309,7 +331,7 @@ function Get-LbfCommandUsage {
     param([hashtable]$Command)
     $required = New-Object System.Collections.Generic.List[hashtable]
     $optional = New-Object System.Collections.Generic.List[hashtable]
-    if ($Command.arg -ne '') { $required.Add(@{ left = $Command.arg; desc = $Command.argDesc }) }
+    if ($Command.arg -ne '') { $required.Add(@{ left = ($Command.sub + ' ' + $Command.arg).Trim(); desc = $Command.argDesc }) }
     foreach ($f in $Command.flags) {
         $desc = $f.usage
         if ($f.def -ne '' -and $f.def -ne 'false') { $desc += " (default $($f.def))" }
@@ -431,7 +453,7 @@ function Invoke-Lbf {
 
     switch -CaseSensitive (Select-LbfCommandName $cmd) {
         { $_ -eq 'publish' -or $_ -eq 'upload' } {
-            $pub = New-LbfPublication -InputPath $positional[0] -Provenance $o.prov -ProfileDir $o.profile -Id $o.id
+            $pub = New-LbfPublication -InputPath $positional[0] -Provenance $o.prov -ProfileDirs $o.profiles.ToArray() -Id $o.id
             if ($o.dryRun) {
                 $t = New-LbfTarget -Account 'dryrun' -Container $o.container -User 'dry-run'
                 $crate = Get-LbfCrate -Publication $pub -Target $t
@@ -461,6 +483,14 @@ function Invoke-Lbf {
             } else {
                 Write-LbfOut "$($got.Path)`n"
             }
+            return
+        }
+        'profiles' {
+            $r = Invoke-LbfProfileCheck $positional[0]
+            if ($r.Problems.Count -gt 0) {
+                throw (New-LbfError ("$($r.Profile.ID) is not ready to publish:`n  " + [string]::Join("`n  ", $r.Problems.ToArray())))
+            }
+            Write-LbfOut "$($r.Profile.ID) is ready: every keyword is JSON Schema's, and every property has a type or choices, a title, a description and examples that meet its rules`n"
             return
         }
         'new-id' {

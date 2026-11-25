@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/examples/profile-skeleton/profiles/plate-read/0.1.0",
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "title": "Plate read",
+  "description": "One plate as the plate reader read it: its readings.csv, the plate's barcode, who ran it, on which reader and at what wavelength.",
+  "properties": {
+    "hasPart": {
+      "description": "The reader's export, saved as readings.csv",
+      "contains": {"properties": {"@id": {"pattern": "(^|/)readings\\.csv$"}}}
+    }
+  },
+  "$defs": {
+    "properties": {
+      "title": "Plate read",
+      "type": "object",
+      "required": ["plate_id", "operator", "reader_serial", "wavelength_nm"],
+      "properties": {
+        "plate_id": {
+          "type": "string", "title": "Plate barcode", "description": "On the side of the plate",
+          "examples": ["P-0001"], "pattern": "^P-[0-9]{4}$"
+        },
+        "operator": {
+          "type": "string", "title": "Who ran the reader", "description": "Your name as the lab rota gives it",
+          "examples": ["A. Researcher"], "minLength": 1
+        },
+        "reader_serial": {
+          "type": "string", "title": "Reader serial number", "description": "On the back of the reader",
+          "examples": ["SN-204417"], "minLength": 1
+        },
+        "wavelength_nm": {
+          "type": "integer", "title": "Wavelength", "description": "The wavelength the reader measured at, in nanometres",
+          "examples": [450], "minimum": 200, "maximum": 1000,
+          "x-unitCode": "http://qudt.org/vocab/unit/NanoM", "x-unitText": "nm"
+        },
+        "lidded": {
+          "type": "boolean", "title": "Read with the lid on", "description": "Whether the plate's lid stayed on while it was read",
+          "examples": [false]
+        }
+      }
+    }
+  }
+}

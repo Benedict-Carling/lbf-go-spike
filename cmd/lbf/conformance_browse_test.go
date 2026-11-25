@@ -119,7 +119,7 @@ func browseCrates(t *testing.T) map[string][]byte {
 			Properties: map[string]string{"sample_id": "S1", "plate": "P 1"}}}, target{User: "ann@example.org"})
 	build("plain", publication{ID: "20260102-c-d-5678", Source: "/data/run2", Files: []localFile{{Rel: "run2/x", Size: 1}},
 		Provenance: provenance{Properties: map[string]string{}}}, target{})
-	build("profiled", publication{ID: "20260102-e-f-9abc", Source: "/data/run3", Files: []localFile{{Rel: "run3/a", Size: 1}},
+	build("profiled", publication{ID: "20260102-e-f-9abc", Source: "/data/run3", Files: []localFile{{Rel: "run3/a", Size: 1}, {Rel: "ro-crate-profiles/p1/0.1.0/profile.json", Size: 2, Content: []byte("{}")}},
 		Provenance: provenance{Properties: map[string]string{}}, Profile: &profile{rules: []rule{{id: "https://example.org/p1"}, {id: "https://example.org/p2"}}}}, target{})
 
 	var doc map[string]any
