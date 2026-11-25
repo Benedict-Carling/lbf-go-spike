@@ -62,7 +62,7 @@ jobs:
       - run: |
           for arch in arm64 amd64; do
             CGO_ENABLED=1 GOOS=darwin GOARCH=$arch go build -trimpath \
-              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/lbf-darwin-$arch .
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/lbf-darwin-$arch ./cmd/lbf
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -91,7 +91,7 @@ jobs:
             os=${target%/*}; arch=${target#*/}; ext=""
             [ "$os" = windows ] && ext=.exe
             CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
-              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/lbf-$os-$arch$ext" .
+              -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/lbf-$os-$arch$ext" ./cmd/lbf
           done
       # What Windows installs; the exes stay for installs from before it, whose lbf upgrade fetches them.
       - run: go run ./tools/buildps -version "$GITHUB_REF_NAME" -o dist/lbf.ps1

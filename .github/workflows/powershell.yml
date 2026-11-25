@@ -48,7 +48,7 @@ jobs:
           for i in $(seq 180); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
           curl -s -o /dev/null http://127.0.0.1:10000/ || { echo "Azurite did not start"; cat azurite.log; exit 1; }
           "$LBF_PS" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
-          go test -run 'TestConformance' -count=1 -timeout 60m -v . 2>&1 | tee conformance.log | grep -E '^(=== RUN|--- |ok|FAIL|PASS)'
+          go test -run 'TestConformance' -count=1 -timeout 60m -v ./cmd/lbf 2>&1 | tee conformance.log | grep -E '^(=== RUN|--- |ok|FAIL|PASS)'
           exit "${PIPESTATUS[0]}"
         env:
           LBF_AZURITE: "1"

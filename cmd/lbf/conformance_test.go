@@ -49,7 +49,7 @@ func powershell(t *testing.T) string {
 }
 
 var builtScript = sync.OnceValues(func() (string, error) {
-	script, err := psbuild.Build(".", "dev")
+	script, err := psbuild.Build("../..", "dev")
 	if err != nil {
 		return "", err
 	}

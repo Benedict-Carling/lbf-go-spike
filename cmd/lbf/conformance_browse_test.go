@@ -37,7 +37,7 @@ func psScriptVersion(t *testing.T, version string) string {
 	if p, ok := psVersionedScripts.Load(version); ok {
 		return p.(string)
 	}
-	script, err := psbuild.Build(".", version)
+	script, err := psbuild.Build("../..", version)
 	must(t, err)
 	dir, err := os.MkdirTemp("", "lbf-ps-"+version+"-")
 	must(t, err)

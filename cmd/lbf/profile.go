@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ImperialCollegeLondon/lbf-cli/profiles"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
@@ -20,8 +20,7 @@ import (
 
 var versionFolder = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+)*$`)
 
-//go:embed profiles/bronze/profile.json
-var bronzeProfileJSON []byte
+var bronzeProfileJSON = profiles.Bronze
 
 type rule struct {
 	id, title string
