@@ -42,6 +42,8 @@ var (
 	rePartial = regexp.MustCompile(`\.partial-[a-z2-7]{8}`)
 	// Azure's error bodies name each request.
 	reRequest = regexp.MustCompile(`RequestId:[0-9a-f-]+\nTime:[^<]+`)
+	// A schema's transfer may or may not finish before another file's fails.
+	reMaybeSchema = regexp.MustCompile(`(Downloading|Uploading) [^\n]*\n(  \[[0-9]+/[0-9]+\] ro-crate-profiles/[^\n]*\n)?`)
 )
 
 // The container of w through Azurite's account key, for setups that write what lbf never would.
@@ -428,8 +430,8 @@ func transferFetchCases() map[string]conformCase {
 		"missing blob": {perms: "rlw", files: roundTripFiles, setup: steps(published, func(t *testing.T, w *world) {
 			adminContainer(t, w).NewBlobClient(fixedID+"/run1/a.txt").Delete(context.Background(), nil)
 		}), args: fetch},
-		"tampered blob": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "ALPHA\n")), args: fetch, normalize: ids, unorderedStderr: true},
-		"resized blob":  {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "alphabet\n")), args: fetch, normalize: ids, unorderedStderr: true},
+		"tampered blob": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "ALPHA\n")), args: fetch, normalize: append([]*regexp.Regexp{reMaybeSchema}, ids...), unorderedStderr: true},
+		"resized blob":  {perms: "rlw", files: map[string]string{"data/run1/a.txt": "alpha\n"}, setup: steps(published, tamper("run1/a.txt", "alphabet\n")), args: fetch, normalize: append([]*regexp.Regexp{reMaybeSchema}, ids...), unorderedStderr: true},
 		"stale partial folders": {perms: "rlw", files: withFiles(roundTripFiles, map[string]string{"out/" + fixedID + ".partial-deadbeef/x": "", "out/" + fixedID + ".partial-0b5e55ed/y": ""}), setup: steps(published, func(t *testing.T, w *world) {
 			old := time.Now().Add(-48 * time.Hour)
 			must(t, os.Chtimes(filepath.Join(w.dir, "out", fixedID+".partial-deadbeef"), old, old))
@@ -547,7 +549,7 @@ func transferPublishCases() map[string]conformCase {
 				}
 				return false
 			}))
-		}, args: publish, normalize: []*regexp.Regexp{reDone, reCount, rePort}, unorderedStderr: true},
+		}, args: publish, normalize: []*regexp.Regexp{reMaybeSchema, reDone, reCount, rePort}, unorderedStderr: true},
 		"another publish stored its crate": {perms: "rlw", files: map[string]string{"data/run1/a.txt": "a"}, setup: func(t *testing.T, w *world) {
 			proxyAzurite(t, w, onceWhen(func(r *http.Request) bool {
 				if isCommit(r) {
