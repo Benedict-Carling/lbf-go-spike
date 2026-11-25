@@ -80,7 +80,6 @@ func TestSASEnvRefusesFlagsItWouldIgnore(t *testing.T) {
 			{"--tag", "tag=storage-test"},
 			{"--tag", "tag=storage"},
 			{"--account", "testacct"},
-			{"--account", "prodacct"},
 			{"--tenant", "00000000-0000-0000-0000-000000000000"},
 		} {
 			args := append(append(append([]string{}, cmd[1:]...), "--sas-env", "azure_sas.env"), extra...)

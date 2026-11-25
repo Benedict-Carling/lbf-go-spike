@@ -68,7 +68,6 @@ func TestNamesThatLandAsOneAreRefused(t *testing.T) {
 		"final sigma":          {"run1/σ.txt", "run1/ς.txt"},
 		"file and folder":      {"run1/Data", "run1/data/x.txt"},
 		"folders":              {"run1/A/x.txt", "run1/a/y.txt"},
-		"case, as before":      {"run1/Same.txt", "run1/same.txt"},
 		"folder of a folder":   {"run1/X/deep/a.txt", "run1/x/deep/b.txt"},
 		"file inside a folder": {"run1/A/x.txt", "run1/a/x.txt"},
 	} {

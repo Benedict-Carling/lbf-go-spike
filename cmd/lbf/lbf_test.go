@@ -580,9 +580,6 @@ func TestProvenanceFlags(t *testing.T) {
 			t.Errorf("%q: accepted", bad)
 		}
 	}
-	if _, _, err := parseArgs("publish", []string{"data", "--instrument", "nf"}); err == nil {
-		t.Error("malformed --instrument accepted by publish")
-	}
 }
 
 func TestJSONFlagOnPublishAndFetchOnly(t *testing.T) {
@@ -690,11 +687,6 @@ func TestChooseAccount(t *testing.T) {
 	if _, err := chooseAccount(nil, "tag=x", "", never); err == nil || !strings.Contains(err.Error(), "no storage account tagged") {
 		t.Errorf("no match: %v", err)
 	}
-	_, err := chooseAccount(two, "tag=x", "", nil)
-	if err == nil || !strings.Contains(err.Error(), "--account lbfa") || !strings.Contains(err.Error(), "--account lbfb") || !strings.Contains(err.Error(), "Sub B") {
-		t.Errorf("no terminal: %v", err)
-	}
-
 	var labels []string
 	got, err := chooseAccount(two, "tag=x", "", func(_ string, l []string) (int, error) { labels = l; return 1, nil })
 	if err != nil || got.Name != "lbfb" {

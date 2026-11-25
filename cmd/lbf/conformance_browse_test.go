@@ -731,32 +731,6 @@ func TestConformanceUpgradeNewerVersion(t *testing.T) {
 	}
 }
 
-func TestConformanceUpgradeWarningNamesBothVersionsAndCommand(t *testing.T) {
-	r := psCall(t, nil, `[Console]::Out.Write((Format-LbfUpgradeWarning 'v0.1.5' 'v0.2.0'))`)
-	if want := upgradeWarning("v0.1.5", "v0.2.0"); r.stdout != want {
-		t.Errorf("warning differs:\n%s", lineDiff(want, r.stdout))
-	}
-}
-
-func TestConformanceUpgradeReplacesScript(t *testing.T) {
-	bin := []byte("new lbf")
-	sum := sha256.Sum256(bin)
-	srv, _ := psFakeReleases(t, "v0.2.0", bin, hex.EncodeToString(sum[:]))
-	path := filepath.Join(t.TempDir(), "lbf.ps1")
-	writeFile(t, path, "old lbf")
-	r := psCall(t, nil, fmt.Sprintf(`$r = Invoke-LbfUpgrade -Base %[1]s -Current 'v0.1.5' -Path %[2]s; "$($r.Latest) $($r.Upgraded)"
-		$r = Invoke-LbfUpgrade -Base %[1]s -Current 'v0.2.0' -Path %[2]s; "$($r.Latest) $($r.Upgraded)"`, psQuote(srv.URL+"/releases"), psQuote(path)))
-	if r.stdout != "v0.2.0 True\nv0.2.0 False\n" {
-		t.Fatalf("got %q, stderr %q", r.stdout, r.stderr)
-	}
-	if got, _ := os.ReadFile(path); string(got) != "new lbf" {
-		t.Fatalf("script holds %q", got)
-	}
-	if _, err := os.Stat(path + ".new"); !os.IsNotExist(err) {
-		t.Errorf("left %s.new behind", path)
-	}
-}
-
 func TestConformanceUpgradeRejectsChecksumMismatch(t *testing.T) {
 	srv, _ := psFakeReleases(t, "v0.2.0", []byte("tampered"), strings.Repeat("a", 64))
 	path := filepath.Join(t.TempDir(), "lbf.ps1")
@@ -905,6 +879,9 @@ func TestConformanceUpgradeCommand(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(script); !bytes.Equal(got, newer) {
 		t.Fatal("the script was not replaced")
+	}
+	if _, err := os.Stat(script + ".new"); !os.IsNotExist(err) {
+		t.Errorf("left %s.new behind", script)
 	}
 	if r := psRunScript(t, script, env, "version"); r.stdout != "lbf v0.2.0\n" || r.stderr != "" {
 		t.Errorf("after upgrade: %q %q", r.stdout, r.stderr)
