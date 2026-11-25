@@ -34,6 +34,19 @@ const plateReadProfile = `{
   }
 }`
 
+const roughProfile = `{
+  "$id": "https://example.org/profiles/rough/0.1.0",
+  "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "titel": "Rough",
+  "properties": {"additionalProperty": {"$ref": "#/$defs/properties"}},
+  "$defs": {"properties": {"required": ["a", "b"], "properties": {
+    "a": {"title": "A", "description": "a", "examples": ["x"]},
+    "b": {"type": "string", "default": "x", "minLength": 3, "examples": ["xy"], "x-unitText": "nm"},
+    "c": {"type": "number", "title": "C", "description": "c", "examples": [1], "x-unitCode": "nm", "x-unitText": "nm"},
+    "d": {"type": "object", "title": "D", "description": "d", "examples": [{}]}
+  }}}
+}`
+
 func plateRead(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "profiles", "plate-read", "0.1.0")
@@ -231,18 +244,7 @@ func TestProfilesCheck(t *testing.T) {
 	}
 
 	dir := filepath.Join(t.TempDir(), "profiles", "rough", "0.1.0")
-	writeFile(t, filepath.Join(dir, "profile.json"), `{
-  "$id": "https://example.org/profiles/rough/0.1.0",
-  "$ref": "`+bronzeProfileID(t)+`",
-  "titel": "Rough",
-  "properties": {"additionalProperty": {"$ref": "#/$defs/properties"}},
-  "$defs": {"properties": {"required": ["a", "b"], "properties": {
-    "a": {"title": "A", "description": "a", "examples": ["x"]},
-    "b": {"type": "string", "default": "x", "minLength": 3, "examples": ["xy"], "x-unitText": "nm"},
-    "c": {"type": "number", "title": "C", "description": "c", "examples": [1], "x-unitCode": "nm", "x-unitText": "nm"},
-    "d": {"type": "object", "title": "D", "description": "d", "examples": [{}]}
-  }}}
-}`)
+	writeFile(t, filepath.Join(dir, "profile.json"), roughProfile)
 	_, problems, err = checkProfile(dir)
 	must(t, err)
 	for _, want := range []string{

@@ -186,6 +186,18 @@ func isCratePut(r *http.Request) bool {
 	return r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/"+crateName)
 }
 
+const runProfile = `{"$id": "https://example.org/profiles/run/0.1.0", "$ref": "https://github.com/ImperialCollegeLondon/lbf-cli/tree/main/profiles/bronze/0.7.0",
+  "$defs": {"properties": {"properties": {"n": {"type": "integer", "x-unitCode": "http://qudt.org/vocab/unit/NanoM", "x-unitText": "nm"}}}}}`
+
+// A dataset published against runProfile, which it carries.
+func withRunProfile(files map[string]string) map[string]string {
+	out := map[string]string{"profiles/run/0.1.0/profile.json": runProfile}
+	for k, v := range files {
+		out[k] = v
+	}
+	return out
+}
+
 var roundTripFiles = map[string]string{
 	"data/run1/a.txt":                 "alpha\n",
 	"data/run1/empty.txt":             "",
@@ -380,6 +392,10 @@ func transferFetchCases() map[string]conformCase {
 		"round trip json":       {perms: "rlw", files: roundTripFiles, setup: published, args: fetchJSON, normalize: ids, unorderedStderr: true},
 		"download alias":        {perms: "rlw", files: roundTripFiles, setup: published, args: []string{"download", fixedID, "--sas-env", "{sas}", "--container", "{container}"}, normalize: ids, unorderedStderr: true},
 		"into a new nested out": {perms: "rlw", files: roundTripFiles, setup: published, args: []string{"fetch", fixedID, "--sas-env", "{sas}", "--container", "{container}", "--out", "a/b/../c"}, normalize: ids, unorderedStderr: true},
+		"with schemas json":     {perms: "rlw", files: withRunProfile(roundTripFiles), setup: goPublish(fixedID, "--profile", "profiles/run/0.1.0", "--property", "n=3"), args: fetchJSON, normalize: ids, unorderedStderr: true},
+		"single file with schemas": {perms: "rlw", files: withRunProfile(map[string]string{"data/one.csv": "1"}), setup: func(t *testing.T, w *world) {
+			goOK(t, w, "publish", "data/one.csv", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID, "--profile", "profiles/run/0.1.0")
+		}, args: fetchJSON, normalize: ids, unorderedStderr: true},
 		"single file dataset": {perms: "rlw", files: map[string]string{"data/one.csv": "1"}, setup: func(t *testing.T, w *world) {
 			goOK(t, w, "publish", "data/one.csv", "--sas-env", "{sas}", "--container", "{container}", "--id", fixedID)
 		}, args: fetchJSON, normalize: ids},
@@ -487,7 +503,12 @@ func transferPublishCases() map[string]conformCase {
 		"only empty files": {perms: "rlw", files: map[string]string{"data/run1/e1": "", "data/run1/e2": ""}, args: publish, normalize: fixed, unorderedStderr: true},
 		"with provenance": {perms: "rlw", files: small, normalize: fixed, unorderedStderr: true, args: append(append([]string{}, publish...), "--derived-from", parentDatasetID,
 			"--instrument", "name=CellProfiler,version=4.2.6,url=https://cellprofiler.org", "--property", "sample_id=S1", "--name", "Run 1", "--description", "Cells")},
-		"again with identical":      {perms: "rlw", files: small, setup: goPublish(fixedID), args: publish, normalize: fixed, unorderedStderr: true},
+		"again with identical": {perms: "rlw", files: small, setup: goPublish(fixedID), args: publish, normalize: fixed, unorderedStderr: true},
+		"with a profile":       {perms: "rlw", files: withRunProfile(small), args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0", "--property", "n=3"), normalize: fixed, unorderedStderr: true},
+		"again with a profile": {perms: "rlw", files: withRunProfile(small), setup: goPublish(fixedID, "--profile", "profiles/run/0.1.0", "--property", "n=3"), args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0", "--property", "n=03"), normalize: fixed, unorderedStderr: true},
+		"again with another schema": {perms: "rlw", files: withRunProfile(small), setup: steps(goPublish(fixedID, "--profile", "profiles/run/0.1.0", "--property", "n=3"), changeFile("profiles/run/0.1.0/profile.json", strings.Replace(runProfile, `"integer"`, `"number"`, 1))),
+			args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0", "--property", "n=3"), normalize: fixed, unorderedStderr: true},
+		"resume with a profile":     {perms: "rlw", files: withRunProfile(small), setup: attempt(small, "run1/a.txt"), args: append(append([]string{}, publish...), "--profile", "profiles/run/0.1.0"), normalize: fixed, unorderedStderr: true},
 		"again with json":           {perms: "rlw", files: small, setup: goPublish(fixedID), args: append(append([]string{}, publish...), "--json"), normalize: fixed, unorderedStderr: true},
 		"again with other property": {perms: "rlw", files: small, setup: goPublish(fixedID, "--property", "sample_id=S1"), args: append(append([]string{}, publish...), "--property", "sample_id=S2"), normalize: fixed, unorderedStderr: true},
 		"again with name given":     {perms: "rlw", files: small, setup: goPublish(fixedID), args: append(append([]string{}, publish...), "--name", "Run 1"), normalize: fixed, unorderedStderr: true},
