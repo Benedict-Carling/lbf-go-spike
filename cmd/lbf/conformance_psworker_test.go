@@ -32,6 +32,7 @@ $replies.AutoFlush = $true
 [Console]::SetIn([System.IO.TextReader]::Null)
 $consoleOut = [Console]::Out
 $consoleErr = [Console]::Error
+$idle = (Get-Location).Path
 while ($null -ne ($line = $requests.ReadLine())) {
     $req = $utf8.GetString([Convert]::FromBase64String($line)) | ConvertFrom-Json
     foreach ($k in @([Environment]::GetEnvironmentVariables().Keys)) {
@@ -64,6 +65,9 @@ while ($null -ne ($line = $requests.ReadLine())) {
     } finally {
         [Console]::SetOut($consoleOut)
         [Console]::SetError($consoleErr)
+        # Windows cannot delete a folder a process is in, so the worker leaves the case's folder.
+        Set-Location -LiteralPath $idle
+        [Environment]::CurrentDirectory = $idle
     }
     $stdout = $direct.ToString() + $out.ToString()
     $replies.WriteLine([string][char]1 + 'lbf-reply ' + [string]$code + ' ' + [Convert]::ToBase64String($utf8.GetBytes($stdout)) + ' ' + [Convert]::ToBase64String($utf8.GetBytes($err.ToString())))
