@@ -4,7 +4,27 @@ name: powershell
 on:
   push:
     branches: [main]
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'profiles/**'
+      - 'ps/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/**'
   pull_request:
+    paths:
+      - 'cmd/**'
+      - 'internal/**'
+      - 'profiles/**'
+      - 'ps/**'
+      - 'scripts/**'
+      - 'tools/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/**'
   workflow_dispatch:
   workflow_call:
 
@@ -13,18 +33,21 @@ permissions:
 
 jobs:
   conformance:
+    name: conformance (${{ matrix.target.ps }} on ${{ matrix.target.os }}, ${{ matrix.group.name }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # powershell.exe is Windows PowerShell 5.1, what Imperial's PCs run; pwsh is PowerShell 7.
-          - os: windows-latest
-            ps: powershell.exe
-          - os: windows-latest
-            ps: pwsh
-          - os: ubuntu-latest
-            ps: pwsh
-    runs-on: ${{ matrix.os }}
+        # powershell.exe is Windows PowerShell 5.1, what Imperial's PCs run; pwsh is PowerShell 7.
+        target:
+          - {os: windows-latest, ps: powershell.exe}
+          - {os: windows-latest, ps: pwsh}
+          - {os: ubuntu-latest, ps: pwsh}
+        # Together the groups run every TestConformance test once.
+        group:
+          - {name: dataset, run: '^TestConformanceDataset', skip: ''}
+          - {name: transfer, run: '^TestConformanceTransfer', skip: ''}
+          - {name: rest, run: '^TestConformance', skip: '^TestConformance(Dataset|Transfer)'}
+    runs-on: ${{ matrix.target.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,23 +64,27 @@ jobs:
       - run: npm install --no-fund --no-audit --prefix "$RUNNER_TEMP/azurite" azurite@3.37.0
         shell: bash
       # Azurite starts in the step that uses it: on Windows runners a process left running by an earlier step stops answering.
-      - name: Conformance with ${{ matrix.ps }}
+      - name: Conformance with ${{ matrix.target.ps }}, ${{ matrix.group.name }}
         shell: bash
         run: |
           node "$RUNNER_TEMP/azurite/node_modules/azurite/dist/src/blob/main.js" --inMemoryPersistence --skipApiVersionCheck --silent > azurite.log 2>&1 &
           for i in $(seq 180); do curl -s -o /dev/null http://127.0.0.1:10000/ && break; sleep 1; done
           curl -s -o /dev/null http://127.0.0.1:10000/ || { echo "Azurite did not start"; cat azurite.log; exit 1; }
           "$LBF_PS" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
-          go test -run 'TestConformance' -count=1 -timeout 60m -v ./cmd/lbf 2>&1 | tee conformance.log | grep -E '^(=== RUN|--- |ok|FAIL|PASS)'
+          py=python; command -v python > /dev/null || py=python3
+          go test -json -run "$RUN" -skip "$SKIP" -count=1 -timeout 60m ./cmd/lbf 2>&1 | "$py" -u .github/conformance-summary.py conformance.json "Conformance with $LBF_PS, $GROUP"
           exit "${PIPESTATUS[0]}"
         env:
           LBF_AZURITE: "1"
-          LBF_PS: ${{ matrix.ps }}
+          LBF_PS: ${{ matrix.target.ps }}
+          GROUP: ${{ matrix.group.name }}
+          RUN: ${{ matrix.group.run }}
+          SKIP: ${{ matrix.group.skip }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: conformance-${{ matrix.os }}-${{ matrix.ps }}
-          path: conformance.log
+          name: conformance-${{ matrix.target.os }}-${{ matrix.target.ps }}-${{ matrix.group.name }}
+          path: conformance.json
 
   # Installs from a release served on this machine, then uses lbf as Stuart would: from Windows PowerShell, PowerShell 7 and cmd.exe.
   install:
