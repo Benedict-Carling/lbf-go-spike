@@ -35,7 +35,9 @@ func TestMain(m *testing.M) {
 		main()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	stopPSWorkers()
+	os.Exit(code)
 }
 
 // The PowerShell lbf runs only when LBF_PS names a PowerShell: pwsh, or powershell.exe for Windows PowerShell 5.1.
@@ -189,9 +191,13 @@ func (w *world) lbfPS(t *testing.T, env map[string]string, raw string, args ...s
 	} else {
 		line = w.expand(line)
 	}
+	timeout := 5 * time.Minute
+	if !psSpawnEach() {
+		return runInPSWorker(t, ps, psRequest{Dir: w.dir, Env: w.environ(env), Command: fmt.Sprintf("& '%s' %s", strings.ReplaceAll(script, "'", "''"), line)}, timeout)
+	}
 	// Without this, Windows PowerShell writes "Preparing modules for first use" to a redirected stderr as CLIXML when Set-Location loads its module.
 	command := fmt.Sprintf("$ProgressPreference = 'SilentlyContinue'; Set-Location -LiteralPath '%s'; & '%s' %s; exit $LASTEXITCODE", strings.ReplaceAll(w.dir, "'", "''"), script, line)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodeCommand(command))
 	cmd.Dir = w.dir
