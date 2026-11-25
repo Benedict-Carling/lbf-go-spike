@@ -262,7 +262,7 @@ function New-LbfJsonFields {
 
 $script:JsonTypes = @{
     string = @{ Kind = 'string'; Go = 'string' }
-    properties = @{ Kind = 'map'; Go = 'map[string]string' }
+    properties = @{ Kind = 'propvalues'; Go = 'main.propertyValues' }
     instrument = @{ Kind = 'struct'; Go = 'main.instrument'; Fields = (New-LbfJsonFields 'name:Name:string', 'version:Version:string', 'url:URL:string') }
     instruments = @{ Kind = 'slice'; Go = '[]main.instrument'; Elem = 'instrument' }
     provenance = @{ Kind = 'struct'; Go = 'main.provenance'; Fields = (New-LbfJsonFields 'name:Name:string', 'description:Description:string',
@@ -866,6 +866,36 @@ function New-LbfJsonTypeError {
     return New-LbfError $msg
 }
 
+# Go's propertyValues.UnmarshalJSON on an object already read: text as it is, numbers and true/false as their JSON text.
+function ConvertFrom-LbfPropertyValues {
+    param([hashtable]$D, [int]$Start, [string]$At)
+    $b = $D.B
+    $raw = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $p = Skip-LbfJsonSpace $D ($Start + 1)
+    while ($b[$p] -ne 0x7D) {
+        $name = Read-LbfJsonString $D $p
+        $p = Skip-LbfJsonSpace $D $name.End
+        $p = Skip-LbfJsonSpace $D ($p + 1)
+        $end = (Read-LbfJsonWhole $D $p).End
+        $raw[$name.Value] = @($p, $end)
+        $p = Skip-LbfJsonSpace $D $end
+        if ($b[$p] -eq 0x2C) { $p = Skip-LbfJsonSpace $D ($p + 1) }
+    }
+    $values = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    foreach ($name in (Get-LbfSortedUtf8 @($raw.Keys))) {
+        $span = $raw[$name]
+        switch -CaseSensitive (Get-LbfJsontextKind $D $span[0]) {
+            '"' { $values[$name] = (Read-LbfJsonString $D $span[0]).Value }
+            { $_ -eq '0' -or $_ -eq 't' -or $_ -eq 'f' } { $values[$name] = $script:Utf8NoBom.GetString($b, $span[0], $span[1] - $span[0]) }
+            default {
+                $text = $script:Utf8NoBom.GetString($b, $span[0], $span[1] - $span[0])
+                throw (New-LbfError "json: cannot unmarshal JSON object into Go main.propertyValues${At}: property $(Format-LbfQuote $name) is $text; give text, a number or true/false")
+            }
+        }
+    }
+    return , $values
+}
+
 # Unmarshals the next value into a Go type of $script:JsonTypes.
 function Read-LbfJsonInto {
     param([hashtable]$D, [string]$Type)
@@ -893,6 +923,17 @@ function Read-LbfJsonInto {
             }
             [void](Read-LbfJsonToken $D)
             return , $m
+        }
+        'propvalues' {
+            $v = Read-LbfJsonValue2 $D
+            if ($v.Kind -eq 'n') { return $null }
+            $ptr = Get-LbfJsonPointer $D -1
+            $within = ''
+            if ($ptr -ne '') { $within = ' within ' + (Format-LbfPointer $ptr) }
+            if ($v.Kind -ne '{') { throw (New-LbfError ('json: cannot unmarshal' + (Get-LbfJsonKindName $v.Kind) + ' into Go map[string]jsontext.Value' + $within)) }
+            $at = $within
+            if ($ptr -eq '' -and $v.Start -gt 0) { $at = ' after offset ' + $v.Start }
+            return , (ConvertFrom-LbfPropertyValues $D $v.Start $at)
         }
         'slice' {
             $tok = Read-LbfJsonToken $D

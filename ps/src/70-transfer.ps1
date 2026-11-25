@@ -329,6 +329,17 @@ function Get-LbfStatedNodes {
     return , $out
 }
 
+# Go's valueText of a PropertyValue's value as framing reads it, numbers as float64.
+function Get-LbfStatedValueText {
+    param($Node)
+    if (-not ($Node -is [System.Collections.IDictionary]) -or -not $Node.Contains('value')) { return '' }
+    $v = $Node['value']
+    if ($v -is [object[]] -and $v.Count -eq 1) { $v = $v[0] }
+    if ($v -is [System.Collections.IDictionary] -and $v.Contains('@value') -and $v.Count -eq 1) { $v = $v['@value'] }
+    if ($v -is [long] -or $v -is [int] -or $v -is [decimal]) { $v = [double]$v }
+    return Get-LbfValueText $v
+}
+
 # Go refuses a crate whose context it cannot load, since lbf reads only the contexts of the crates it writes.
 function Test-LbfCrateContext {
     param($Context)
@@ -372,7 +383,7 @@ function Get-LbfCrateStatement {
         if ($indexed.ContainsKey($key)) { $indexed[$key] = $null } else { $indexed[$key] = $pv }
     }
     foreach ($name in $indexed.Keys) {
-        if (-not (Test-LbfIn $name $script:LbfOwnProperties)) { $prov.Properties[$name] = Get-LbfStatedString $indexed[$name] 'value' }
+        if (-not (Test-LbfIn $name $script:LbfOwnProperties)) { $prov.Properties[$name] = Get-LbfStatedValueText $indexed[$name] }
     }
     $parents = New-Object System.Collections.Generic.List[object]
     foreach ($p in (Get-LbfStatedNodes $root 'isBasedOn' $entities)) { $parents.Add($p) }
@@ -391,7 +402,7 @@ function Get-LbfCrateStatement {
     $source = ''
     if ($indexed.ContainsKey('source_path')) { $source = Get-LbfStatedString $indexed['source_path'] 'value' }
     if ((Test-LbfSame $prov.Name $id) -or (Test-LbfSame $prov.Name (Get-LbfBase $source))) { $prov.Name = '' }
-    $defaults = @("Dataset $id", "Bronze-layer dataset $id", (Get-LbfDefaultDescription $source $Crate.Files.Count $prov.DerivedFrom))
+    $defaults = @("Dataset $id", "Bronze-layer dataset $id", (Get-LbfDefaultDescription $source (Get-LbfDataFileCount $Crate.Files) $prov.DerivedFrom))
     if (Test-LbfIn $prov.Description $defaults) { $prov.Description = '' }
     foreach ($c in (Get-LbfStatedNodes $root 'conformsTo' $entities)) {
         if ($c -is [System.Collections.IDictionary] -and $c.Contains('@id') -and $c['@id'] -is [string]) { $conformsTo.Add($c['@id']) } else { $conformsTo.Add('') }
@@ -404,7 +415,10 @@ function Compare-LbfCrateWithPublication {
     param([Parameter(Mandatory)][hashtable]$Crate, [Parameter(Mandatory)][hashtable]$Publication)
     $st = Get-LbfCrateStatement $Crate
     $stated = $st.Provenance
-    $mine = $Publication.Provenance
+    $mine = $Publication.Provenance.Clone()
+    $mine.Properties = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $record = Get-LbfProfileRecord $Publication.Profile $Publication.Provenance.Properties
+    foreach ($k in $record.Keys) { $mine.Properties[$k] = Get-LbfValueText $record[$k] }
     if ([string]::IsNullOrEmpty($mine.Name)) { $stated.Name = '' }
     if ([string]::IsNullOrEmpty($mine.Description)) { $stated.Description = '' }
     $problems = New-Object System.Collections.Generic.List[string]
@@ -554,8 +568,11 @@ function Get-LbfUploaderMetadata {
 function Start-LbfPutJob {
     param([hashtable]$Job)
     $f = $Job.File
-    try { $Job.Fs = [System.IO.FileStream]::new((Get-LbfIoPath $f.Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite, 65536) }
-    catch { throw (New-LbfError (Format-LbfOsError 'open' $f.Path $_)) }
+    if (Test-LbfHasContent $f) { $Job.Fs = New-Object System.IO.MemoryStream (, $f.Content) }
+    else {
+        try { $Job.Fs = [System.IO.FileStream]::new((Get-LbfIoPath $f.Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite, 65536) }
+        catch { throw (New-LbfError (Format-LbfOsError 'open' $f.Path $_)) }
+    }
     $Job.Sha = New-LbfSha256
     $Job.Read = [long]0
     $Job.Off = [long]0
@@ -667,6 +684,7 @@ function Step-LbfPutJob {
 # Go's unchanged: the file still has the size and time it was found with, and all of it was read.
 function Test-LbfUnchanged {
     param([hashtable]$File, [long]$Read)
+    if (Test-LbfHasContent $File) { return }
     $ok = $true
     try {
         $info = [System.IO.FileInfo]::new((Get-LbfIoPath $File.Path))
@@ -683,8 +701,11 @@ function Test-LbfUnchanged {
 function Start-LbfHashJob {
     param([hashtable]$Job)
     $f = $Job.File
-    try { $Job.Fs = New-Object System.IO.FileStream ((Get-LbfIoPath $f.Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite, 1048576, $true) }
-    catch { throw (New-LbfError (Format-LbfOsError 'open' $f.Path $_)) }
+    if (Test-LbfHasContent $f) { $Job.Fs = New-Object System.IO.MemoryStream (, $f.Content) }
+    else {
+        try { $Job.Fs = New-Object System.IO.FileStream ((Get-LbfIoPath $f.Path), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite, 1048576, $true) }
+        catch { throw (New-LbfError (Format-LbfOsError 'open' $f.Path $_)) }
+    }
     $Job.Sha = New-LbfSha256
     $Job.Crypto = New-Object System.Security.Cryptography.CryptoStream ([IO.Stream]::Null), $Job.Sha, ([System.Security.Cryptography.CryptoStreamMode]::Write)
     $Job.Tasks.Add($Job.Fs.CopyToAsync($Job.Crypto, 1048576, $Job.Cts.Token))
@@ -1156,6 +1177,7 @@ function Get-LbfDataDir {
     param([string]$Root, $Files)
     $top = ''
     foreach ($f in $Files) {
+        if (Test-LbfProfileFile $f.Rel) { continue }
         $slash = $f.Rel.IndexOf([char]'/')
         if ($slash -lt 0) { return $Root }
         $first = $f.Rel.Substring(0, $slash)

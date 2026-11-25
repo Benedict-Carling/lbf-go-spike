@@ -1,4 +1,8 @@
-$script:VersionFolder = New-Object System.Text.RegularExpressions.Regex ('\Av?[0-9]+(\.[0-9]+)*\z')
+$script:VersionFolder = New-Object System.Text.RegularExpressions.Regex ('\Av?[0-9]+(\.[0-9]+){0,2}\z')
+$script:ProfileSlug = New-Object System.Text.RegularExpressions.Regex ('\A[a-z0-9][a-z0-9-]*\z')
+# Where a dataset keeps the schemas it was checked against, beside the published folder.
+$script:ProfilesDir = 'ro-crate-profiles'
+$script:RecordPointer = '#/$defs/properties'
 $script:ProcessRunCrate = 'https://w3id.org/ro/wfrun/process/0.6'
 $script:Draft202012 = 'https://json-schema.org/draft/2020-12/schema'
 $script:MetaSchemaDocs = @'
@@ -134,7 +138,10 @@ function Get-LbfSchemaHead {
     if ($null -ne $err) { throw (New-LbfError $err) }
     if ($id.Length -eq 0) { throw (New-LbfError "no `$id; it is recorded as the crate's conformsTo") }
     if (-not (Test-LbfProfileUrl $id)) {
-        throw (New-LbfError "`$id $(Format-LbfQuote $id) is not an absolute URL such as https://example.org/profiles/name/0.1.0; it is recorded as the crate's conformsTo")
+        throw (New-LbfError "`$id $(Format-LbfQuote $id) is not an absolute URL such as https://example.org/profiles/plate-read/0.1.0; it is recorded as the crate's conformsTo")
+    }
+    if ($null -eq (Get-LbfNameAndVersion $id)) {
+        throw (New-LbfError "`$id $id does not end in /<name>/<version>, such as https://example.org/profiles/plate-read/0.1.0; a dataset keeps the schema it was checked against under that name and version")
     }
     return @{ ID = $id; Ref = $ref; Doc = $doc }
 }
@@ -147,10 +154,10 @@ function Get-LbfLegacyKind {
     }
 }
 
-# url.Parse(id) succeeding with a scheme and a host, and no fragment.
+# url.Parse(id) succeeding with a scheme and a host, and, unless -AllowFragment, no fragment.
 function Test-LbfProfileUrl {
-    param([string]$Id)
-    if ($Id.Contains('#')) { return $false }
+    param([string]$Id, [switch]$AllowFragment)
+    if ($Id.Contains('#') -and -not $AllowFragment) { return $false }
     if (-not (Test-LbfAbsoluteUrl $Id)) { return $false }
     $m = [regex]::Match($Id, '\A[A-Za-z][A-Za-z0-9+.\-]*://([^/?#]*)')
     if (-not $m.Success) { return $false }
@@ -160,62 +167,92 @@ function Test-LbfProfileUrl {
     return $auth.Length -ne 0
 }
 
+# Go's nameAndVersion: @(name, version) from the last two segments of a profile's $id, or $null.
+function Get-LbfNameAndVersion {
+    param([string]$Id)
+    if ($Id -cmatch '[\x00-\x1F\x7F]' -or $Id -cmatch '%(?![0-9A-Fa-f]{2})') { return $null }
+    $rest = $Id
+    $hash = $rest.IndexOf([char]'#')
+    if ($hash -ge 0) { $rest = $rest.Substring(0, $hash) }
+    $q = $rest.IndexOf([char]'?')
+    if ($q -ge 0) {
+        if ($q -lt $rest.Length - 1) { return $null }
+        $rest = $rest.Substring(0, $q)
+    }
+    $m = [regex]::Match($rest, '\A[A-Za-z][A-Za-z0-9+.\-]*:')
+    if ($m.Success) {
+        $rest = $rest.Substring($m.Length)
+        if ($rest.StartsWith('//', [StringComparison]::Ordinal)) {
+            $slash = $rest.IndexOf([char]'/', 2)
+            if ($slash -lt 0) { $rest = '' } else { $rest = $rest.Substring($slash) }
+        } elseif (-not $rest.StartsWith('/', [StringComparison]::Ordinal)) { return $null }
+    }
+    try { $path = [Uri]::UnescapeDataString($rest) } catch { return $null }
+    $segs = $path.Trim([char]'/').Split([char]'/')
+    if ($segs.Length -lt 2) { return $null }
+    $name = $segs[$segs.Length - 2]
+    $version = $segs[$segs.Length - 1]
+    if (-not $script:ProfileSlug.IsMatch($name) -or -not $script:VersionFolder.IsMatch($version)) { return $null }
+    return , ([string[]]@($name, $version))
+}
+
 # ---------- loading profiles ----------
 
-# Go's loadProfile: the chosen profile and every profile it builds on through $ref, bronze first.
+# Go's loadProfile: the profile named and every profile it builds on through $ref, bronze first.
 function Get-LbfProfile {
     param([AllowEmptyString()][string]$Dir)
     $bronzeBytes = $script:Utf8NoBom.GetBytes($script:EmbeddedBronzeProfile)
     $bronze = Get-LbfSchemaHead $bronzeBytes
     $bronzeId = $bronze.ID
     $docs = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $raws = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
     $parents = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $paths = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+    $skipped = New-Object System.Collections.Generic.List[string]
     $docs[$bronzeId] = $bronze.Doc
+    $raws[$bronzeId] = $bronzeBytes
     $paths[$bronzeId] = $bronzeId
     $targetId = $bronzeId
     if ($Dir.Length -ne 0) {
         $Dir = Get-LbfAbsPath $Dir
         $target = Join-LbfPath $Dir 'profile.json'
         if ([IO.File]::Exists((Get-LbfIoPath $Dir))) { $target = $Dir }
-        $root = Get-LbfDir (Get-LbfDir $target)
-        if ($script:VersionFolder.IsMatch((Get-LbfBase (Get-LbfDir $target)))) { $root = Get-LbfDir $root }
-        $candidates = New-Object System.Collections.Generic.List[string]
-        foreach ($sub in (Get-LbfSortedDirs $root)) {
-            $p = Join-LbfPath $sub 'profile.json'
-            if (Test-LbfPathExists $p) { $candidates.Add($p) }
-        }
-        foreach ($sub in (Get-LbfSortedDirs $root)) {
-            foreach ($sub2 in (Get-LbfSortedDirs $sub)) {
-                if (-not $script:VersionFolder.IsMatch((Get-LbfBase $sub2))) { continue }
-                $p = Join-LbfPath $sub2 'profile.json'
-                if (Test-LbfPathExists $p) { $candidates.Add($p) }
-            }
-        }
+        $candidates = Get-LbfProfilesBeside $target
         $candidates.Add($target)
         foreach ($path in $candidates) {
             $head = $null
+            $raw = $null
             $err = $null
             try {
                 try { $raw = [IO.File]::ReadAllBytes((Get-LbfIoPath $path)) } catch { throw (New-LbfError (Format-LbfOsError 'open' $path $_)) }
                 $head = Get-LbfSchemaHead $raw
             } catch { $err = $_ }
-            if ($null -ne $err -and -not (Test-LbfSame $path $target)) { continue }
+            $isTarget = Test-LbfSame $path $target
+            if ($null -ne $err -and -not $isTarget) { $skipped.Add("$path ($(Get-LbfErrorText $err))"); continue }
             if ($null -ne $err) { throw (New-LbfError "${path}: $(Get-LbfErrorText $err)") }
-            if (Test-LbfSame $head.ID $bronzeId) { throw (New-LbfError "${path}: `$id $($head.ID) is lbf's bronze profile, which only lbf defines") }
+            if (Test-LbfSame $head.ID $bronzeId) {
+                if (-not $isTarget) { continue }
+                throw (New-LbfError "${path}: `$id $($head.ID) is lbf's bronze profile, which only lbf defines")
+            }
+            $have = $null
+            if ($raws.TryGetValue($head.ID, [ref]$have) -and -not (Test-LbfSame $paths[$head.ID] $path) -and -not (Test-LbfBytesEqual $have $raw)) {
+                throw (New-LbfError "$($paths[$head.ID]) and $path both have the `$id $($head.ID) but differ; a profile version never changes, so give one a new version")
+            }
             $docs[$head.ID] = $head.Doc
+            $raws[$head.ID] = $raw
             $parents[$head.ID] = $head.Ref
             $paths[$head.ID] = $path
-            if (Test-LbfSame $path $target) { $targetId = $head.ID }
+            if ($isTarget) { $targetId = $head.ID }
         }
     }
     $chain = New-Object System.Collections.Generic.List[string]
     $id = $targetId
     while ($id.Length -ne 0 -and -not (Test-LbfSame $id $bronzeId) -and -not $chain.Contains($id)) {
+        $parent = $null
+        if (-not $parents.TryGetValue($id, [ref]$parent) -or $null -eq $parent) { $parent = '' }
+        if ($parent.Length -ne 0 -and -not $docs.ContainsKey($parent)) { throw (Get-LbfMissingParent $paths[$id] $parent $bronzeId $skipped) }
         $chain.Insert(0, $id)
-        $next = ''
-        if (-not $parents.TryGetValue($id, [ref]$next)) { $next = '' }
-        $id = $next
+        $id = $parent
     }
     $ids = New-Object System.Collections.Generic.List[string]
     $ids.Add($bronzeId)
@@ -224,19 +261,145 @@ function Get-LbfProfile {
     $compiler = New-LbfSchemaCompiler $docs
     $rules = New-Object System.Collections.Generic.List[hashtable]
     foreach ($rid in $ids) {
-        $p = ''
-        if (-not $paths.TryGetValue($rid, [ref]$p)) { $p = '' }
+        $p = $paths[$rid]
         try {
             $sch = Get-LbfCompiledSchema $compiler $rid (-not (Test-LbfSame $rid $bronzeId))
         } catch {
             throw (New-LbfError "profile $rid (${p}): $(Get-LbfErrorText $_)")
         }
+        $doc = $docs[$rid]
         $title = ''
-        $doc = $null
-        if ($docs.TryGetValue($rid, [ref]$doc) -and $doc -is [System.Collections.IDictionary]) { $title = Get-LbfStructField $doc 'title' }
-        $rules.Add(@{ ID = $rid; Title = $title; Schema = $sch })
+        if ($doc -is [System.Collections.IDictionary] -and $doc.Contains('title') -and $doc['title'] -is [string]) { $title = $doc['title'] }
+        $parent = $null
+        if (-not $parents.TryGetValue($rid, [ref]$parent) -or $null -eq $parent) { $parent = '' }
+        $nv = Get-LbfNameAndVersion $rid
+        $record = $null
+        if (Test-LbfHasRecord $doc) {
+            try { $record = Get-LbfCompiledSchema $compiler ($rid + $script:RecordPointer) $false } catch { throw (New-LbfError "profile $rid (${p}): $(Get-LbfErrorText $_)") }
+        }
+        $rules.Add(@{ ID = $rid; Title = $title; Parent = $parent; Name = $nv[0]; Version = $nv[1]; Raw = [byte[]]$raws[$rid]; Doc = $doc
+                Schema = $sch; Record = $record; Compiler = $compiler })
     }
     return @{ ID = $targetId; Rules = $rules }
+}
+
+# A profile built on another bronze than this lbf's was written for another version of lbf.
+function Get-LbfMissingParent {
+    param([string]$Path, [string]$Parent, [string]$BronzeId, [System.Collections.Generic.List[string]]$Skipped)
+    $nv = Get-LbfNameAndVersion $Parent
+    if ($null -ne $nv -and (Test-LbfSame $nv[0] 'bronze')) {
+        $have = (Get-LbfNameAndVersion $BronzeId)[1]
+        return New-LbfError "$Path builds on bronze $($nv[1]), but this lbf checks bronze $have, which lays the crate out differently; give the profile a new version whose `$ref is $BronzeId"
+    }
+    $msg = "$Path builds on $Parent, which is neither lbf's bronze profile $BronzeId nor a profile beside it"
+    if ($Skipped.Count -gt 0) { $msg += '; these could not be read: ' + [string]::Join(', ', $Skipped.ToArray()) }
+    return New-LbfError $msg
+}
+
+# The values json.Unmarshal merges into a struct or map field: every object under a name equal to Name without regard to case.
+function Get-LbfFoldObjects {
+    param($Docs, [string]$Name)
+    $out = New-Object System.Collections.Generic.List[object]
+    $ok = $true
+    foreach ($d in $Docs) {
+        foreach ($k in $d.Keys) {
+            if (-not [string]::Equals([string]$k, $Name, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            $v = $d[$k]
+            if ($null -eq $v) { $out.Add($null); continue }
+            if ((Get-LbfJsonTypeName $v) -eq 'object') { $out.Add($v) } else { $ok = $false }
+        }
+    }
+    return @{ Ok = $ok; Values = $out }
+}
+
+# Go's hasRecord: whether $defs names a properties schema.
+function Test-LbfHasRecord {
+    param($Doc)
+    if ((Get-LbfJsonTypeName $Doc) -ne 'object') { return $false }
+    $has = $false
+    foreach ($v in (Get-LbfFoldObjects @(, $Doc) '$defs').Values) {
+        if ($null -eq $v) { $has = $false } elseif ($v.Contains('properties')) { $has = $true }
+    }
+    return $has
+}
+
+# The profiles a profile.json may build on without the network: profiles/<name>/profile.json or, versioned, profiles/<name>/<version>/profile.json.
+function Get-LbfProfilesBeside {
+    param([string]$Target)
+    $root = Get-LbfDir (Get-LbfDir $Target)
+    if ($script:VersionFolder.IsMatch((Get-LbfBase (Get-LbfDir $Target)))) { $root = Get-LbfDir $root }
+    $candidates = New-Object System.Collections.Generic.List[string]
+    foreach ($sub in (Get-LbfSortedDirs $root)) {
+        $p = Join-LbfPath $sub 'profile.json'
+        if (Test-LbfPathExists $p) { $candidates.Add($p) }
+    }
+    foreach ($sub in (Get-LbfSortedDirs $root)) {
+        foreach ($sub2 in (Get-LbfSortedDirs $sub)) {
+            if (-not $script:VersionFolder.IsMatch((Get-LbfBase $sub2))) { continue }
+            $p = Join-LbfPath $sub2 'profile.json'
+            if (Test-LbfPathExists $p) { $candidates.Add($p) }
+        }
+    }
+    return , $candidates
+}
+
+# Go's loadProfiles: every profile named and those each builds on, once each and bronze first; ID is the last named.
+function Get-LbfProfiles {
+    param([string[]]$Dirs)
+    $merged = Get-LbfProfile ''
+    foreach ($dir in $Dirs) {
+        $p = Get-LbfProfile $dir
+        foreach ($r in $p.Rules) {
+            $same = $null
+            foreach ($m in $merged.Rules) { if (Test-LbfSame $m.ID $r.ID) { $same = $m; break } }
+            if ($null -ne $same) {
+                if (-not (Test-LbfBytesEqual $same.Raw $r.Raw)) {
+                    throw (New-LbfError "two copies of $($r.ID) differ, and a profile version never changes; give the same folder each time, or a new version")
+                }
+                continue
+            }
+            foreach ($m in $merged.Rules) {
+                if (Test-LbfSame (Get-LbfRuleFile $m) (Get-LbfRuleFile $r)) {
+                    throw (New-LbfError "$($m.ID) and $($r.ID) are both $($r.Name) $($r.Version), so a dataset cannot carry both; give one a new name or version")
+                }
+            }
+            $merged.Rules.Add($r)
+        }
+        $merged.ID = $p.ID
+    }
+    return $merged
+}
+
+# The schema file a dataset carries for a profile.
+function Get-LbfRuleFile {
+    param([hashtable]$Rule)
+    return $script:ProfilesDir + '/' + $Rule.Name + '/' + $Rule.Version + '/profile.json'
+}
+
+function Test-LbfProfileFile {
+    param([string]$Rel)
+    return $Rel.StartsWith($script:ProfilesDir + '/', [StringComparison]::Ordinal)
+}
+
+# Go's jsonSchemaDialect: the $schema a profile names, or 2020-12.
+function Get-LbfSchemaDialect {
+    param($Doc)
+    $s = ''
+    if ($Doc -is [System.Collections.IDictionary]) { $s = Get-LbfStructField $Doc '$schema' }
+    if ($s.Length -eq 0) { return $script:Draft202012 }
+    return $s
+}
+
+# The schema files a dataset carries, one for each profile it was checked against.
+function Get-LbfProfileFiles {
+    param([hashtable]$Profile)
+    $files = New-Object System.Collections.Generic.List[hashtable]
+    foreach ($r in $Profile.Rules) {
+        $sha = New-LbfSha256
+        try { $sum = ConvertTo-LbfHex $sha.ComputeHash($r.Raw) } finally { $sha.Dispose() }
+        $files.Add(@{ Path = $null; Rel = (Get-LbfRuleFile $r); Size = [long]$r.Raw.Length; ModTime = $null; SHA256 = $sum; Content = $r.Raw; Dialect = (Get-LbfSchemaDialect $r.Doc) })
+    }
+    return , $files
 }
 
 # json.Unmarshal into a string field: the last string under a name equal to Name as strings.EqualFold has it.
@@ -274,38 +437,503 @@ function Get-LbfProfileIds {
     return , $ids
 }
 
-function Get-LbfProfileTitles {
-    param([hashtable]$Profile)
-    $t = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
-    $t[$script:ProcessRunCrate] = 'Process Run Crate'
-    foreach ($r in $Profile.Rules) { if ($r.Title.Length -ne 0) { $t[$r.ID] = $r.Title } }
-    return , $t
-}
+# ---------- what a profile checks ----------
 
-# Go's profile.validate: every rule, bronze first; the first that fails names its profile and lists each problem.
+# Go's profile.validate: the crate's framed root, and the properties given as one record, against each rule, bronze first.
 function Assert-LbfProfile {
-    param([hashtable]$Profile, $View)
+    param([hashtable]$Profile, $View, $Record)
     foreach ($r in $Profile.Rules) {
-        if (& (Get-LbfFastCheck $r.Schema) $View) { continue }
-        $err = Invoke-LbfSchemaValidate $r.Schema $View
-        if ($null -eq $err) { continue }
-        $leaves = New-Object System.Collections.Generic.List[string]
-        Get-LbfErrorLeaves $err $leaves
-        $arr = $leaves.ToArray()
-        $keys = New-Object string[] $arr.Length
-        for ($i = 0; $i -lt $arr.Length; $i++) { $keys[$i] = Get-LbfUtf8SortKey $arr[$i] }
-        [Array]::Sort([Array]$keys, [Array]$arr, [Collections.IComparer][StringComparer]::Ordinal)
-        throw (New-LbfError ("dataset does not meet profile $($r.ID):`n" + [string]::Join("`n", $arr)))
+        $problems = New-Object System.Collections.Generic.List[string]
+        if (-not (& (Get-LbfFastCheck $r.Schema) $View)) {
+            $err = Invoke-LbfSchemaValidate $r.Schema $View
+            if ($null -ne $err) { Add-LbfCrateProblems $Profile $err $problems }
+        }
+        if ($null -ne $r.Record -and -not (& (Get-LbfFastCheck $r.Record) $Record)) {
+            $err = Invoke-LbfSchemaValidate $r.Record $Record
+            if ($null -ne $err) { Add-LbfRecordProblems $Profile $err $problems }
+        }
+        if ($problems.Count -eq 0) { continue }
+        $sorted = Get-LbfSortedUtf8 $problems.ToArray()
+        $out = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $sorted) { if ($out.Count -eq 0 -or -not (Test-LbfSame $out[$out.Count - 1] $p)) { $out.Add($p) } }
+        $name = $r.Title
+        if ($name.Length -eq 0) { $name = $r.ID }
+        throw (New-LbfError ("dataset does not meet profile $name ($($r.ID)):`n" + [string]::Join("`n", $out.ToArray())))
     }
 }
 
-function Get-LbfErrorLeaves {
-    param([hashtable]$Err, [System.Collections.Generic.List[string]]$Out)
-    if ($null -eq $Err.C -or $Err.C.Count -eq 0) {
-        $Out.Add('  /' + [string]::Join('/', $Err.L) + ': ' + (Format-LbfSchemaMessage $Err))
+# How a publisher gives each term of the crate's root that is theirs to give.
+$script:RootFlags = @{ name = '--name'; description = '--description'; additionalProperty = '--property'; isBasedOn = '--derived-from'; mentions = '--instrument'; hasPart = 'files' }
+
+# Terms of the crate's root lbf sets itself, with what a publisher can do when one fails a profile.
+$script:LbfSets = @{ identifier = ''; datePublished = ''; license = ''; distribution = ''; conformsTo = ''
+    creator = "lbf names whoever signed in, and could not tell who that is; sign in with 'lbf login', or mint the --sas-env file again with 'lbf mint-sas'" }
+
+function Get-LbfRootFlag {
+    param([string]$Name)
+    foreach ($k in $script:RootFlags.Keys) { if (Test-LbfSame $k $Name) { return $script:RootFlags[$k] } }
+    return ''
+}
+
+function Test-LbfLbfSets {
+    param([string]$Name)
+    foreach ($k in $script:LbfSets.Keys) { if (Test-LbfSame $k $Name) { return $true } }
+    return $false
+}
+
+function Get-LbfLbfSetsReason {
+    param([string]$Name)
+    foreach ($k in $script:LbfSets.Keys) { if (Test-LbfSame $k $Name) { return $script:LbfSets[$k] } }
+    return ''
+}
+
+# Where in the crate a problem is, by the flag that sets it when there is one.
+function Get-LbfWhere {
+    param([string[]]$Loc)
+    if ($Loc.Length -gt 0) {
+        $flag = Get-LbfRootFlag $Loc[0]
+        if ($flag.Length -ne 0) {
+            $parts = New-Object System.Collections.Generic.List[string]
+            $parts.Add($flag)
+            for ($i = 1; $i -lt $Loc.Length; $i++) { $parts.Add($Loc[$i]) }
+            return [string]::Join('/', $parts.ToArray())
+        }
+    }
+    return '/' + [string]::Join('/', $Loc)
+}
+
+# Go's crateProblems: each problem with the crate said in the terms of the flag that fixes it.
+function Add-LbfCrateProblems {
+    param([hashtable]$Profile, [hashtable]$E, [System.Collections.Generic.List[string]]$Out)
+    if ($E.K -ne 'contains' -and $null -ne $E.C -and $E.C.Count -gt 0) {
+        foreach ($c in $E.C) { Add-LbfCrateProblems $Profile $c $Out }
         return
     }
-    foreach ($c in $Err.C) { Get-LbfErrorLeaves $c $Out }
+    $loc = [string[]]$E.L
+    if ($null -eq $loc) { $loc = [string[]]@() }
+    if ($E.K -eq 'required') {
+        $derived = $false
+        $derivedHint = ''
+        foreach ($name in $E.Missing) {
+            $hint = Get-LbfProfileHint $Profile ($E.SU + '/properties/' + $name)
+            $flag = Get-LbfRootFlag $name
+            if ($loc.Length -eq 0 -and (Test-LbfIn $name 'isBasedOn', 'mentions')) {
+                $derived = $true
+                if ($derivedHint.Length -eq 0) { $derivedHint = $hint }
+            } elseif ($loc.Length -eq 0 -and $flag.Length -ne 0) {
+                $Out.Add("  missing $flag$hint")
+            } elseif ($loc.Length -eq 0 -and (Get-LbfLbfSetsReason $name).Length -ne 0) {
+                $Out.Add("  missing ${name}: $(Get-LbfLbfSetsReason $name)$hint")
+            } elseif ($loc.Length -eq 0) {
+                $Out.Add("  missing $name, which no flag of lbf's gives, so no dataset can meet this profile; ask whoever looks after it$hint")
+            } elseif ($loc.Length -eq 2 -and (Test-LbfSame $loc[0] 'additionalProperty')) {
+                $Out.Add("  --property $($loc[1]): the crate records no $name for it, which lbf writes only for what a profile's `$defs/properties asks$hint")
+            } else {
+                $Out.Add("  $(Get-LbfWhere $loc): missing $name$hint")
+            }
+        }
+        if ($derived) { $Out.Add('  missing --derived-from ID and --instrument, saying what it was made from and with' + $derivedHint) }
+        return
+    }
+    $msg = Get-LbfPlainMessage $E
+    if ($E.K -eq 'contains') {
+        $key = [string]::Join('/', $loc)
+        if (Test-LbfSame $key 'hasPart') { $msg = 'no file is what the profile asks for' }
+        elseif (Test-LbfSame $key 'mentions') { $msg = 'the --instrument flags do not give what the profile asks for' }
+        else { $msg = 'nothing here is what the profile asks for' }
+    }
+    if ($loc.Length -gt 0 -and (Test-LbfLbfSets $loc[0])) { $msg += ', but lbf sets this itself; ask whoever looks after the profile' }
+    if ($loc.Length -ge 2 -and (Test-LbfSame $loc[0] 'additionalProperty')) {
+        $u = $E.SU
+        if ($u.EndsWith('/properties/value', [StringComparison]::Ordinal)) { $u = $u.Substring(0, $u.Length - '/properties/value'.Length) }
+        $Out.Add("  --property $($loc[1]): $msg$(Get-LbfProfileHint $Profile $u)")
+        return
+    }
+    $Out.Add("  $(Get-LbfWhere $loc): $msg$(Get-LbfProfileHint $Profile $E.SU)")
+}
+
+# Go's recordProblems: each problem with the properties given said as the --property that fixes it.
+function Add-LbfRecordProblems {
+    param([hashtable]$Profile, [hashtable]$E, [System.Collections.Generic.List[string]]$Out)
+    if ($null -ne $E.C -and $E.C.Count -gt 0) {
+        foreach ($c in $E.C) { Add-LbfRecordProblems $Profile $c $Out }
+        return
+    }
+    $loc = [string[]]$E.L
+    if ($null -eq $loc) { $loc = [string[]]@() }
+    if ($E.K -eq 'required') {
+        foreach ($name in $E.Missing) {
+            $at = "  missing --property $name=..."
+            if ($loc.Length -gt 0) { $at = "  --property $([string]::Join('/', $loc)): missing $name" }
+            $Out.Add($at + (Get-LbfProfileHint $Profile ($E.SU + '/properties/' + $name)))
+        }
+        return
+    }
+    if ($E.K -eq 'additionalProperties') {
+        foreach ($name in $E.Properties) { $Out.Add("  --property ${name}: not a property the profile asks for") }
+        return
+    }
+    $msg = Get-LbfPlainMessage $E
+    if ($loc.Length -eq 0) { $Out.Add("  the properties: $msg$(Get-LbfProfileHint $Profile $E.SU)"); return }
+    $Out.Add("  --property $([string]::Join('/', $loc)): $msg$(Get-LbfProfileHint $Profile $E.SU)")
+}
+
+# JSON Schema's types, as a publisher would say them.
+$script:TypeWords = @{ string = 'text'; integer = 'a whole number'; number = 'a number'; boolean = 'true or false'; object = 'an object'; array = 'a list'; null = 'empty' }
+
+# Go's plainMessage: jsonschema's message, reworded where a publisher meets it.
+function Get-LbfPlainMessage {
+    param([hashtable]$E)
+    $bound = @{ minimum = 'at least'; maximum = 'at most'; exclusiveMinimum = 'more than'; exclusiveMaximum = 'less than' }
+    foreach ($k in $bound.Keys) {
+        if (Test-LbfSame $E.K $k) { return "is $(Format-LbfFloatF ([double]$E.Got)), but must be $($bound[$k]) $(Format-LbfFloatF ([double]$E.Want))" }
+    }
+    switch -CaseSensitive ($E.K) {
+        'type' {
+            $want = New-Object System.Collections.Generic.List[string]
+            foreach ($w in $E.Want) { $want.Add($script:TypeWords[$w]) }
+            return "is $($script:TypeWords[$E.Got]), but must be $([string]::Join(' or ', $want.ToArray()))"
+        }
+        'minLength' { return "is $(Format-LbfPrinterInt $E.Got) characters long, but must be at least $(Format-LbfPrinterInt $E.Want)" }
+        'maxLength' { return "is $(Format-LbfPrinterInt $E.Got) characters long, but must be at most $(Format-LbfPrinterInt $E.Want)" }
+        'pattern' { return "$(Format-LbfSchemaQuote $E.Got) is not in the form the profile asks for" }
+        'minItems' { return "has $(Format-LbfPrinterInt $E.Got), but must have at least $(Format-LbfPrinterInt $E.Want)" }
+    }
+    return Format-LbfSchemaMessage $E
+}
+
+function Get-LbfProfileHint {
+    param([hashtable]$Profile, [string]$Url)
+    $s = Get-LbfAnnotations $Profile $Url
+    if ($s.Length -ne 0) { return "`n      " + $s }
+    return ''
+}
+
+# The title, description and first example a profile gives the schema at a location in one of its rules.
+function Get-LbfAnnotations {
+    param([hashtable]$Profile, [string]$Url)
+    $hash = $Url.IndexOf([char]'#')
+    $base = $Url
+    $ptr = ''
+    if ($hash -ge 0) { $base = $Url.Substring(0, $hash); $ptr = $Url.Substring($hash + 1) }
+    $rule = $null
+    foreach ($r in $Profile.Rules) { if (Test-LbfSame $r.ID $base) { $rule = $r; break } }
+    if ($null -eq $rule) { return '' }
+    if ($ptr.Length -ne 0 -and -not $ptr.StartsWith('/', [StringComparison]::Ordinal)) { return '' }
+    try { $s = Get-LbfJsonAtPointer $rule.Doc $ptr $Url } catch { return '' }
+    if ((Get-LbfJsonTypeName $s) -ne 'object') { return '' }
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($k in @('title', 'description')) {
+        if ($s.Contains($k) -and $s[$k] -is [string] -and $s[$k].Length -ne 0) { $parts.Add($s[$k]) }
+    }
+    if ($s.Contains('examples') -and (Get-LbfJsonTypeName $s['examples']) -eq 'array' -and @($s['examples']).Count -gt 0) {
+        $parts.Add('e.g. ' + (Get-LbfExampleText @($s['examples'])[0]))
+    }
+    return [string]::Join('; ', $parts.ToArray())
+}
+
+# Go's exampleText: text as it is, anything else as JSON; -AsFloat for values json.Unmarshal read into float64.
+function Get-LbfExampleText {
+    param($Value, [switch]$AsFloat)
+    if ($Value -is [string]) { return $Value }
+    return ConvertTo-LbfProfileJsonText $Value $AsFloat
+}
+
+function ConvertTo-LbfProfileJsonText {
+    param($Value, [bool]$AsFloat)
+    switch (Get-LbfJsonTypeName $Value) {
+        'null' { return 'null' }
+        'string' { return ConvertTo-LbfJsonString $Value }
+        'boolean' { if ($Value) { return 'true' } else { return 'false' } }
+        'number' {
+            if ($Value -is [hashtable]) {
+                if ($AsFloat) { return ConvertTo-LbfJsonFloat ([double]$Value.N) }
+                return $Value.T
+            }
+            return ConvertTo-LbfJsonFloat ([double]$Value)
+        }
+        'array' {
+            $parts = New-Object System.Collections.Generic.List[string]
+            foreach ($v in $Value) { $parts.Add((ConvertTo-LbfProfileJsonText $v $AsFloat)) }
+            return '[' + [string]::Join(',', $parts.ToArray()) + ']'
+        }
+        'object' {
+            $parts = New-Object System.Collections.Generic.List[string]
+            foreach ($k in (Get-LbfSortedUtf8 @($Value.Keys | ForEach-Object { [string]$_ }))) { $parts.Add((ConvertTo-LbfJsonString $k) + ':' + (ConvertTo-LbfProfileJsonText $Value[$k] $AsFloat)) }
+            return '{' + [string]::Join(',', $parts.ToArray()) + '}'
+        }
+    }
+    return ''
+}
+
+# Go's strconv.FormatFloat(f, 'f', -1, 64): the shortest digits, never in exponent form.
+function Format-LbfFloatF {
+    param([double]$Value)
+    if ([double]::IsNaN($Value)) { return 'NaN' }
+    if ([double]::IsPositiveInfinity($Value)) { return '+Inf' }
+    if ([double]::IsNegativeInfinity($Value)) { return '-Inf' }
+    $r = $Value.ToString('R', $script:Invariant)
+    $sign = ''
+    if ($r.StartsWith('-', [StringComparison]::Ordinal)) { $sign = '-'; $r = $r.Substring(1) }
+    $exp10 = 0
+    $e = $r.IndexOfAny([char[]]'Ee')
+    if ($e -ge 0) { $exp10 = [int]::Parse($r.Substring($e + 1), $script:Invariant); $r = $r.Substring(0, $e) }
+    $dot = $r.IndexOf([char]'.')
+    $intPart = $r; $frac = ''
+    if ($dot -ge 0) { $intPart = $r.Substring(0, $dot); $frac = $r.Substring($dot + 1) }
+    $digits = ($intPart + $frac).TrimStart('0')
+    $lead = ($intPart + $frac).Length - $digits.Length
+    $dp = $intPart.Length - $lead + $exp10
+    $digits = $digits.TrimEnd('0')
+    if ($digits -eq '') { return $sign + '0' }
+    if ($dp -le 0) { return $sign + '0.' + ('0' * (-$dp)) + $digits }
+    if ($dp -ge $digits.Length) { return $sign + $digits + ('0' * ($dp - $digits.Length)) }
+    return $sign + $digits.Substring(0, $dp) + '.' + $digits.Substring($dp)
+}
+
+# ---------- properties, typed by the profile ----------
+
+# Go's propertyKinds: each property's JSON Schema type and unit, from the profiles' $defs/properties.
+function Get-LbfPropertyKinds {
+    param([hashtable]$Profile)
+    $kinds = New-Object 'System.Collections.Generic.Dictionary[string,hashtable]' ([StringComparer]::Ordinal)
+    if ($null -eq $Profile) { return , $kinds }
+    foreach ($r in $Profile.Rules) {
+        if ((Get-LbfJsonTypeName $r.Doc) -ne 'object') { continue }
+        $defs = Get-LbfFoldObjects @(, $r.Doc) '$defs'
+        $l1 = New-Object System.Collections.Generic.List[object]
+        foreach ($v in $defs.Values) { if ($null -ne $v) { $l1.Add($v) } }
+        $rec = Get-LbfFoldObjects $l1 'properties'
+        $l2 = New-Object System.Collections.Generic.List[object]
+        foreach ($v in $rec.Values) { if ($null -ne $v) { $l2.Add($v) } }
+        $fields = Get-LbfFoldObjects $l2 'properties'
+        if (-not ($defs.Ok -and $rec.Ok -and $fields.Ok)) { continue }
+        $props = New-LbfOrdered
+        foreach ($v in $fields.Values) {
+            if ($null -eq $v) { $props = New-LbfOrdered; continue }
+            foreach ($k in $v.Keys) { $props[$k] = $v[$k] }
+        }
+        foreach ($name in $props.Keys) {
+            $k = Get-LbfKindOf $props[$name]
+            $have = $null
+            if (-not $kinds.TryGetValue($name, [ref]$have)) { $have = @{ Type = ''; UnitCode = ''; UnitText = '' } }
+            $kinds[$name] = @{ Type = (Get-LbfOr $k.Type $have.Type); UnitCode = (Get-LbfOr $k.UnitCode $have.UnitCode); UnitText = (Get-LbfOr $k.UnitText $have.UnitText) }
+        }
+    }
+    return , $kinds
+}
+
+function Get-LbfOr {
+    param([string]$A, [string]$B)
+    if ($A.Length -ne 0) { return $A }
+    return $B
+}
+
+function Get-LbfKindOf {
+    param($S)
+    $k = @{ Type = ''; UnitCode = ''; UnitText = '' }
+    if ((Get-LbfJsonTypeName $S) -ne 'object') { return $k }
+    foreach ($pair in @(@('type', 'Type'), @('x-unitCode', 'UnitCode'), @('x-unitText', 'UnitText'))) {
+        if ($S.Contains($pair[0]) -and $S[$pair[0]] -is [string]) { $k[$pair[1]] = $S[$pair[0]] }
+    }
+    if ($S.Contains('allOf') -and (Get-LbfJsonTypeName $S['allOf']) -eq 'array') {
+        foreach ($sub in $S['allOf']) {
+            $found = Get-LbfKindOf $sub
+            $k = @{ Type = (Get-LbfOr $found.Type $k.Type); UnitCode = (Get-LbfOr $found.UnitCode $k.UnitCode); UnitText = (Get-LbfOr $found.UnitText $k.UnitText) }
+        }
+    }
+    return $k
+}
+
+$script:GoDecimalFloat = New-Object System.Text.RegularExpressions.Regex ('\A[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?\z')
+
+# Go's propertyKind.value: text as the value its type makes it; text that is not one stays text, for the profile to refuse.
+function ConvertTo-LbfTypedValue {
+    param($Kind, [string]$Text)
+    if ($null -eq $Kind) { return $Text }
+    switch -CaseSensitive ($Kind.Type) {
+        'integer' {
+            $n = 0L
+            if ($Text -cmatch '\A[+-]?[0-9]+\z' -and [long]::TryParse($Text, [Globalization.NumberStyles]::AllowLeadingSign, $script:Invariant, [ref]$n)) { return $n }
+        }
+        'number' {
+            if ($script:GoDecimalFloat.IsMatch($Text)) {
+                $d = 0.0
+                $ok = $false
+                try { $ok = [double]::TryParse($Text, [Globalization.NumberStyles]::Float, $script:Invariant, [ref]$d) } catch { $ok = $false }
+                if ($ok -and -not [double]::IsInfinity($d) -and -not [double]::IsNaN($d)) { return $d }
+            }
+        }
+        'boolean' {
+            if (Test-LbfSame $Text 'true') { return $true }
+            if (Test-LbfSame $Text 'false') { return $false }
+        }
+    }
+    return $Text
+}
+
+# Go's profile.record: the properties a publisher gave, each as the value its profile types it as.
+function Get-LbfProfileRecord {
+    param([hashtable]$Profile, $Properties)
+    $kinds = Get-LbfPropertyKinds $Profile
+    $out = New-LbfMap
+    if ($null -eq $Properties) { return , $out }
+    foreach ($name in $Properties.Keys) {
+        $k = $null
+        [void]$kinds.TryGetValue($name, [ref]$k)
+        $out[$name] = ConvertTo-LbfTypedValue $k $Properties[$name]
+    }
+    return , $out
+}
+
+# Go's valueText: a property's value as text, as a publisher gives it.
+function Get-LbfValueText {
+    param($Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [string]) { return $Value }
+    if ($Value -is [bool]) { if ($Value) { return 'true' } return 'false' }
+    if ($Value -is [double]) { return Format-LbfFloatF $Value }
+    if ($Value -is [long] -or $Value -is [int]) { return $Value.ToString($script:Invariant) }
+    return Format-LbfGoSprint $Value
+}
+
+# ---------- lbf profiles check ----------
+
+# The keywords of JSON Schema 2020-12; a validator ignores any other, so a misspelt one checks nothing.
+$script:SchemaKeywords = [string[]]('$schema $id $ref $anchor $dynamicRef $dynamicAnchor $vocabulary $comment $defs ' +
+    'allOf anyOf oneOf not if then else dependentSchemas prefixItems items contains properties patternProperties ' +
+    'additionalProperties propertyNames unevaluatedItems unevaluatedProperties ' +
+    'type enum const multipleOf maximum exclusiveMaximum minimum exclusiveMinimum maxLength minLength pattern ' +
+    'maxItems minItems uniqueItems maxContains minContains maxProperties minProperties required dependentRequired ' +
+    'title description default deprecated readOnly writeOnly examples format contentEncoding contentMediaType contentSchema').Split([char]' ')
+
+# Go's checkProfile: keywords nothing checks, and properties a publisher or form could not give well.
+function Invoke-LbfProfileCheck {
+    param([string]$Dir)
+    $prof = Get-LbfProfile $Dir
+    $target = $prof.Rules[$prof.Rules.Count - 1]
+    $doc = $target.Doc
+    $problems = New-Object System.Collections.Generic.List[string]
+    if ((Get-LbfJsonTypeName $doc) -ne 'object') { return @{ Profile = $prof; Problems = $problems } }
+    foreach ($p in (Get-LbfUnknownKeywords $doc '')) { $problems.Add($p) }
+    $props = Get-LbfObjectAt $doc 'properties'
+    $ap = Get-LbfObjectAt $props 'additionalProperty'
+    if ($null -ne $ap -and $ap.Contains('$ref') -and $ap['$ref'] -is [string] -and (Test-LbfSame $ap['$ref'] $script:RecordPointer)) {
+        $problems.Add("/properties/additionalProperty: the crate's additionalProperty holds schema.org PropertyValues, so `$defs/properties cannot check it; leave the `$ref out, as lbf checks `$defs/properties against the properties given")
+    }
+    $record = Get-LbfObjectAt (Get-LbfObjectAt $doc '$defs') 'properties'
+    $required = @()
+    if ($null -ne $record -and $record.Contains('required') -and (Get-LbfJsonTypeName $record['required']) -eq 'array') { $required = @($record['required']) }
+    $fields = Get-LbfObjectAt $record 'properties'
+    if ($null -eq $fields) { return @{ Profile = $prof; Problems = $problems } }
+    foreach ($name in (Get-LbfSortedUtf8 @($fields.Keys | ForEach-Object { [string]$_ }))) {
+        $field = Get-LbfObjectAt $fields $name
+        if ($null -eq $field) { $field = New-LbfOrdered }
+        $say = { param($text) $problems.Add("property $name$text") }
+        $type = $null
+        if ($field.Contains('type')) { $type = $field['type'] }
+        $none = { param($k) -not $field.Contains($k) -or $null -eq $field[$k] }
+        if ((& $none 'type') -and (& $none 'enum') -and (& $none 'const')) {
+            & $say ' has no type; give "string", "integer", "number" or "boolean", or a list of choices'
+        } elseif (-not (& $none 'type') -and -not ($type -is [string] -and (Test-LbfIn $type 'string', 'integer', 'number', 'boolean'))) {
+            & $say " has type $(Get-LbfExampleText $type -AsFloat), but a property's value is text, a number or true/false"
+        }
+        foreach ($want in @(@('title', 'a form shows as its label'), @('description', 'a form shows as help'), @('examples', 'a form shows as a placeholder'))) {
+            if (& $none $want[0]) { & $say " has no $($want[0]), which $($want[1])" }
+        }
+        $isRequired = $false
+        foreach ($q in $required) { if ($q -is [string] -and (Test-LbfSame $q $name)) { $isRequired = $true } }
+        if ($field.Contains('default') -and $isRequired) { & $say ' is required, so a default would answer for whoever publishes; leave it out' }
+        $hasCode = $field.Contains('x-unitCode')
+        $hasText = $field.Contains('x-unitText')
+        if ($hasCode) {
+            $code = $field['x-unitCode']
+            $s = ''
+            if ($code -is [string]) { $s = $code }
+            if (-not (Test-LbfProfileUrl $s -AllowFragment)) { & $say " has x-unitCode $(Get-LbfExampleText $code -AsFloat), but it must be a unit's URL, such as http://qudt.org/vocab/unit/NanoM" }
+        }
+        if ($hasCode -ne $hasText) { & $say ' gives only one of x-unitCode and x-unitText; give both, the unit''s URL and how people write it' }
+        $sch = $null
+        try { $sch = Get-LbfCompiledSchema $target.Compiler ($target.ID + $script:RecordPointer + '/properties/' + (ConvertTo-LbfPointerToken $name)) $false } catch { continue }
+        if ($field.Contains('examples') -and (Get-LbfJsonTypeName $field['examples']) -eq 'array') {
+            foreach ($ex in $field['examples']) {
+                if ($null -ne (Invoke-LbfSchemaValidate $sch $ex)) { & $say ": example $(Get-LbfExampleText $ex -AsFloat) does not meet the property's own rules" }
+            }
+        }
+    }
+    return @{ Profile = $prof; Problems = $problems }
+}
+
+function Get-LbfObjectAt {
+    param($Doc, [string]$Key)
+    if ($null -eq $Doc -or (Get-LbfJsonTypeName $Doc) -ne 'object' -or -not $Doc.Contains($Key)) { return $null }
+    $v = $Doc[$Key]
+    if ((Get-LbfJsonTypeName $v) -ne 'object') { return $null }
+    return , $v
+}
+
+# Go's unknownKeywords: keys of a schema that are not JSON Schema keywords, other than x- annotations, with the keyword each was likely meant to be.
+function Get-LbfUnknownKeywords {
+    param($S, [string]$At)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($k in (Get-LbfSortedUtf8 @($S.Keys | ForEach-Object { [string]$_ }))) {
+        $v = $S[$k]
+        if ($k.StartsWith('x-', [StringComparison]::Ordinal)) { continue }
+        if (-not ($script:SchemaKeywords -ccontains $k)) {
+            $where = $At
+            if ($where.Length -eq 0) { $where = '/' }
+            $msg = "${where}: $k is not a JSON Schema keyword, so nothing checks it"
+            $near = Get-LbfNearestKeyword $k
+            if ($near.Length -ne 0) { $msg += "; did you mean ${near}?" }
+            $out.Add($msg)
+        } elseif (Test-LbfIn $k 'not', 'if', 'then', 'else', 'contains', 'additionalProperties', 'propertyNames', 'unevaluatedItems', 'unevaluatedProperties', 'items', 'contentSchema') {
+            if ((Get-LbfJsonTypeName $v) -eq 'object') { $out.AddRange((Get-LbfUnknownKeywords $v "$At/$k")) }
+        } elseif (Test-LbfIn $k 'allOf', 'anyOf', 'oneOf', 'prefixItems') {
+            if ((Get-LbfJsonTypeName $v) -eq 'array') {
+                $i = 0
+                foreach ($item in $v) {
+                    if ((Get-LbfJsonTypeName $item) -eq 'object') { $out.AddRange((Get-LbfUnknownKeywords $item "$At/$k/$i")) }
+                    $i++
+                }
+            }
+        } elseif (Test-LbfIn $k '$defs', 'properties', 'patternProperties', 'dependentSchemas') {
+            if ((Get-LbfJsonTypeName $v) -eq 'object') {
+                foreach ($name in (Get-LbfSortedUtf8 @($v.Keys | ForEach-Object { [string]$_ }))) {
+                    if ((Get-LbfJsonTypeName $v[$name]) -eq 'object') { $out.AddRange((Get-LbfUnknownKeywords $v[$name] "$At/$k/$name")) }
+                }
+            }
+        }
+    }
+    return , $out
+}
+
+function Get-LbfNearestKeyword {
+    param([string]$Key)
+    $best = ''
+    $bestDist = 3
+    $a = $script:Utf8NoBom.GetBytes($Key.ToLowerInvariant())
+    foreach ($kw in $script:SchemaKeywords) {
+        $d = Get-LbfEditDistance $a ($script:Utf8NoBom.GetBytes($kw.ToLowerInvariant()))
+        if ($d -lt $bestDist) { $best = $kw; $bestDist = $d }
+    }
+    return $best
+}
+
+function Get-LbfEditDistance {
+    param([byte[]]$A, [byte[]]$B)
+    $prev = New-Object int[] ($B.Length + 1)
+    for ($j = 0; $j -le $B.Length; $j++) { $prev[$j] = $j }
+    for ($i = 1; $i -le $A.Length; $i++) {
+        $cur = New-Object int[] ($B.Length + 1)
+        $cur[0] = $i
+        for ($j = 1; $j -le $B.Length; $j++) {
+            $cost = 1
+            if ($A[$i - 1] -eq $B[$j - 1]) { $cost = 0 }
+            $cur[$j] = [Math]::Min([Math]::Min($prev[$j] + 1, $cur[$j - 1] + 1), $prev[$j - 1] + $cost)
+        }
+        $prev = $cur
+    }
+    return $prev[$B.Length]
 }
 
 # ---------- compiling schemas ----------
@@ -975,7 +1603,9 @@ function Test-LbfSchemaValue {
     if ($null -ne $S.Bool) {
         if ($S.Bool) { return $null }
         if ($Bool) { return $script:BoolErr }
-        return New-LbfSchemaErr 'false' $Loc $null
+        $x = New-LbfSchemaErr 'false' $Loc $null
+        $x.SU = $S.Loc
+        return $x
     }
     if ($S.Trivial) { return $null }
     if ($null -eq $U -and $S.HasUneval) { $U = New-LbfUneval $V $S $false }
@@ -991,13 +1621,13 @@ function Test-LbfSchemaValue {
         if (-not ($S.Types -ccontains $t)) {
             if (-not ($t -eq 'number' -and ($S.Types -ccontains 'integer') -and (Test-LbfIntegral (Get-LbfNumValue $V)))) {
                 if ($Bool) { return $script:BoolErr }
-                return New-LbfSchemaErr 'type' $Loc @{ Got = $t; Want = $S.Types }
+                return New-LbfSchemaErr 'type' $Loc @{ Got = $t; Want = $S.Types; SU = $S.Loc }
             }
         }
     }
     if ($S.HasConst -and -not (Test-LbfJsonEqual $V $S.Const)) {
         if ($Bool) { return $script:BoolErr }
-        return New-LbfSchemaErr 'const' $Loc @{ Want = $S.Const }
+        return New-LbfSchemaErr 'const' $Loc @{ Want = $S.Const; SU = $S.Loc }
     }
     if ($null -ne $S.Enum) {
         $matched = $false
@@ -1006,14 +1636,14 @@ function Test-LbfSchemaValue {
         }
         if (-not $matched) {
             if ($Bool) { return $script:BoolErr }
-            return New-LbfSchemaErr 'enum' $Loc @{ Want = $S.Enum }
+            return New-LbfSchemaErr 'enum' $Loc @{ Want = $S.Enum; SU = $S.Loc }
         }
     }
     if ($null -ne $S.Format -and $t -eq 'string') {
         $ferr = Test-LbfFormat $S.Format $V
         if ($null -ne $ferr) {
             if ($Bool) { return $script:BoolErr }
-            return New-LbfSchemaErr 'format' $Loc @{ Got = $V; Want = $S.Format; Err = $ferr }
+            return New-LbfSchemaErr 'format' $Loc @{ Got = $V; Want = $S.Format; Err = $ferr; SU = $S.Loc }
         }
     }
     $errors = $null
@@ -1056,8 +1686,9 @@ function Test-LbfSchemaValue {
     }
     if ($null -eq $errors -or $errors.Count -eq 0) { return $null }
     if ($Bool) { return $script:BoolErr }
+    foreach ($x in $errors) { if (-not $x.ContainsKey('SU')) { $x.SU = $S.Loc } }
     if ($errors.Count -eq 1) { return $errors[0] }
-    $g = New-LbfSchemaErr 'group' $Loc $null
+    $g = New-LbfSchemaErr 'group' $Loc @{ SU = $S.Loc }
     $g.C = $errors
     return $g
 }

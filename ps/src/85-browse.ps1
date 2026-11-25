@@ -318,7 +318,7 @@ function ConvertFrom-LbfBrowseCrate {
         $id = Get-LbfRefId $ref
         if (-not $graph.Contains($id)) { continue }
         $e = $graph[$id]
-        if (-not (Test-LbfIn 'File' (Get-LbfTypesOf $e))) { continue }
+        if (-not (Test-LbfIn 'File' (Get-LbfTypesOf $e)) -or (Test-LbfProfileFile $id)) { continue }
         $size = ConvertFrom-LbfGoScanInt (Format-LbfGoSprint (Get-LbfMapValue $e 'contentSize'))
         $f = New-LbfOrdered
         $f['path'] = $id
