@@ -1,5 +1,5 @@
 $script:Usage = @'
-lbf - land and retrieve datasets in the Azure bronze layer
+lbf - land and retrieve datasets in the lab's Azure storage
 
 Usage:
   lbf publish <path>    upload a dataset (alias: upload)

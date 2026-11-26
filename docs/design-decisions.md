@@ -63,11 +63,9 @@ and record a new decision here.
   refuses it. `lbf fetch --json` leaves out a name or description lbf filled
   in, so carrying it forward never passes off lbf's words as the publisher's.
 - **On Windows, lbf is `lbf.ps1`, a PowerShell port that must behave
-  byte for byte as the Go lbf does.** Imperial's Defender for Endpoint blocks
-  unsigned executables (its ransomware rule stopped `lbf.exe`), but not scripts
-  run by Microsoft's signed `powershell.exe`, so the same commands, flags,
-  messages, exit codes, crates and blobs come from a script that needs no
-  signature. The Go code stays the specification, and `conformance_*_test.go`
+  byte for byte as the Go lbf does.** Managed Windows machines at Imperial
+  blocked the unsigned `lbf.exe`, so the same commands, flags, messages, exit
+  codes, crates and blobs come from a script. The Go code stays the specification, and `conformance_*_test.go`
   runs both on the same input on Windows PowerShell 5.1, PowerShell 7 and Linux.
   The installer sets only the execution policy of the user's own account, and
   stops where Group Policy forbids unsigned scripts rather than work round it.

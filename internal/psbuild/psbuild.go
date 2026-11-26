@@ -81,7 +81,7 @@ func Build(root, version string) ([]byte, error) {
 
 var marker = regexp.MustCompile(`\{\{U\+[0-9A-F]+\}\}`)
 
-// A readable single-quoted here-string, since Defender's obfuscated-script rule distrusts long base64 strings.
+// A readable single-quoted here-string, since security scanners distrust long base64 strings.
 // Non-ASCII characters become {{U+XXXX}}, because Windows PowerShell 5.1 reads a script without a BOM as ANSI.
 func hereString(raw []byte) (string, error) {
 	s := string(raw)

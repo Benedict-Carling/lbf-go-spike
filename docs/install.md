@@ -14,11 +14,10 @@ straight away in that window and in new ones, in PowerShell and in Command
 Prompt alike. It replaces an `lbf.exe` an earlier install left there. Run it
 again to reinstall, even while lbf is running. Then run `lbf login`.
 
-On Windows lbf is a PowerShell script rather than an exe because Imperial's
-Defender blocks unsigned programs, and a script run by Windows' own PowerShell
-needs no signature. Typed in PowerShell, `lbf` runs `lbf.ps1` itself, so
-`$id = lbf new-id` and PowerShell's quoting work as for any command;
-Command Prompt runs `lbf.cmd`, which starts Windows PowerShell on `lbf.ps1`.
+On Windows lbf is a PowerShell script. Typed in PowerShell, `lbf` runs
+`lbf.ps1` itself, so `$id = lbf new-id` and PowerShell's quoting work as for
+any command; Command Prompt runs `lbf.cmd`, which starts Windows PowerShell on
+`lbf.ps1`.
 
 PowerShell runs scripts only if its execution policy allows them, and Windows
 ships refusing them. If nothing else has set it, the installer sets the policy
@@ -36,6 +35,7 @@ bash, zsh and fish startup files, the same way uv and rustup do, sharing their
 `env` script when they use the same folder. If the folder already holds an
 `env` or `env.fish` that is not such a script, the startup files are left
 alone. Open a new terminal afterwards. Set `LBF_NO_MODIFY_PATH=1` to leave
+startup files alone.
 
 ## What the installers check
 

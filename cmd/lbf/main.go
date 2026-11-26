@@ -19,7 +19,7 @@ import (
 	_ "golang.org/x/crypto/x509roots/fallback"
 )
 
-const usage = `lbf - land and retrieve datasets in the Azure bronze layer
+const usage = `lbf - land and retrieve datasets in the lab's Azure storage
 
 Usage:
   lbf publish <path>    upload a dataset (alias: upload)
